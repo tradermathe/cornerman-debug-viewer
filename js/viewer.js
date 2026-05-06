@@ -10,6 +10,9 @@ import { RULES } from "./rules/registry.js";
 const els = {
   videoFile:   document.getElementById("video-file"),
   poseFile:    document.getElementById("pose-file"),
+  cacheFolder: document.getElementById("cache-folder"),
+  cacheStatus: document.getElementById("cache-status"),
+  roundSel:    document.getElementById("round-select"),
   loadStatus:  document.getElementById("load-status"),
   pickerCard:  document.getElementById("picker-card"),
   viewer:      document.getElementById("viewer"),
@@ -27,6 +30,11 @@ const els = {
   meta:        document.getElementById("meta"),
 };
 
+// Cache index built from the folder picker:
+//   Map<videoBasename, Map<roundN, { npy: File, meta: File }>>
+// Survives across video picks within one page session.
+let cacheIndex = null;
+
 const state = {
   pose: null,
   videoUrl: null,
@@ -39,10 +47,89 @@ const state = {
 };
 
 // ── File loading ────────────────────────────────────────────────────────────
-els.videoFile.addEventListener("change", onPick);
-els.poseFile.addEventListener("change", onPick);
+els.cacheFolder.addEventListener("change", onCacheFolder);
+els.videoFile.addEventListener("change", onVideoPick);
+els.roundSel.addEventListener("change", onRoundPick);
+els.poseFile.addEventListener("change", onManualPose);
 
-function onPick() {
+// Folder picker: index every `<base>_yolo_r<N>.npy` and matching
+// `<base>_yolo_r<N>_meta.json`, ignoring `.bak.npy` backups.
+function onCacheFolder(e) {
+  const files = Array.from(e.target.files || []);
+  cacheIndex = new Map();
+  for (const f of files) {
+    if (f.name.endsWith(".bak.npy")) continue;
+    // Match either the npy or the _meta.json sibling.
+    const m = f.name.match(/^(.+?)_yolo_r(\d+)(_meta)?\.(npy|json)$/);
+    if (!m) continue;
+    const [, base, roundStr, isMeta, ext] = m;
+    const round = parseInt(roundStr);
+    if (ext === "json" && !isMeta) continue;  // some random json next door
+
+    if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
+    const rounds = cacheIndex.get(base);
+    if (!rounds.has(round)) rounds.set(round, {});
+    const slot = rounds.get(round);
+    if (ext === "npy")  slot.npy = f;
+    if (ext === "json") slot.meta = f;
+  }
+
+  // Drop incomplete pairs so we never offer a round we can't actually load.
+  for (const [base, rounds] of cacheIndex) {
+    for (const [round, pair] of rounds) {
+      if (!pair.npy || !pair.meta) rounds.delete(round);
+    }
+    if (rounds.size === 0) cacheIndex.delete(base);
+  }
+
+  const nVideos = cacheIndex.size;
+  const nRounds = [...cacheIndex.values()].reduce((s, r) => s + r.size, 0);
+  els.cacheStatus.textContent = nRounds
+    ? `Indexed ${nRounds} rounds across ${nVideos} videos.`
+    : "No matching `_yolo_r{N}.npy + _meta.json` pairs found in that folder.";
+
+  // Re-evaluate any already-picked video against the new index.
+  if (els.videoFile.files[0]) onVideoPick();
+}
+
+function onVideoPick() {
+  const v = els.videoFile.files[0];
+  if (!v) return;
+  if (!cacheIndex) {
+    els.loadStatus.textContent =
+      "Pick a cache folder above, or open the manual file picker.";
+    return;
+  }
+  const base = videoBasename(v.name);
+  const rounds = cacheIndex.get(base);
+  if (!rounds || rounds.size === 0) {
+    els.loadStatus.textContent =
+      `No cache match for "${base}". Try the manual picker.`;
+    populateRoundSelect(null);
+    return;
+  }
+  populateRoundSelect(rounds);
+  // Auto-load if there's exactly one round; otherwise wait for user to pick.
+  if (rounds.size === 1) {
+    const only = [...rounds.keys()][0];
+    els.roundSel.value = String(only);
+    loadFromIndex(v, rounds.get(only));
+  } else {
+    els.loadStatus.textContent =
+      `${rounds.size} rounds available — pick one.`;
+  }
+}
+
+function onRoundPick() {
+  const v = els.videoFile.files[0];
+  const r = parseInt(els.roundSel.value);
+  if (!v || isNaN(r)) return;
+  const base = videoBasename(v.name);
+  const pair = cacheIndex?.get(base)?.get(r);
+  if (pair) loadFromIndex(v, pair);
+}
+
+function onManualPose() {
   const v = els.videoFile.files[0];
   const ps = els.poseFile.files;
   const haveNpy  = Array.from(ps).some(f => f.name.endsWith(".npy"));
@@ -56,11 +143,20 @@ function onPick() {
       ? "" : `Still need: ${missing.join(", ")}`;
     return;
   }
-  els.loadStatus.textContent = `Loading ${v.name} + ${ps.length} pose file(s)…`;
-  // Pose loader needs video dimensions to de-normalise coords, so load video
-  // first, then read videoWidth/videoHeight, then load the cache.
-  loadVideo(v)
-    .then(() => loadPose(ps, {
+  loadFromFiles(v, ps);
+}
+
+function loadFromIndex(videoFile, pair) {
+  loadFromFiles(videoFile, [pair.npy, pair.meta]);
+}
+
+function loadFromFiles(videoFile, poseFiles) {
+  const names = Array.from(poseFiles).map(f => f.name).join(" + ");
+  els.loadStatus.textContent = `Loading ${videoFile.name} + ${names}…`;
+  // Pose loader needs the video's natural width/height to de-normalise
+  // the [0,1] coords in the .npy, so we wait for video metadata first.
+  loadVideo(videoFile)
+    .then(() => loadPose(poseFiles, {
       width: els.video.videoWidth,
       height: els.video.videoHeight,
     }))
@@ -69,6 +165,29 @@ function onPick() {
       console.error(err);
       els.loadStatus.textContent = `Error: ${err.message}`;
     });
+}
+
+function populateRoundSelect(rounds) {
+  els.roundSel.innerHTML = "";
+  if (!rounds || rounds.size === 0) {
+    els.roundSel.innerHTML = `<option value="">—</option>`;
+    els.roundSel.disabled = true;
+    return;
+  }
+  const sorted = [...rounds.keys()].sort((a, b) => a - b);
+  for (const r of sorted) {
+    const o = document.createElement("option");
+    o.value = String(r);
+    o.textContent = `r${r}`;
+    els.roundSel.appendChild(o);
+  }
+  els.roundSel.disabled = sorted.length < 2;
+}
+
+// Strip extension; the cache files were named after the source video so
+// `<videoBasename>` should be the prefix of `<videoBasename>_yolo_r0.npy`.
+function videoBasename(name) {
+  return name.replace(/\.[^.]+$/, "");
 }
 
 function loadVideo(file) {

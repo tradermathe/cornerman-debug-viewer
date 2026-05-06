@@ -8,15 +8,28 @@ rules engine, frame by frame.
 
 ## What it does
 
-Pick a video and the matching `.npy` + `_meta.json` from
-`~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/`. The viewer renders
-the video with a skeleton overlay and a side-panel "lens" that re-paints
-the overlay and surfaces metrics for one rule at a time. Add a new lens
-by dropping a file in [js/rules/](js/rules/) and registering it in
-[js/rules/registry.js](js/rules/registry.js).
+Pick the cache folder once per session, then for each round pick just
+the video — the viewer auto-matches the cache files by filename. (A
+manual multi-file picker is still available as a fallback.)
+
+The viewer renders the video with a skeleton overlay and a side-panel
+"lens" that re-paints the overlay and surfaces metrics for one rule at
+a time. Add a new lens by dropping a file in [js/rules/](js/rules/) and
+registering it in [js/rules/registry.js](js/rules/registry.js).
 
 Files stay on the user's machine — the page uses the browser File API,
 nothing is uploaded.
+
+## Workflow
+
+1. **Cache folder** — pick
+   `~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/` once. The viewer
+   indexes every `<base>_yolo_r<N>.npy + <base>_yolo_r<N>_meta.json`
+   pair (skipping `.bak.npy` backups) and reports the count.
+2. **Video** — pick an `.mp4`. If its basename matches an indexed video,
+   the viewer auto-loads the only round, or shows a round dropdown when
+   multiple rounds exist.
+3. **Lens** — switch the right-side dropdown to "Guard drop" (etc).
 
 ## Input format
 

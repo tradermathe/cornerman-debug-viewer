@@ -52,14 +52,40 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
-.picker-row label {
+.picker-row label,
+.folder-pick {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
   color: var(--fg-muted);
 }
-.picker-row input[type="file"] {
+.folder-pick { margin-bottom: 14px; }
+.picker-row input[type="file"],
+.folder-pick input[type="file"],
+.picker-row select {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+.picker-row select:disabled { opacity: 0.5; }
+
+.manual-fallback {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.manual-fallback summary { cursor: pointer; padding: 4px 0; }
+.manual-fallback label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.manual-fallback input[type="file"] {
   background: var(--bg-elev);
   color: var(--fg);
   border: 1px solid var(--border);
