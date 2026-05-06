@@ -13,9 +13,11 @@
 import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
 import { ForearmProjectionRule } from "./forearm_projection.js";
+import { EngineCompareRule } from "./engine_compare.js";
 
 export const RULES = [
   OverviewRule,
   GuardDropRule,
   ForearmProjectionRule,
+  EngineCompareRule,
 ];

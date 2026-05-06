@@ -57,46 +57,60 @@ els.videoFile.addEventListener("change", onVideoPick);
 els.roundSel.addEventListener("change", onRoundPick);
 els.poseFile.addEventListener("change", onManualPose);
 
-// Folder picker: index every `<base>_yolo_r<N>.npy` and matching
-// `<base>_yolo_r<N>_meta.json`, ignoring `.bak.npy` backups.
+// Folder picker: index every `<base>_<engine>_r<N>.npy` and matching
+// `<base>_<engine>_r<N>_meta.json`. `engine` is `yolo` or `vision`. Each
+// round entry tracks both engines independently so the viewer can offer a
+// YOLO-vs-Vision compare lens whenever both are present.
 function onCacheFolder(e) {
   const files = Array.from(e.target.files || []);
   cacheIndex = new Map();
   for (const f of files) {
     if (f.name.endsWith(".bak.npy")) continue;
-    // Match either the npy or the _meta.json sibling.
-    const m = f.name.match(/^(.+?)_yolo_r(\d+)(_meta)?\.(npy|json)$/);
+    const m = f.name.match(/^(.+?)_(yolo|vision)_r(\d+)(_meta)?\.(npy|json)$/);
     if (!m) continue;
-    const [, base, roundStr, isMeta, ext] = m;
+    const [, base, engine, roundStr, isMeta, ext] = m;
     const round = parseInt(roundStr);
     if (ext === "json" && !isMeta) continue;  // some random json next door
 
     if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
     const rounds = cacheIndex.get(base);
     if (!rounds.has(round)) rounds.set(round, {});
-    const slot = rounds.get(round);
-    if (ext === "npy")  slot.npy = f;
-    if (ext === "json") slot.meta = f;
+    const roundSlot = rounds.get(round);
+    if (!roundSlot[engine]) roundSlot[engine] = {};
+    const engineSlot = roundSlot[engine];
+    if (ext === "npy")  engineSlot.npy = f;
+    if (ext === "json") engineSlot.meta = f;
   }
 
-  // Drop incomplete pairs so we never offer a round we can't actually load.
+  // Drop incomplete pairs (need both .npy + .json per engine) so we never
+  // offer something we can't actually load. A round is kept if at least one
+  // engine has a complete pair.
   for (const [base, rounds] of cacheIndex) {
-    for (const [round, pair] of rounds) {
-      if (!pair.npy || !pair.meta) rounds.delete(round);
+    for (const [round, slot] of rounds) {
+      for (const eng of ["yolo", "vision"]) {
+        if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
+      }
+      if (!slot.yolo && !slot.vision) rounds.delete(round);
     }
     if (rounds.size === 0) cacheIndex.delete(base);
   }
 
   const nVideos = cacheIndex.size;
-  const nRounds = [...cacheIndex.values()].reduce((s, r) => s + r.size, 0);
+  let nRounds = 0, nVision = 0;
+  for (const rounds of cacheIndex.values()) {
+    for (const slot of rounds.values()) {
+      nRounds++;
+      if (slot.vision) nVision++;
+    }
+  }
   if (nRounds) {
+    const visionNote = nVision ? `, ${nVision} with Apple Vision` : "";
     els.cacheStatus.textContent =
-      `— ${nRounds} rounds indexed across ${nVideos} videos`;
-    // Collapse the cache section so the video picker is the prominent thing.
+      `— ${nRounds} rounds across ${nVideos} videos${visionNote}`;
     if (els.cacheSection) els.cacheSection.open = false;
   } else {
     els.cacheStatus.textContent =
-      "— no `_yolo_r{N}.npy + _meta.json` pairs found in that folder";
+      "— no `_<engine>_r{N}.npy + _meta.json` pairs found in that folder";
   }
 
   // Re-evaluate any already-picked video against the new index.
@@ -155,21 +169,48 @@ function onManualPose() {
   loadFromFiles(v, ps);
 }
 
-function loadFromIndex(videoFile, pair) {
-  loadFromFiles(videoFile, [pair.npy, pair.meta]);
+function loadFromIndex(videoFile, slot) {
+  // `slot` may have `yolo` and/or `vision`. Primary pose is YOLO when
+  // present (matches the rules engine), Vision is loaded as a sibling
+  // for the compare lens. If only one engine is present, that one is
+  // primary and there's no comparison.
+  const primary = slot.yolo || slot.vision;
+  const secondary = (slot.yolo && slot.vision) ? slot.vision : null;
+  const status =
+    `Loading ${videoFile.name}${secondary ? " (yolo + vision)" : ""}…`;
+  els.loadStatus.textContent = status;
+
+  loadVideo(videoFile)
+    .then(async () => {
+      const size = { width: els.video.videoWidth, height: els.video.videoHeight };
+      const posePrimary = await loadPose([primary.npy, primary.meta], size);
+      let poseSecondary = null;
+      if (secondary) {
+        poseSecondary = await loadPose([secondary.npy, secondary.meta], size);
+        // Stamp engine name so the lens can label them correctly even if the
+        // file source said "yolo_pose" for both (loader currently hard-codes
+        // engine name).
+        poseSecondary.engine = "apple_vision_2d";
+      }
+      posePrimary.engine = slot.yolo ? "yolo_pose" : "apple_vision_2d";
+      start(posePrimary, poseSecondary);
+    })
+    .catch(err => {
+      console.error(err);
+      els.loadStatus.textContent = `Error: ${err.message}`;
+    });
 }
 
 function loadFromFiles(videoFile, poseFiles) {
+  // Manual file picker — single engine only.
   const names = Array.from(poseFiles).map(f => f.name).join(" + ");
   els.loadStatus.textContent = `Loading ${videoFile.name} + ${names}…`;
-  // Pose loader needs the video's natural width/height to de-normalise
-  // the [0,1] coords in the .npy, so we wait for video metadata first.
   loadVideo(videoFile)
     .then(() => loadPose(poseFiles, {
       width: els.video.videoWidth,
       height: els.video.videoHeight,
     }))
-    .then(start)
+    .then(p => start(p, null))
     .catch(err => {
       console.error(err);
       els.loadStatus.textContent = `Error: ${err.message}`;
@@ -213,8 +254,9 @@ function loadVideo(file) {
   });
 }
 
-function start(pose) {
+function start(pose, poseSecondary = null) {
   state.pose = pose;
+  state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;

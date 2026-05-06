@@ -1,0 +1,220 @@
+// Engine compare lens — overlays YOLO and Apple Vision skeletons on the
+// same frame so we can eyeball where they disagree, especially around the
+// wrists when gloves are on.
+//
+// Requires the cache folder to contain BOTH `<base>_yolo_r{N}.*` and
+// `<base>_vision_r{N}.*` for the loaded round. If only one engine is
+// present, the lens shows a "no comparison data" message and falls back
+// to drawing just the primary skeleton.
+//
+// Visual encoding:
+//   YOLO   — orange/yellow joints + warm bones
+//   Vision — cyan/green joints + cool bones
+//   wrists drawn larger so the divergence is easy to read
+
+import { J } from "../skeleton.js";
+
+const Y_BONE = "rgba(255,170,80,0.55)";   // YOLO bones
+const V_BONE = "rgba(110,200,255,0.55)";  // Vision bones
+const Y_WRIST = "#ff8a3c";
+const V_WRIST = "#5fd1ff";
+const HIGHLIGHT = new Set([J.NOSE, J.L_WRIST, J.R_WRIST, J.L_ELBOW, J.R_ELBOW]);
+
+let host;
+
+export const EngineCompareRule = {
+  id: "engine_compare",
+  label: "Engine compare (YOLO vs Vision)",
+
+  // Suppress the base skeleton renderer — we draw both ourselves.
+  skeletonStyle() {
+    return { boneColor: "rgba(0,0,0,0)", jointRadius: 0, minConf: Infinity };
+  },
+
+  mount(_host, state) {
+    host = _host;
+    const hasBoth = !!state.poseSecondary;
+    host.innerHTML = `
+      <h2>Engine compare (YOLO vs Vision)</h2>
+      ${hasBoth ? "" : `
+        <p class="hint" style="color:var(--bad)">
+          No second engine for this round. Make sure the cache folder
+          contains both <code>&lt;base&gt;_yolo_r{N}.*</code> and
+          <code>&lt;base&gt;_vision_r{N}.*</code> files.
+        </p>
+      `}
+      <p class="hint">
+        <span style="color:${Y_WRIST}">orange/yellow</span> = YOLO,
+        <span style="color:${V_WRIST}">cyan/green</span> = Apple Vision.
+        Wrists drawn extra-large so disagreement reads at a glance.
+      </p>
+
+      <h3>Per-frame Δ (raw px)</h3>
+      <p class="hint">Distance between YOLO and Vision detection of each joint at this frame.</p>
+      <div class="metric-grid">
+        <div class="metric"><div class="metric-label">L wrist</div><div class="metric-val" id="ec-l-wrist">—</div></div>
+        <div class="metric"><div class="metric-label">R wrist</div><div class="metric-val" id="ec-r-wrist">—</div></div>
+        <div class="metric"><div class="metric-label">Nose</div><div class="metric-val" id="ec-nose">—</div></div>
+        <div class="metric"><div class="metric-label">L elbow</div><div class="metric-val" id="ec-l-elbow">—</div></div>
+        <div class="metric"><div class="metric-label">R elbow</div><div class="metric-val" id="ec-r-elbow">—</div></div>
+      </div>
+
+      <h3>Wrist y over time</h3>
+      <p class="hint">Both engines plotted side-by-side. Spikes that appear in
+      one but not the other are the model disagreeing — usually means a glove
+      anchor jump for YOLO.</p>
+      <canvas id="ec-trace-l" width="320" height="100"></canvas>
+      <div class="metric-sub" style="text-align:center">L wrist y</div>
+      <canvas id="ec-trace-r" width="320" height="100"></canvas>
+      <div class="metric-sub" style="text-align:center">R wrist y</div>
+    `;
+  },
+
+  draw(ctx, state) {
+    drawEngineSkeleton(ctx, state.pose, state.frame, {
+      boneColor: Y_BONE, boneWidth: 2,
+      jointColor: Y_WRIST, jointRadius: 4,
+      wristColor: Y_WRIST, wristRadius: 9,
+    });
+    if (state.poseSecondary) {
+      drawEngineSkeleton(ctx, state.poseSecondary, state.frame, {
+        boneColor: V_BONE, boneWidth: 2,
+        jointColor: V_WRIST, jointRadius: 4,
+        wristColor: V_WRIST, wristRadius: 9,
+      });
+    }
+  },
+
+  update(state) {
+    const f = state.frame;
+    const a = state.pose;
+    const b = state.poseSecondary;
+    const setJointDiff = (id, j) => {
+      if (!b) return setText(id, "—");
+      const ax = a.skeleton[(f * 17 + j) * 2];
+      const ay = a.skeleton[(f * 17 + j) * 2 + 1];
+      const ac = a.conf[f * 17 + j];
+      const bx = b.skeleton[(f * 17 + j) * 2];
+      const by = b.skeleton[(f * 17 + j) * 2 + 1];
+      const bc = b.conf[f * 17 + j];
+      if (ac < 0.05 || bc < 0.05) {
+        setText(id, "low conf");
+        return;
+      }
+      const d = Math.hypot(ax - bx, ay - by);
+      setText(id, `${d.toFixed(0)} px`);
+    };
+    setJointDiff("ec-l-wrist", J.L_WRIST);
+    setJointDiff("ec-r-wrist", J.R_WRIST);
+    setJointDiff("ec-nose",    J.NOSE);
+    setJointDiff("ec-l-elbow", J.L_ELBOW);
+    setJointDiff("ec-r-elbow", J.R_ELBOW);
+
+    if (b) {
+      drawWristTrace(host.querySelector("#ec-trace-l"), a, b, J.L_WRIST, f);
+      drawWristTrace(host.querySelector("#ec-trace-r"), a, b, J.R_WRIST, f);
+    }
+  },
+};
+
+// Draw a single engine's skeleton with custom colours. Largely a stripped-down
+// fork of skeleton.js drawSkeleton so we can colour everything one engine at a
+// time without fighting the highlight-set logic.
+function drawEngineSkeleton(ctx, pose, frame, style) {
+  const EDGES = [
+    [5,7],[7,9],[6,8],[8,10],
+    [5,6],[5,11],[6,12],[11,12],
+    [11,13],[13,15],[12,14],[14,16],
+    [0,1],[0,2],[1,3],[2,4],
+  ];
+  ctx.lineWidth = style.boneWidth;
+  ctx.strokeStyle = style.boneColor;
+  for (const [a, b] of EDGES) {
+    const ca = pose.conf[frame * 17 + a];
+    const cb = pose.conf[frame * 17 + b];
+    if (ca < 0.05 || cb < 0.05) continue;
+    const ax = pose.skeleton[(frame * 17 + a) * 2];
+    const ay = pose.skeleton[(frame * 17 + a) * 2 + 1];
+    const bx = pose.skeleton[(frame * 17 + b) * 2];
+    const by = pose.skeleton[(frame * 17 + b) * 2 + 1];
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+  }
+  for (let j = 0; j < 17; j++) {
+    const c = pose.conf[frame * 17 + j];
+    if (c < 0.05) continue;
+    const x = pose.skeleton[(frame * 17 + j) * 2];
+    const y = pose.skeleton[(frame * 17 + j) * 2 + 1];
+    const isWrist = j === J.L_WRIST || j === J.R_WRIST;
+    const isHi = HIGHLIGHT.has(j);
+    const r = isWrist ? style.wristRadius : (isHi ? style.jointRadius * 1.5 : style.jointRadius);
+    ctx.fillStyle = isWrist ? style.wristColor : style.jointColor;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    if (isWrist) {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(0,0,0,0.65)";
+      ctx.stroke();
+    }
+  }
+}
+
+function drawWristTrace(canvas, a, b, jointIdx, frame) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const N = a.n_frames;
+  const stride = Math.max(1, Math.floor(N / W));
+
+  // Autoscale across both engines.
+  let yMin = Infinity, yMax = -Infinity;
+  const sample = (p) => {
+    for (let f = 0; f < N; f += stride) {
+      const c = p.conf[f * 17 + jointIdx];
+      if (c < 0.2) continue;
+      const y = p.skeleton[(f * 17 + jointIdx) * 2 + 1];
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  };
+  sample(a); sample(b);
+  if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+
+  const ymap = y => H - ((y - yMin) / (yMax - yMin)) * (H - 4) - 2;
+  const xmap = f => (f / (N - 1)) * (W - 2) + 1;
+
+  const drawSeries = (p, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    let started = false;
+    for (let f = 0; f < N; f += stride) {
+      const c = p.conf[f * 17 + jointIdx];
+      const y = p.skeleton[(f * 17 + jointIdx) * 2 + 1];
+      if (c < 0.2) { started = false; continue; }
+      const px = xmap(f), py = ymap(y);
+      if (!started) { ctx.moveTo(px, py); started = true; }
+      else            ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  };
+  drawSeries(a, Y_WRIST);
+  drawSeries(b, V_WRIST);
+
+  ctx.strokeStyle = "rgba(255,255,255,0.7)";
+  ctx.lineWidth = 1;
+  const x = xmap(frame);
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, H);
+  ctx.stroke();
+}
+
+function setText(id, value) {
+  const el = host?.querySelector("#" + id);
+  if (el) el.textContent = value;
+}
