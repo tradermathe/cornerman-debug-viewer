@@ -1,0 +1,297 @@
+:root {
+  --bg: #0e1014;
+  --bg-card: #161a21;
+  --bg-elev: #1d222b;
+  --fg: #e6e9ef;
+  --fg-muted: #8a93a3;
+  --fg-dim: #5b6473;
+  --accent: #7ec8ff;
+  --good: #5fd97a;
+  --bad: #e85a5a;
+  --border: #262c37;
+  --border-soft: #1f242d;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif;
+}
+
+header {
+  padding: 22px 28px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
+
+.card {
+  margin: 20px 28px;
+  padding: 20px 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: opacity 0.25s, max-height 0.25s, padding 0.25s, margin 0.25s;
+}
+.card.collapsed {
+  opacity: 0;
+  max-height: 0;
+  padding: 0 22px;
+  margin: 0 28px;
+  overflow: hidden;
+  border-color: transparent;
+}
+.card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+
+.picker-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.picker-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.picker-row input[type="file"] {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.hint {
+  color: var(--fg-muted);
+  font-size: 12px;
+  margin: 12px 0 0;
+}
+.hint code {
+  background: var(--bg-elev);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.status {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 12px;
+  min-height: 16px;
+}
+
+/* ── Viewer layout ──────────────────────────────────────────────────────── */
+#viewer {
+  padding: 4px 28px 32px;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  gap: 22px;
+  align-items: start;
+}
+
+#stage {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.video-wrap {
+  position: relative;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  /* Keep the natural aspect ratio of the video — set via JS once known. */
+}
+.video-wrap video,
+.video-wrap canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.video-wrap canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.controls button,
+.controls select {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.controls button:hover { border-color: #3a4250; }
+.controls #scrubber {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+#frame-label {
+  margin-top: 8px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+}
+.muted { color: var(--fg-muted); }
+.small { font-size: 11px; }
+
+/* ── Side panel ────────────────────────────────────────────────────────── */
+#side {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.rule-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 12px;
+}
+.rule-pick span { color: var(--fg-muted); font-size: 12px; }
+.rule-pick select {
+  flex: 1;
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+#rule-panel h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+#rule-panel h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 18px 0 8px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.metric {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.metric-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.metric-val {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 16px;
+  margin-top: 2px;
+}
+.metric-sub {
+  font-size: 11px;
+  margin-top: 4px;
+}
+.good { color: var(--good); }
+.bad  { color: var(--bad); }
+
+#trace-canvas, #conf-canvas {
+  width: 100%;
+  height: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.slider output {
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", monospace;
+}
+
+.joint-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.joint-table th, .joint-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+}
+.joint-table th {
+  color: var(--fg-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+.joint-table td.num {
+  font-family: ui-monospace, "SF Mono", monospace;
+  text-align: right;
+}
+
+.shortcuts {
+  margin-top: 18px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.shortcuts summary { cursor: pointer; }
+.shortcuts ul { padding-left: 18px; margin: 6px 0 0; }
+.shortcuts kbd {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+}
+
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: 1fr; }
+  #side { position: static; max-height: none; }
+}
