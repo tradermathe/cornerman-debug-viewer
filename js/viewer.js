@@ -315,14 +315,51 @@ function seekToFrame(f) {
 }
 
 els.video.addEventListener("seeked", redraw);
-els.video.addEventListener("timeupdate", () => {
-  if (els.video.paused) return;
-  const f = Math.floor((els.video.currentTime - state.start_sec) * state.fps);
+
+// During playback `timeupdate` only fires ~4–66 Hz and isn't aligned with
+// rendered frames, so the skeleton drifts visibly. requestVideoFrameCallback
+// fires once per displayed frame with the exact mediaTime — frame-accurate.
+// Falls back to requestAnimationFrame polling on browsers without rVFC.
+const hasRvfc = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+let playbackHandle = null;
+
+function syncFromVideoTime(t_video) {
+  const f = Math.floor((t_video - state.start_sec) * state.fps);
   if (f !== state.frame) {
     state.frame = Math.max(0, Math.min(f, state.n_frames - 1));
     els.scrubber.value = state.frame;
     redraw();
   }
+}
+
+function rvfcTick(_now, metadata) {
+  syncFromVideoTime(metadata.mediaTime);
+  if (!els.video.paused) {
+    playbackHandle = els.video.requestVideoFrameCallback(rvfcTick);
+  }
+}
+
+function rafTick() {
+  if (els.video.paused) { playbackHandle = null; return; }
+  syncFromVideoTime(els.video.currentTime);
+  playbackHandle = requestAnimationFrame(rafTick);
+}
+
+els.video.addEventListener("play", () => {
+  if (hasRvfc) {
+    playbackHandle = els.video.requestVideoFrameCallback(rvfcTick);
+  } else {
+    playbackHandle = requestAnimationFrame(rafTick);
+  }
+});
+els.video.addEventListener("pause", () => {
+  if (playbackHandle == null) return;
+  if (hasRvfc && els.video.cancelVideoFrameCallback) {
+    els.video.cancelVideoFrameCallback(playbackHandle);
+  } else {
+    cancelAnimationFrame(playbackHandle);
+  }
+  playbackHandle = null;
 });
 
 function togglePlay() {
