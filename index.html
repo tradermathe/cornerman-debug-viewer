@@ -72,6 +72,11 @@
           </select>
           <input type="range" id="scrubber" min="0" max="0" value="0">
         </div>
+        <video id="thumb-video" preload="auto" playsinline muted></video>
+        <div id="thumb-tooltip" hidden>
+          <canvas id="thumb-canvas" width="240" height="135"></canvas>
+          <div id="thumb-label" class="muted small"></div>
+        </div>
         <div id="frame-label" class="muted"></div>
         <div id="meta" class="muted small"></div>
       </div>

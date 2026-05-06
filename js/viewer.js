@@ -29,6 +29,10 @@ const els = {
   ruleSel:     document.getElementById("rule-select"),
   ruleHost:    document.getElementById("rule-panel"),
   meta:        document.getElementById("meta"),
+  thumbVideo:  document.getElementById("thumb-video"),
+  thumbTip:    document.getElementById("thumb-tooltip"),
+  thumbCanvas: document.getElementById("thumb-canvas"),
+  thumbLabel:  document.getElementById("thumb-label"),
 };
 
 // Cache index built from the folder picker:
@@ -201,6 +205,9 @@ function loadVideo(file) {
     state.videoUrl = URL.createObjectURL(file);
     state.videoFileName = file.name;
     els.video.src = state.videoUrl;
+    // The thumb-video shares the source so we can seek-and-snapshot it on
+    // scrubber hover without disturbing the main playback.
+    els.thumbVideo.src = state.videoUrl;
     els.video.onloadedmetadata = () => resolve();
     els.video.onerror = () => reject(new Error("Video failed to load"));
   });
@@ -369,6 +376,87 @@ function togglePlay() {
 
 els.video.addEventListener("play",  () => els.playPause.textContent = "⏸");
 els.video.addEventListener("pause", () => els.playPause.textContent = "▶");
+
+// ── Scrubber hover thumbnail ────────────────────────────────────────────────
+// Hovering the scrubber should preview the frame at that timeline position
+// without disturbing main playback. We seek a hidden duplicate of the video
+// (els.thumbVideo) and draw its current frame + the skeleton at that frame
+// into a small canvas tooltip near the cursor.
+//
+// mousemove fires far faster than the video can seek, so we keep only the
+// latest target frame. When a seek finishes, if the target moved we kick off
+// another seek.
+let thumbTarget = null;        // frame the user is currently hovering
+let thumbDrawn = -1;           // frame currently visible in the canvas
+let thumbSeekInFlight = false;
+
+els.scrubber.addEventListener("mousemove", e => {
+  if (!state.pose) return;
+  const rect = els.scrubber.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const f = Math.floor(ratio * (state.n_frames - 1));
+  thumbTarget = f;
+  positionThumb(e.clientX, rect.top);
+  els.thumbTip.hidden = false;
+  // If the requested frame is already drawn, skip the seek.
+  if (f === thumbDrawn) return;
+  if (!thumbSeekInFlight) seekThumb();
+});
+
+els.scrubber.addEventListener("mouseleave", () => {
+  els.thumbTip.hidden = true;
+  thumbTarget = null;
+});
+
+function seekThumb() {
+  if (thumbTarget == null || !els.thumbVideo.src) return;
+  const target = thumbTarget;
+  thumbSeekInFlight = true;
+  els.thumbVideo.currentTime = state.start_sec + (target + 0.5) / state.fps;
+  els.thumbVideo.onseeked = () => {
+    drawThumb(target);
+    thumbDrawn = target;
+    thumbSeekInFlight = false;
+    // If the user moved while we were seeking, chase the new target.
+    if (thumbTarget != null && thumbTarget !== target) seekThumb();
+  };
+}
+
+function drawThumb(frame) {
+  const ctx = els.thumbCanvas.getContext("2d");
+  const W = els.thumbCanvas.width, H = els.thumbCanvas.height;
+  const vw = els.thumbVideo.videoWidth || state.pose.width;
+  const vh = els.thumbVideo.videoHeight || state.pose.height;
+
+  // Letterbox the frame inside the canvas.
+  const scale = Math.min(W / vw, H / vh);
+  const dw = vw * scale, dh = vh * scale;
+  const dx = (W - dw) / 2, dy = (H - dh) / 2;
+
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(els.thumbVideo, dx, dy, dw, dh);
+
+  // Skeleton at the hovered frame, scaled to match the letterboxed video.
+  ctx.save();
+  ctx.translate(dx, dy);
+  ctx.scale(scale, scale);
+  drawSkeleton(ctx, state.pose, frame, state.rule?.skeletonStyle?.(state) || {});
+  ctx.restore();
+
+  els.thumbLabel.textContent =
+    `f${frame}  ·  t=${(state.start_sec + frame / state.fps).toFixed(2)}s`;
+}
+
+function positionThumb(cursorX, scrubberTop) {
+  const tip = els.thumbTip;
+  const tw = tip.offsetWidth || 250;
+  const th = tip.offsetHeight || 160;
+  const left = Math.min(window.innerWidth - tw - 8, Math.max(8, cursorX - tw / 2));
+  const top = Math.max(8, scrubberTop - th - 10);
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
 
 function redraw() {
   if (!state.pose) return;

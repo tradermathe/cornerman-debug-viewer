@@ -176,6 +176,39 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   accent-color: var(--accent);
 }
 
+/* Hidden video used to grab thumbnails on scrubber hover. Position
+   offscreen rather than `display: none` so the browser still decodes. */
+#thumb-video {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+#thumb-tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 100;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+#thumb-canvas {
+  display: block;
+  background: #000;
+  border-radius: 4px;
+}
+#thumb-label {
+  text-align: center;
+  margin-top: 4px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+}
+
 #frame-label {
   margin-top: 8px;
   font-family: ui-monospace, "SF Mono", monospace;
