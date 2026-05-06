@@ -116,15 +116,13 @@ function onVideoPick() {
     return;
   }
   populateRoundSelect(rounds);
-  // Auto-load if there's exactly one round; otherwise wait for user to pick.
-  if (rounds.size === 1) {
-    const only = [...rounds.keys()][0];
-    els.roundSel.value = String(only);
-    loadFromIndex(v, rounds.get(only));
-  } else {
-    els.loadStatus.textContent =
-      `${rounds.size} rounds available — pick one.`;
-  }
+  // Always auto-load the first round. (Previously this branch waited for
+  // a manual round pick, but the dropdown defaulted to r0 — so clicking
+  // r0 didn't fire `change` and nothing happened until you picked r1
+  // first.) The dropdown stays interactive so you can switch.
+  const first = [...rounds.keys()].sort((a, b) => a - b)[0];
+  els.roundSel.value = String(first);
+  loadFromIndex(v, rounds.get(first));
 }
 
 function onRoundPick() {
