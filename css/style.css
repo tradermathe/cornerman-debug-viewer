@@ -140,13 +140,23 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   background: #000;
   border-radius: 6px;
   overflow: hidden;
-  /* Keep the natural aspect ratio of the video — set via JS once known. */
+  /* `--video-ratio` is set from JS once the video metadata loads
+     (= videoWidth / videoHeight). Without it (e.g. before the first
+     load) we fall back to 16:9 so the box still has a reasonable
+     placeholder shape. The aspect-ratio + max-height combo caps
+     portrait videos at 75vh while letting landscape videos fill the
+     stage width as before. */
+  aspect-ratio: var(--video-ratio, 16 / 9);
+  max-height: 75vh;
+  width: 100%;
+  max-width: calc(75vh * var(--video-ratio, 16 / 9));
+  margin: 0 auto;
 }
 .video-wrap video,
 .video-wrap canvas {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
 }
 .video-wrap canvas {
   position: absolute;

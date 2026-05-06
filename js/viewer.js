@@ -353,8 +353,15 @@ function start(pose, poseSecondary = null) {
 function fitCanvasToVideo() {
   // Canvas internal resolution = video native resolution, so we can draw using
   // raw skeleton pixel coords. CSS sizes both elements together.
-  els.canvas.width = els.video.videoWidth || state.pose.width;
-  els.canvas.height = els.video.videoHeight || state.pose.height;
+  const w = els.video.videoWidth || state.pose?.width || 16;
+  const h = els.video.videoHeight || state.pose?.height || 9;
+  els.canvas.width = w;
+  els.canvas.height = h;
+  // Tell the .video-wrap CSS the aspect ratio so portrait videos don't
+  // explode vertically — the wrap caps at 75vh and uses this ratio to
+  // pick a sane width.
+  const wrap = document.querySelector(".video-wrap");
+  if (wrap) wrap.style.setProperty("--video-ratio", `${w} / ${h}`);
 }
 
 window.addEventListener("resize", () => {
