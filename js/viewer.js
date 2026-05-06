@@ -8,13 +8,14 @@ import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 
 const els = {
-  videoFile:   document.getElementById("video-file"),
-  poseFile:    document.getElementById("pose-file"),
-  cacheFolder: document.getElementById("cache-folder"),
-  cacheStatus: document.getElementById("cache-status"),
-  roundSel:    document.getElementById("round-select"),
-  loadStatus:  document.getElementById("load-status"),
-  pickerCard:  document.getElementById("picker-card"),
+  videoFile:    document.getElementById("video-file"),
+  poseFile:     document.getElementById("pose-file"),
+  cacheFolder:  document.getElementById("cache-folder"),
+  cacheStatus:  document.getElementById("cache-status"),
+  cacheSection: document.getElementById("cache-section"),
+  roundSel:     document.getElementById("round-select"),
+  loadStatus:   document.getElementById("load-status"),
+  pickerCard:   document.getElementById("picker-card"),
   viewer:      document.getElementById("viewer"),
   video:       document.getElementById("video"),
   canvas:      document.getElementById("overlay"),
@@ -84,9 +85,15 @@ function onCacheFolder(e) {
 
   const nVideos = cacheIndex.size;
   const nRounds = [...cacheIndex.values()].reduce((s, r) => s + r.size, 0);
-  els.cacheStatus.textContent = nRounds
-    ? `Indexed ${nRounds} rounds across ${nVideos} videos.`
-    : "No matching `_yolo_r{N}.npy + _meta.json` pairs found in that folder.";
+  if (nRounds) {
+    els.cacheStatus.textContent =
+      `— ${nRounds} rounds indexed across ${nVideos} videos`;
+    // Collapse the cache section so the video picker is the prominent thing.
+    if (els.cacheSection) els.cacheSection.open = false;
+  } else {
+    els.cacheStatus.textContent =
+      "— no `_yolo_r{N}.npy + _meta.json` pairs found in that folder";
+  }
 
   // Re-evaluate any already-picked video against the new index.
   if (els.videoFile.files[0]) onVideoPick();
@@ -205,9 +212,10 @@ function start(pose) {
   state.pose = pose;
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
+  state.start_sec = pose.start_sec || 0;
   state.frame = 0;
 
-  els.pickerCard.classList.add("collapsed");
+  els.pickerCard.classList.add("loaded");
   els.viewer.hidden = false;
   els.scrubber.max = pose.n_frames - 1;
   els.scrubber.value = 0;
@@ -217,15 +225,16 @@ function start(pose) {
   populateRuleSelect();
   setRule(els.ruleSel.value);
 
-  // Mismatch warning — common when the user picks a clipped cache against
-  // the full source video, or vice versa.
-  const vidFrames = Math.round(els.video.duration * pose.fps);
-  let metaText = `${pose.engine} · ${pose.width}×${pose.height} · ` +
-                 `${pose.fps.toFixed(1)} fps · ${pose.n_frames} frames`;
-  if (Math.abs(vidFrames - pose.n_frames) > 5) {
-    metaText += ` · ⚠ video has ~${vidFrames} frames (mismatch)`;
-  }
-  els.meta.textContent = metaText;
+  // Show the cache's clip range inside the source video. With start_sec
+  // applied (below) this is informational, not an error.
+  const startSec = state.start_sec;
+  const endSec = startSec + pose.n_frames / pose.fps;
+  const clipRange = startSec || endSec !== els.video.duration
+    ? ` · clip ${startSec.toFixed(1)}–${endSec.toFixed(1)}s of ${els.video.duration.toFixed(1)}s video`
+    : "";
+  els.meta.textContent =
+    `${pose.engine} · ${pose.width}×${pose.height} · ` +
+    `${pose.fps.toFixed(1)} fps · ${pose.n_frames} frames${clipRange}`;
   els.loadStatus.textContent = "";
 
   seekToFrame(0);
@@ -291,18 +300,19 @@ function seekToFrame(f) {
   f = Math.max(0, Math.min(state.n_frames - 1, Math.round(f)));
   state.frame = f;
   els.scrubber.value = f;
-  // Seek to the *middle* of the frame's time slot to avoid landing on the
-  // boundary and getting the previous frame back.
-  els.video.currentTime = (f + 0.5) / state.fps;
+  // Frame N of the cache lives at video time start_sec + (N + 0.5)/fps —
+  // the +0.5 lands in the middle of the frame's time slot so we don't end
+  // up on a boundary and get the previous video frame back.
+  els.video.currentTime = state.start_sec + (f + 0.5) / state.fps;
   // canvas redraw happens on the seeked event so video+overlay stay in sync.
 }
 
 els.video.addEventListener("seeked", redraw);
 els.video.addEventListener("timeupdate", () => {
   if (els.video.paused) return;
-  const f = Math.floor(els.video.currentTime * state.fps);
+  const f = Math.floor((els.video.currentTime - state.start_sec) * state.fps);
   if (f !== state.frame) {
-    state.frame = Math.min(f, state.n_frames - 1);
+    state.frame = Math.max(0, Math.min(f, state.n_frames - 1));
     els.scrubber.value = state.frame;
     redraw();
   }

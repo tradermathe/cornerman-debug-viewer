@@ -28,6 +28,10 @@ export async function loadPose(files, videoSize) {
 async function loadNpy(npyFile, metaFile, videoSize) {
   const meta = JSON.parse(await metaFile.text());
   const fps = Number(meta.fps);
+  // start_sec is the round's offset inside the source video — without it
+  // the overlay plays at t=0 of the video while the skeleton is for some
+  // later slice, and they go out of sync.
+  const start_sec = Number(meta.start_sec ?? meta.actual_start_sec ?? 0);
   const layout = meta.layout || "coco17";
   if (layout !== "coco17") {
     throw new Error(`Unsupported layout '${layout}' — only coco17 is wired up.`);
@@ -72,7 +76,7 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   }
 
   return {
-    skeleton, conf, fps,
+    skeleton, conf, fps, start_sec,
     width: w, height: h, n_frames,
     engine: "yolo_pose",
     source: npyFile.name,

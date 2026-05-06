@@ -13,17 +13,24 @@
   </header>
 
   <section id="picker-card" class="card">
-    <h2>Load a round</h2>
-
-    <label class="folder-pick">
-      <span>Cache folder <span class="muted">(once per session — viewer auto-matches videos against it)</span></span>
-      <input type="file" id="cache-folder" webkitdirectory directory multiple>
-      <span id="cache-status" class="muted small"></span>
-    </label>
+    <details id="cache-section" open>
+      <summary><span class="section-label">Cache folder</span> <span id="cache-status" class="muted small">— pick once per session</span></summary>
+      <label class="folder-pick">
+        <span class="muted">Viewer auto-matches videos against this folder.</span>
+        <input type="file" id="cache-folder" webkitdirectory directory multiple>
+      </label>
+      <p class="hint">
+        Typically
+        <code>~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/</code>.
+        Coords are de-normalised to pixels using the video's natural
+        dimensions. Files stay on your machine — the page uses the browser
+        File API and never uploads anywhere.
+      </p>
+    </details>
 
     <div class="picker-row">
       <label>
-        <span>Video</span>
+        <span>Video <span class="muted">(re-pick to load another round)</span></span>
         <input type="file" id="video-file" accept="video/*">
       </label>
       <label>
@@ -42,13 +49,6 @@
       </label>
     </details>
 
-    <p class="hint">
-      Cache folder is typically
-      <code>~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/</code>. Coords
-      are de-normalised to pixels using the video's natural dimensions. Files
-      stay on your machine — the page uses the browser File API and never
-      uploads anywhere.
-    </p>
     <p id="load-status" class="status"></p>
   </section>
 

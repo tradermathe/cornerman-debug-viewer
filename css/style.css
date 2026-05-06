@@ -35,17 +35,21 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  transition: opacity 0.25s, max-height 0.25s, padding 0.25s, margin 0.25s;
-}
-.card.collapsed {
-  opacity: 0;
-  max-height: 0;
-  padding: 0 22px;
-  margin: 0 28px;
-  overflow: hidden;
-  border-color: transparent;
 }
 .card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.card.loaded { padding: 14px 18px; }
+.card.loaded #cache-section { margin-bottom: 8px; }
+
+#cache-section { margin-bottom: 14px; }
+#cache-section summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 0;
+}
+#cache-section summary .section-label { color: var(--fg); }
+#cache-section .folder-pick { margin: 10px 0 0; }
+#cache-status { font-weight: 400; }
 
 .picker-row {
   display: grid;
