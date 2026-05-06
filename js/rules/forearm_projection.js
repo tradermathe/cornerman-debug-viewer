@@ -120,12 +120,13 @@ export const ForearmProjectionRule = {
   },
 
   draw(ctx, state) {
+    const s = state.renderScale || 1;
     drawProjection(ctx, state.pose, state.frame,
                    J.L_ELBOW, J.L_WRIST, stats.lenL,
-                   COLORS.rawL, COLORS.projL, COLORS.forearmL);
+                   COLORS.rawL, COLORS.projL, COLORS.forearmL, s);
     drawProjection(ctx, state.pose, state.frame,
                    J.R_ELBOW, J.R_WRIST, stats.lenR,
-                   COLORS.rawR, COLORS.projR, COLORS.forearmR);
+                   COLORS.rawR, COLORS.projR, COLORS.forearmR, s);
   },
 
   update(state) {
@@ -190,7 +191,7 @@ function projectFrame(pose, frame, elbowJ, wristJ, forearmLen) {
 }
 
 function drawProjection(ctx, pose, frame, elbowJ, wristJ, forearmLen,
-                        rawColor, projColor, lineColor) {
+                        rawColor, projColor, lineColor, scale = 1) {
   const r = projectFrame(pose, frame, elbowJ, wristJ, forearmLen);
   if (!r) return;
   const ex = pose.skeleton[(frame * 17 + elbowJ) * 2];
@@ -199,8 +200,8 @@ function drawProjection(ctx, pose, frame, elbowJ, wristJ, forearmLen,
   // Forearm line elbow → projected fist (the new logic's forearm).
   ctx.save();
   ctx.strokeStyle = lineColor;
-  ctx.lineWidth = 2.5;
-  ctx.setLineDash([7, 4]);
+  ctx.lineWidth = 2.5 * scale;
+  ctx.setLineDash([7 * scale, 4 * scale]);
   ctx.beginPath();
   ctx.moveTo(ex, ey);
   ctx.lineTo(r.projX, r.projY);
@@ -210,18 +211,18 @@ function drawProjection(ctx, pose, frame, elbowJ, wristJ, forearmLen,
   // Raw wrist (filled) — what guard_drop.py currently uses.
   ctx.fillStyle = rawColor;
   ctx.beginPath();
-  ctx.arc(r.rawX, r.rawY, 7, 0, Math.PI * 2);
+  ctx.arc(r.rawX, r.rawY, 7 * scale, 0, Math.PI * 2);
   ctx.fill();
 
   // Projected wrist (hollow ring) — what the new logic would use.
   ctx.strokeStyle = projColor;
-  ctx.lineWidth = 3;
+  ctx.lineWidth = 3 * scale;
   ctx.beginPath();
-  ctx.arc(r.projX, r.projY, 9, 0, Math.PI * 2);
+  ctx.arc(r.projX, r.projY, 9 * scale, 0, Math.PI * 2);
   ctx.stroke();
   ctx.fillStyle = "rgba(0,0,0,0.55)";
   ctx.beginPath();
-  ctx.arc(r.projX, r.projY, 5, 0, Math.PI * 2);
+  ctx.arc(r.projX, r.projY, 5 * scale, 0, Math.PI * 2);
   ctx.fill();
 }
 

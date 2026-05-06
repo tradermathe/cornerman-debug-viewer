@@ -71,16 +71,19 @@ export const EngineCompareRule = {
   },
 
   draw(ctx, state) {
+    const s = state.renderScale || 1;
     drawEngineSkeleton(ctx, state.pose, state.frame, {
-      boneColor: Y_BONE, boneWidth: 2,
-      jointColor: Y_WRIST, jointRadius: 4,
-      wristColor: Y_WRIST, wristRadius: 9,
+      boneColor: Y_BONE, boneWidth: 2 * s,
+      jointColor: Y_WRIST, jointRadius: 4 * s,
+      wristColor: Y_WRIST, wristRadius: 9 * s,
+      strokeWidth: 2 * s,
     });
     if (state.poseSecondary) {
       drawEngineSkeleton(ctx, state.poseSecondary, state.frame, {
-        boneColor: V_BONE, boneWidth: 2,
-        jointColor: V_WRIST, jointRadius: 4,
-        wristColor: V_WRIST, wristRadius: 9,
+        boneColor: V_BONE, boneWidth: 2 * s,
+        jointColor: V_WRIST, jointRadius: 4 * s,
+        wristColor: V_WRIST, wristRadius: 9 * s,
+        strokeWidth: 2 * s,
       });
     }
   },
@@ -155,7 +158,7 @@ function drawEngineSkeleton(ctx, pose, frame, style) {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
     if (isWrist) {
-      ctx.lineWidth = 2;
+      ctx.lineWidth = style.strokeWidth ?? 2;
       ctx.strokeStyle = "rgba(0,0,0,0.65)";
       ctx.stroke();
     }

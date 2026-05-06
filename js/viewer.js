@@ -562,13 +562,30 @@ function positionThumb(cursorX, scrubberTop) {
 }
 
 function redraw() {
-  if (!state.pose) return;
   const ctx = els.canvas.getContext("2d");
+  // Always clear so the previous frame doesn't ghost when there's no pose.
   ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+  if (!state.pose) return;
+
+  // Canvas internal resolution is the source video's, but the rendered CSS
+  // box is often much smaller (portrait 1080×1920 capped at 75vh ≈ 149×264).
+  // 2px-wide bones at 1080 internal → 0.3px on screen, i.e. invisible. Push
+  // a render-scale into state so the active rule can multiply its drawing
+  // dimensions accordingly. Default skeleton dims also get scaled below.
+  const cssW = els.canvas.getBoundingClientRect().width || els.canvas.width;
+  state.renderScale = els.canvas.width / Math.max(1, cssW);
 
   // Let the active rule influence the base skeleton style, then draw it.
+  // Apply renderScale to width-style fields so lines/dots stay legible at
+  // any rendered size. Lenses can override either by passing absolute or by
+  // reading state.renderScale themselves.
   const baseStyle = state.rule?.skeletonStyle?.(state) || {};
-  drawSkeleton(ctx, state.pose, state.frame, baseStyle);
+  const scaled = {
+    ...baseStyle,
+    boneWidth:   (baseStyle.boneWidth   ?? 2) * state.renderScale,
+    jointRadius: (baseStyle.jointRadius ?? 4) * state.renderScale,
+  };
+  drawSkeleton(ctx, state.pose, state.frame, scaled);
 
   // Then the rule paints its own decorations on top.
   state.rule?.draw?.(ctx, state);

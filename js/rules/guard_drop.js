@@ -153,6 +153,7 @@ export const GuardDropRule = {
     const f = state.frame;
     const p = state.pose;
     const W = ctx.canvas.width;
+    const s = state.renderScale || 1;   // canvas-internal-per-display-pixel
 
     const nose = jt(p, f, J.NOSE);
     const lw = jt(p, f, J.L_WRIST);
@@ -160,21 +161,20 @@ export const GuardDropRule = {
     const ls = jt(p, f, J.L_SHOULDER);
     const rs = jt(p, f, J.R_SHOULDER);
 
-    // Horizontal y-lines at nose / wrists / shoulders.
-    drawHLine(ctx, nose.y, W, COLORS.nose, 2);
-    drawHLine(ctx, lw.y,   W, COLORS.l_wrist, 2);
-    drawHLine(ctx, rw.y,   W, COLORS.r_wrist, 2);
-    drawHLine(ctx, ls.y,   W, COLORS.l_shoulder, 1);
-    drawHLine(ctx, rs.y,   W, COLORS.r_shoulder, 1);
+    // Horizontal y-lines at nose / wrists / shoulders. Width and dash size
+    // are scaled by renderScale so they stay visible on small canvases.
+    drawHLine(ctx, nose.y, W, COLORS.nose,       2 * s, s);
+    drawHLine(ctx, lw.y,   W, COLORS.l_wrist,    2 * s, s);
+    drawHLine(ctx, rw.y,   W, COLORS.r_wrist,    2 * s, s);
+    drawHLine(ctx, ls.y,   W, COLORS.l_shoulder, 1 * s, s);
+    drawHLine(ctx, rs.y,   W, COLORS.r_shoulder, 1 * s, s);
 
-    // Wrist trail — fading dots over the last N frames.
-    drawTrail(ctx, p, f, J.L_WRIST, COLORS.l_wrist, cfg.trailFrames);
-    drawTrail(ctx, p, f, J.R_WRIST, COLORS.r_wrist, cfg.trailFrames);
+    drawTrail(ctx, p, f, J.L_WRIST, COLORS.l_wrist, cfg.trailFrames, s);
+    drawTrail(ctx, p, f, J.R_WRIST, COLORS.r_wrist, cfg.trailFrames, s);
 
-    // Confidence badges floating above each highlighted joint.
-    drawBadge(ctx, lw,   `L${lw.c.toFixed(2)}`,  COLORS.l_wrist);
-    drawBadge(ctx, rw,   `R${rw.c.toFixed(2)}`,  COLORS.r_wrist);
-    drawBadge(ctx, nose, `N${nose.c.toFixed(2)}`, COLORS.nose);
+    drawBadge(ctx, lw,   `L${lw.c.toFixed(2)}`,  COLORS.l_wrist, s);
+    drawBadge(ctx, rw,   `R${rw.c.toFixed(2)}`,  COLORS.r_wrist, s);
+    drawBadge(ctx, nose, `N${nose.c.toFixed(2)}`, COLORS.nose,    s);
   },
 
   update(state) {
@@ -222,11 +222,12 @@ function jt(pose, frame, j) {
   };
 }
 
-function drawHLine(ctx, y, w, color, dash) {
+function drawHLine(ctx, y, w, color, lineWidth, scale) {
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([dash * 3, dash * 3]);
+  ctx.lineWidth = lineWidth;
+  const dashUnit = 3 * scale;
+  ctx.setLineDash([dashUnit * 2, dashUnit * 2]);
   ctx.beginPath();
   ctx.moveTo(0, y);
   ctx.lineTo(w, y);
@@ -234,22 +235,23 @@ function drawHLine(ctx, y, w, color, dash) {
   ctx.restore();
 }
 
-function drawBadge(ctx, joint, text, color) {
+function drawBadge(ctx, joint, text, color, scale) {
   if (joint.c <= 0) return;
   ctx.save();
-  ctx.font = "16px ui-monospace, monospace";
-  const pad = 4;
+  const fontSize = Math.round(12 * scale);
+  ctx.font = `${fontSize}px ui-monospace, monospace`;
+  const pad = 3 * scale;
   const m = ctx.measureText(text);
-  const x = joint.x + 10;
-  const y = joint.y - 10;
+  const x = joint.x + 6 * scale;
+  const y = joint.y - 6 * scale;
   ctx.fillStyle = "rgba(0,0,0,0.65)";
-  ctx.fillRect(x - pad, y - 14, m.width + pad * 2, 18);
+  ctx.fillRect(x - pad, y - fontSize, m.width + pad * 2, fontSize + 4 * scale);
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
   ctx.restore();
 }
 
-function drawTrail(ctx, pose, frame, jointIdx, color, n) {
+function drawTrail(ctx, pose, frame, jointIdx, color, n, scale) {
   if (n <= 0) return;
   const start = Math.max(0, frame - n);
   ctx.save();
@@ -262,7 +264,7 @@ function drawTrail(ctx, pose, frame, jointIdx, color, n) {
     const x = pose.skeleton[(f * 17 + jointIdx) * 2];
     const y = pose.skeleton[(f * 17 + jointIdx) * 2 + 1];
     ctx.beginPath();
-    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    ctx.arc(x, y, 2.5 * scale, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
