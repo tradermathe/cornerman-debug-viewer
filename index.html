@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>Cornerman rule debug viewer</h1>
-    <p class="sub">Frame-by-frame inspection of Apple Vision pose against the rules engine. Pick a video and its matching pose JSON to begin.</p>
+    <p class="sub">Frame-by-frame inspection of YOLO-Pose Drive caches against the rules engine. Pick a video and its matching <code>.npy</code> + <code>_meta.json</code> pair to begin.</p>
   </header>
 
   <section id="picker-card" class="card">
@@ -20,15 +20,16 @@
         <input type="file" id="video-file" accept="video/*">
       </label>
       <label>
-        <span>Pose JSON</span>
-        <input type="file" id="pose-file" accept="application/json,.json">
+        <span>Pose cache (<code>.npy</code> + <code>_meta.json</code>)</span>
+        <input type="file" id="pose-file" accept=".npy,.json,application/json" multiple>
       </label>
     </div>
     <p class="hint">
-      Pose JSON can be either the parity-tooling format
-      (<code>skeleton_frames</code>/<code>confidences</code> straight arrays, e.g. <code>Mathe_Test_vision.json</code>)
-      or the production iOS format (<code>skeleton_b64</code>/<code>conf_b64</code>).
-      Files stay on your machine — the page uses the browser File API and never uploads anywhere.
+      Pick both files together (multi-select). They live in
+      <code>~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/</code> next to the
+      raw videos in <code>raw_videos/</code>. Coords are de-normalised to pixels
+      using the video's natural dimensions. Files stay on your machine — the
+      page uses the browser File API and never uploads anywhere.
     </p>
     <p id="load-status" class="status"></p>
   </section>

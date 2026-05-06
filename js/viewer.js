@@ -3,7 +3,7 @@
 // and get a chance to (a) draw extra overlay graphics each frame and (b) own
 // a side-panel DOM area that they refresh.
 
-import { loadPoseFromFile } from "./pose-loader.js";
+import { loadPose } from "./pose-loader.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 
@@ -44,14 +44,27 @@ els.poseFile.addEventListener("change", onPick);
 
 function onPick() {
   const v = els.videoFile.files[0];
-  const p = els.poseFile.files[0];
-  if (!v || !p) {
-    els.loadStatus.textContent = v || p ? "Pick the other file." : "";
+  const ps = els.poseFile.files;
+  const haveNpy  = Array.from(ps).some(f => f.name.endsWith(".npy"));
+  const haveJson = Array.from(ps).some(f => f.name.endsWith(".json"));
+  if (!v || !haveNpy || !haveJson) {
+    const missing = [];
+    if (!v) missing.push("video");
+    if (!haveNpy) missing.push(".npy");
+    if (!haveJson) missing.push("_meta.json");
+    els.loadStatus.textContent = missing.length === 3
+      ? "" : `Still need: ${missing.join(", ")}`;
     return;
   }
-  els.loadStatus.textContent = `Loading ${v.name} + ${p.name}…`;
-  Promise.all([loadVideo(v), loadPoseFromFile(p)])
-    .then(([_, pose]) => start(pose))
+  els.loadStatus.textContent = `Loading ${v.name} + ${ps.length} pose file(s)…`;
+  // Pose loader needs video dimensions to de-normalise coords, so load video
+  // first, then read videoWidth/videoHeight, then load the cache.
+  loadVideo(v)
+    .then(() => loadPose(ps, {
+      width: els.video.videoWidth,
+      height: els.video.videoHeight,
+    }))
+    .then(start)
     .catch(err => {
       console.error(err);
       els.loadStatus.textContent = `Error: ${err.message}`;

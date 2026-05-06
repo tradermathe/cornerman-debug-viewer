@@ -1,78 +1,136 @@
-// Loads Apple Vision pose JSON in either of the two formats the project produces:
-//  1. Parity / Mac-side format — straight-array `skeleton_frames` and `confidences`
-//     (produced by apple_vision_pose CLI; see Mathe_Test_vision.json).
-//  2. Production iOS format — base64 float32 LE in `skeleton_b64` / `conf_b64`
-//     (uploaded by the cornerman-vision-pose Expo module; see CLAUDE.md).
+// Loads YOLO-Pose Drive cache: a `<round>.npy` of shape (N, 17, 3) holding
+// (x, y, conf) per joint per frame in COCO-17 order, plus a sibling
+// `<round>_meta.json` with at least { fps, layout: "coco17" }.
 //
-// Output shape is the same regardless of input:
-//   { skeleton: Float32Array(n*17*2), conf: Float32Array(n*17),
-//     fps, width, height, n_frames, engine, source }
+// Coords in the .npy are normalised to [0, 1]; we de-normalise to pixels using
+// the loaded video's natural dimensions (so the video must be loaded first).
 //
-// Skeleton layout is (frame, joint, xy) flattened row-major. Helpers below
-// expose joint(frame, joint) and conf(frame, joint) views.
+// Output shape (consumed by the rest of the viewer):
+//   { skeleton: Float32Array(n*17*2),  // (frame, joint, xy) row-major
+//     conf:     Float32Array(n*17),    // (frame, joint)     row-major
+//     fps, width, height, n_frames, engine: "yolo_pose", source }
 
 const N_JOINTS = 17;
 
-export async function loadPoseFromFile(file) {
-  const text = await file.text();
-  const obj = JSON.parse(text);
+export async function loadPose(files, videoSize) {
+  const arr = Array.from(files || []);
+  const npy  = arr.find(f => f.name.toLowerCase().endsWith(".npy"));
+  const meta = arr.find(f => f.name.toLowerCase().endsWith(".json"));
 
-  const fps = Number(obj.fps);
-  const width = Number(obj.width);
-  const height = Number(obj.height);
-  const engine = obj.engine || "apple_vision_2d";
-
-  let skeleton, conf, n_frames;
-
-  if (typeof obj.skeleton_b64 === "string" && typeof obj.conf_b64 === "string") {
-    // Production iOS format — base64 float32 LE.
-    skeleton = decodeFloat32LE(obj.skeleton_b64);
-    conf = decodeFloat32LE(obj.conf_b64);
-    n_frames = Number(obj.n_frames);
-  } else if (Array.isArray(obj.skeleton_frames) && Array.isArray(obj.confidences)) {
-    // Parity / Mac-side format — straight nested arrays.
-    n_frames = obj.skeleton_frames.length;
-    skeleton = new Float32Array(n_frames * N_JOINTS * 2);
-    conf = new Float32Array(n_frames * N_JOINTS);
-    for (let f = 0; f < n_frames; f++) {
-      const fr = obj.skeleton_frames[f];
-      const cr = obj.confidences[f];
-      for (let j = 0; j < N_JOINTS; j++) {
-        skeleton[(f * N_JOINTS + j) * 2 + 0] = fr[j][0];
-        skeleton[(f * N_JOINTS + j) * 2 + 1] = fr[j][1];
-        conf[f * N_JOINTS + j] = cr[j];
-      }
-    }
-  } else {
+  if (!npy || !meta) {
     throw new Error(
-      "Unrecognized pose JSON. Expected either skeleton_b64/conf_b64 " +
-      "(production format) or skeleton_frames/confidences (parity format)."
+      "Pick the .npy and its sibling _meta.json together (multi-select)."
     );
   }
+  return loadNpy(npy, meta, videoSize);
+}
 
-  if (skeleton.length !== n_frames * N_JOINTS * 2) {
+async function loadNpy(npyFile, metaFile, videoSize) {
+  const meta = JSON.parse(await metaFile.text());
+  const fps = Number(meta.fps);
+  const layout = meta.layout || "coco17";
+  if (layout !== "coco17") {
+    throw new Error(`Unsupported layout '${layout}' — only coco17 is wired up.`);
+  }
+
+  const { data, shape, dtype } = parseNpy(await npyFile.arrayBuffer());
+  if (shape.length !== 3 || shape[1] !== 17 || shape[2] !== 3) {
     throw new Error(
-      `skeleton length ${skeleton.length} doesn't match n_frames=${n_frames} * 17 * 2`
+      `Expected .npy shape (N, 17, 3) for coco17 cache, got (${shape.join(", ")}).`
     );
+  }
+  if (dtype !== "<f4") {
+    throw new Error(`Expected float32 LE in .npy, got dtype '${dtype}'.`);
+  }
+
+  const n_frames = shape[0];
+  const w = videoSize?.width || meta.width || 1;
+  const h = videoSize?.height || meta.height || 1;
+
+  // Detect normalised (0..1) vs pixel coords by probing the first ~20 frames.
+  // The cached files are normalised; the check is cheap insurance.
+  let maxXY = 0;
+  const probe = Math.min(20 * 17 * 3, data.length);
+  for (let i = 0; i < probe; i += 3) {
+    if (data[i]   > maxXY) maxXY = data[i];
+    if (data[i+1] > maxXY) maxXY = data[i+1];
+  }
+  const normalised = maxXY <= 1.5;
+  const sx = normalised ? w : 1;
+  const sy = normalised ? h : 1;
+
+  // Split (N, 17, 3) → flat skeleton (N*17*2) + flat conf (N*17).
+  const skeleton = new Float32Array(n_frames * N_JOINTS * 2);
+  const conf = new Float32Array(n_frames * N_JOINTS);
+  for (let f = 0; f < n_frames; f++) {
+    for (let j = 0; j < N_JOINTS; j++) {
+      const base = (f * 17 + j) * 3;
+      skeleton[(f * N_JOINTS + j) * 2 + 0] = data[base + 0] * sx;
+      skeleton[(f * N_JOINTS + j) * 2 + 1] = data[base + 1] * sy;
+      conf[f * N_JOINTS + j] = data[base + 2];
+    }
   }
 
   return {
-    skeleton, conf, fps, width, height, n_frames, engine,
-    source: file.name,
+    skeleton, conf, fps,
+    width: w, height: h, n_frames,
+    engine: "yolo_pose",
+    source: npyFile.name,
+    normalised,
   };
 }
 
-function decodeFloat32LE(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  // Float32Array reads using the host endianness, which is little-endian on
-  // every platform we ship to (x86_64, arm64). If we ever needed to support
-  // a big-endian host we'd have to byteswap here.
-  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.length / 4);
+// ── .npy parser ────────────────────────────────────────────────────────────
+// Implements numpy's NPY format v1/v2/v3 (subset we need).
+// https://numpy.org/doc/stable/reference/generated/numpy.lib.format.html
+function parseNpy(buffer) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  // Magic: \x93NUMPY
+  if (bytes[0] !== 0x93 ||
+      String.fromCharCode(...bytes.slice(1, 6)) !== "NUMPY") {
+    throw new Error("Not a .npy file (magic mismatch)");
+  }
+  const major = bytes[6];
+  let headerLen, dataOffset;
+  if (major === 1) {
+    headerLen = view.getUint16(8, true);
+    dataOffset = 10 + headerLen;
+  } else if (major === 2 || major === 3) {
+    headerLen = view.getUint32(8, true);
+    dataOffset = 12 + headerLen;
+  } else {
+    throw new Error(`Unsupported .npy major version ${major}`);
+  }
+
+  const headerStr = new TextDecoder("ascii")
+    .decode(bytes.slice(major === 1 ? 10 : 12, dataOffset))
+    .trim().replace(/,\s*}$/, "}");
+
+  const dtype = (headerStr.match(/'descr'\s*:\s*'([^']+)'/) || [])[1];
+  const fortran = /'fortran_order'\s*:\s*True/.test(headerStr);
+  const shapeStr = (headerStr.match(/'shape'\s*:\s*\(([^)]*)\)/) || [])[1] || "";
+  const shape = shapeStr
+    .split(",").map(s => s.trim()).filter(Boolean).map(Number);
+
+  if (fortran) throw new Error("Fortran-order .npy not supported.");
+
+  const total = shape.reduce((a, b) => a * b, 1);
+  const slice = buffer.slice(dataOffset);
+
+  let data;
+  switch (dtype) {
+    case "<f4": data = new Float32Array(slice, 0, total); break;
+    case "<f8": data = new Float64Array(slice, 0, total); break;
+    case "<i4": data = new Int32Array(slice, 0, total); break;
+    default:
+      throw new Error(`Unsupported .npy dtype '${dtype}'.`);
+  }
+
+  return { data, shape, dtype };
 }
 
-// Joint accessor: returns [x, y] for the given frame/joint.
 export function jointXY(pose, frame, joint) {
   const i = (frame * N_JOINTS + joint) * 2;
   return [pose.skeleton[i], pose.skeleton[i + 1]];
