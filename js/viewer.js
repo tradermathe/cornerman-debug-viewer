@@ -36,9 +36,15 @@ const els = {
 };
 
 // Cache index built from the folder picker:
-//   Map<videoBasename, Map<roundN, { npy: File, meta: File }>>
+//   Map<videoBasename, Map<roundN, { yolo?: {npy,meta}, vision?: {npy,meta} }>>
 // Survives across video picks within one page session.
 let cacheIndex = null;
+
+// Monotonically increasing token. Bumped on every load attempt so an in-flight
+// load can detect that a newer pick has superseded it and bail out before
+// overwriting state (avoids the "I picked a new video but the old one keeps
+// loading on top" race).
+let currentLoadToken = 0;
 
 const state = {
   pose: null,
@@ -120,27 +126,62 @@ function onCacheFolder(e) {
 function onVideoPick() {
   const v = els.videoFile.files[0];
   if (!v) return;
+
   if (!cacheIndex) {
-    els.loadStatus.textContent =
-      "Pick a cache folder above, or open the manual file picker.";
+    // No cache index yet — still swap the video so the user sees their
+    // pick reflected, just without skeleton.
+    loadVideoOnly(v, "Pick a cache folder above, or open the manual file picker.");
+    populateRoundSelect(null);
     return;
   }
   const base = videoBasename(v.name);
   const rounds = cacheIndex.get(base);
   if (!rounds || rounds.size === 0) {
-    els.loadStatus.textContent =
-      `No cache match for "${base}". Try the manual picker.`;
+    // Same idea — show the new video so it's obvious the pick worked,
+    // and surface the matching error.
+    loadVideoOnly(v,
+      `⚠ No cache match for "${base}". Use the manual file pick below, ` +
+      `or rename the video to match a cache basename.`);
     populateRoundSelect(null);
     return;
   }
   populateRoundSelect(rounds);
-  // Always auto-load the first round. (Previously this branch waited for
-  // a manual round pick, but the dropdown defaulted to r0 — so clicking
-  // r0 didn't fire `change` and nothing happened until you picked r1
-  // first.) The dropdown stays interactive so you can switch.
+  // Always auto-load the first round. (The dropdown defaults to r0 so
+  // clicking r0 doesn't fire `change`; the dropdown stays interactive so
+  // you can still pick r1, r2, …)
   const first = [...rounds.keys()].sort((a, b) => a - b)[0];
   els.roundSel.value = String(first);
   loadFromIndex(v, rounds.get(first));
+}
+
+// Swap the video src without loading any pose. Clears any leftover skeleton
+// from the previous round so the screen is honest about the missing data.
+function loadVideoOnly(videoFile, errMessage) {
+  const token = ++currentLoadToken;
+  els.loadStatus.textContent = `Loading ${videoFile.name}…`;
+  loadVideo(videoFile)
+    .then(() => {
+      if (token !== currentLoadToken) return;
+      state.pose = null;
+      state.poseSecondary = null;
+      state.n_frames = 0;
+      state.frame = 0;
+      els.scrubber.max = 0;
+      els.scrubber.value = 0;
+      fitCanvasToVideo();
+      // Clear the canvas explicitly — redraw() early-returns when no pose,
+      // which would leave the prior skeleton ghosting on screen.
+      const ctx = els.canvas.getContext("2d");
+      ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+      els.viewer.hidden = false;
+      els.frameLabel.textContent = "no pose data loaded";
+      els.meta.textContent = `${videoFile.name} · ${els.video.videoWidth}×${els.video.videoHeight}`;
+      els.loadStatus.textContent = errMessage;
+    })
+    .catch(err => {
+      if (token !== currentLoadToken) return;
+      els.loadStatus.textContent = `Error: ${err.message}`;
+    });
 }
 
 function onRoundPick() {
@@ -180,13 +221,17 @@ function loadFromIndex(videoFile, slot) {
     `Loading ${videoFile.name}${secondary ? " (yolo + vision)" : ""}…`;
   els.loadStatus.textContent = status;
 
+  const token = ++currentLoadToken;
   loadVideo(videoFile)
     .then(async () => {
+      if (token !== currentLoadToken) return;
       const size = { width: els.video.videoWidth, height: els.video.videoHeight };
       const posePrimary = await loadPose([primary.npy, primary.meta], size);
+      if (token !== currentLoadToken) return;
       let poseSecondary = null;
       if (secondary) {
         poseSecondary = await loadPose([secondary.npy, secondary.meta], size);
+        if (token !== currentLoadToken) return;
         // Stamp engine name so the lens can label them correctly even if the
         // file source said "yolo_pose" for both (loader currently hard-codes
         // engine name).
@@ -196,6 +241,7 @@ function loadFromIndex(videoFile, slot) {
       start(posePrimary, poseSecondary);
     })
     .catch(err => {
+      if (token !== currentLoadToken) return;
       console.error(err);
       els.loadStatus.textContent = `Error: ${err.message}`;
     });
@@ -205,13 +251,21 @@ function loadFromFiles(videoFile, poseFiles) {
   // Manual file picker — single engine only.
   const names = Array.from(poseFiles).map(f => f.name).join(" + ");
   els.loadStatus.textContent = `Loading ${videoFile.name} + ${names}…`;
+  const token = ++currentLoadToken;
   loadVideo(videoFile)
-    .then(() => loadPose(poseFiles, {
-      width: els.video.videoWidth,
-      height: els.video.videoHeight,
-    }))
-    .then(p => start(p, null))
+    .then(() => {
+      if (token !== currentLoadToken) return null;
+      return loadPose(poseFiles, {
+        width: els.video.videoWidth,
+        height: els.video.videoHeight,
+      });
+    })
+    .then(p => {
+      if (p == null || token !== currentLoadToken) return;
+      start(p, null);
+    })
     .catch(err => {
+      if (token !== currentLoadToken) return;
       console.error(err);
       els.loadStatus.textContent = `Error: ${err.message}`;
     });
