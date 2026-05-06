@@ -28,10 +28,14 @@ export async function loadPose(files, videoSize) {
 async function loadNpy(npyFile, metaFile, videoSize) {
   const meta = JSON.parse(await metaFile.text());
   const fps = Number(meta.fps);
-  // start_sec is the round's offset inside the source video — without it
-  // the overlay plays at t=0 of the video while the skeleton is for some
-  // later slice, and they go out of sync.
-  const start_sec = Number(meta.start_sec ?? meta.actual_start_sec ?? 0);
+  // The cache typically includes a pre-buffer of pre_buffer_sec (≈1.5s)
+  // BEFORE the official round start, so cache frame 0 lives at
+  // `actual_start_sec`, NOT `start_sec`. Some newer caches don't write
+  // pre-buffer fields and the round begins right at `start_sec`. Trust
+  // actual_start_sec when present; otherwise fall back.
+  const start_sec = Number(meta.actual_start_sec ?? meta.start_sec ?? 0);
+  const round_start_sec = Number(meta.start_sec ?? start_sec);
+  const pre_buffer_sec = Math.max(0, round_start_sec - start_sec);
   const layout = meta.layout || "coco17";
   if (layout !== "coco17") {
     throw new Error(`Unsupported layout '${layout}' — only coco17 is wired up.`);
@@ -76,7 +80,10 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   }
 
   return {
-    skeleton, conf, fps, start_sec,
+    skeleton, conf, fps,
+    start_sec,           // video time of cache frame 0 (incl. pre-buffer)
+    round_start_sec,     // video time the official round begins
+    pre_buffer_sec,      // round_start_sec - start_sec, for the meta line
     width: w, height: h, n_frames,
     engine: "yolo_pose",
     source: npyFile.name,

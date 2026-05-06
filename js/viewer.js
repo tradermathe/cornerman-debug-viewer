@@ -225,17 +225,26 @@ function start(pose) {
   populateRuleSelect();
   setRule(els.ruleSel.value);
 
-  // Show the cache's clip range inside the source video. With start_sec
-  // applied (below) this is informational, not an error.
+  // Cache covers [start_sec, start_sec + n_frames/fps]. The official
+  // round begins at round_start_sec which can be later than start_sec
+  // when a pre-buffer is included — that's why frame 0 of the cache
+  // shows footage BEFORE the round, not the first punch.
   const startSec = state.start_sec;
   const endSec = startSec + pose.n_frames / pose.fps;
   const clipRange = startSec || endSec !== els.video.duration
     ? ` · clip ${startSec.toFixed(1)}–${endSec.toFixed(1)}s of ${els.video.duration.toFixed(1)}s video`
     : "";
+  const preBuffer = pose.pre_buffer_sec > 0.01
+    ? ` · ${pose.pre_buffer_sec.toFixed(1)}s pre-buffer (round starts ${pose.round_start_sec.toFixed(1)}s)`
+    : "";
   els.meta.textContent =
     `${pose.engine} · ${pose.width}×${pose.height} · ` +
-    `${pose.fps.toFixed(1)} fps · ${pose.n_frames} frames${clipRange}`;
+    `${pose.fps.toFixed(1)} fps · ${pose.n_frames} frames${clipRange}${preBuffer}`;
   els.loadStatus.textContent = "";
+
+  // Cache the pre-buffer frame count so the frame-label can mark when the
+  // round officially starts.
+  state.pre_buffer_frames = Math.round(pose.pre_buffer_sec * pose.fps);
 
   seekToFrame(0);
 }
@@ -341,7 +350,12 @@ function redraw() {
   // And refreshes its side panel.
   state.rule?.update?.(state);
 
+  // Show frame within the cache, video time (= start_sec + frame/fps),
+  // and a "before round" marker when we're inside the pre-buffer.
+  const t_video = state.start_sec + state.frame / state.fps;
+  const before = state.pre_buffer_frames && state.frame < state.pre_buffer_frames
+    ? "  ·  ⏪ pre-buffer (before round)" : "";
   els.frameLabel.textContent =
     `frame ${state.frame} / ${state.n_frames - 1}   ·   ` +
-    `t=${(state.frame / state.fps).toFixed(2)}s`;
+    `t=${t_video.toFixed(2)}s${before}`;
 }
