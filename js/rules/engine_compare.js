@@ -50,13 +50,13 @@ export const EngineCompareRule = {
       </p>
 
       <h3>Per-frame Δ (raw px)</h3>
-      <p class="hint">Distance between YOLO and Vision detection of each joint at this frame.</p>
+      <p class="hint">Distance between YOLO and Vision detection of each joint at this frame, and each engine's confidence (Y / V).</p>
       <div class="metric-grid">
-        <div class="metric"><div class="metric-label">L wrist</div><div class="metric-val" id="ec-l-wrist">—</div></div>
-        <div class="metric"><div class="metric-label">R wrist</div><div class="metric-val" id="ec-r-wrist">—</div></div>
-        <div class="metric"><div class="metric-label">Nose</div><div class="metric-val" id="ec-nose">—</div></div>
-        <div class="metric"><div class="metric-label">L elbow</div><div class="metric-val" id="ec-l-elbow">—</div></div>
-        <div class="metric"><div class="metric-label">R elbow</div><div class="metric-val" id="ec-r-elbow">—</div></div>
+        <div class="metric"><div class="metric-label">L wrist</div><div class="metric-val" id="ec-l-wrist">—</div><div class="metric-sub" id="ec-l-wrist-conf">—</div></div>
+        <div class="metric"><div class="metric-label">R wrist</div><div class="metric-val" id="ec-r-wrist">—</div><div class="metric-sub" id="ec-r-wrist-conf">—</div></div>
+        <div class="metric"><div class="metric-label">Nose</div><div class="metric-val" id="ec-nose">—</div><div class="metric-sub" id="ec-nose-conf">—</div></div>
+        <div class="metric"><div class="metric-label">L elbow</div><div class="metric-val" id="ec-l-elbow">—</div><div class="metric-sub" id="ec-l-elbow-conf">—</div></div>
+        <div class="metric"><div class="metric-label">R elbow</div><div class="metric-val" id="ec-r-elbow">—</div><div class="metric-sub" id="ec-r-elbow-conf">—</div></div>
       </div>
 
       <h3>Wrist y over time</h3>
@@ -97,14 +97,18 @@ export const EngineCompareRule = {
     const b = state.poseSecondary;
     const sf = b ? secondaryFrame(state) : null;
     const setJointDiff = (id, j) => {
-      if (!b) return setText(id, "—");
-      if (sf == null) return setText(id, "out of range");
+      const confId = `${id}-conf`;
+      if (!b) { setText(id, "—"); setText(confId, "—"); return; }
+      if (sf == null) { setText(id, "out of range"); setText(confId, "—"); return; }
       const ax = a.skeleton[(f * 17 + j) * 2];
       const ay = a.skeleton[(f * 17 + j) * 2 + 1];
       const ac = a.conf[f * 17 + j];
       const bx = b.skeleton[(sf * 17 + j) * 2];
       const by = b.skeleton[(sf * 17 + j) * 2 + 1];
       const bc = b.conf[sf * 17 + j];
+      setHTML(confId,
+        `<span style="color:${Y_WRIST}">Y ${ac.toFixed(2)}</span> · ` +
+        `<span style="color:${V_WRIST}">V ${bc.toFixed(2)}</span>`);
       if (ac < 0.05 || bc < 0.05) {
         setText(id, "low conf");
         return;
@@ -238,4 +242,9 @@ function drawWristTrace(canvas, a, b, jointIdx, frame) {
 function setText(id, value) {
   const el = host?.querySelector("#" + id);
   if (el) el.textContent = value;
+}
+
+function setHTML(id, html) {
+  const el = host?.querySelector("#" + id);
+  if (el) el.innerHTML = html;
 }
