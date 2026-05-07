@@ -79,12 +79,15 @@ export const EngineCompareRule = {
       strokeWidth: 2 * s,
     });
     if (state.poseSecondary) {
-      drawEngineSkeleton(ctx, state.poseSecondary, state.frame, {
-        boneColor: V_BONE, boneWidth: 2 * s,
-        jointColor: V_WRIST, jointRadius: 4 * s,
-        wristColor: V_WRIST, wristRadius: 9 * s,
-        strokeWidth: 2 * s,
-      });
+      const sf = secondaryFrame(state);
+      if (sf != null) {
+        drawEngineSkeleton(ctx, state.poseSecondary, sf, {
+          boneColor: V_BONE, boneWidth: 2 * s,
+          jointColor: V_WRIST, jointRadius: 4 * s,
+          wristColor: V_WRIST, wristRadius: 9 * s,
+          strokeWidth: 2 * s,
+        });
+      }
     }
   },
 
@@ -92,14 +95,16 @@ export const EngineCompareRule = {
     const f = state.frame;
     const a = state.pose;
     const b = state.poseSecondary;
+    const sf = b ? secondaryFrame(state) : null;
     const setJointDiff = (id, j) => {
       if (!b) return setText(id, "—");
+      if (sf == null) return setText(id, "out of range");
       const ax = a.skeleton[(f * 17 + j) * 2];
       const ay = a.skeleton[(f * 17 + j) * 2 + 1];
       const ac = a.conf[f * 17 + j];
-      const bx = b.skeleton[(f * 17 + j) * 2];
-      const by = b.skeleton[(f * 17 + j) * 2 + 1];
-      const bc = b.conf[f * 17 + j];
+      const bx = b.skeleton[(sf * 17 + j) * 2];
+      const by = b.skeleton[(sf * 17 + j) * 2 + 1];
+      const bc = b.conf[sf * 17 + j];
       if (ac < 0.05 || bc < 0.05) {
         setText(id, "low conf");
         return;
@@ -119,6 +124,19 @@ export const EngineCompareRule = {
     }
   },
 };
+
+// Map the primary's current frame to the secondary's frame index by VIDEO
+// TIME, not by frame index. Required because the two engines can have
+// (slightly) different start_sec or fps after the NTSC-drift fix —
+// secondary's frame N no longer necessarily covers the same instant as
+// primary's frame N. Returns null when video time falls outside the
+// secondary cache's range.
+function secondaryFrame(state) {
+  const a = state.pose, b = state.poseSecondary;
+  const t = (a.start_sec || 0) + state.frame / a.fps;
+  const sf = Math.round((t - (b.start_sec || 0)) * b.fps);
+  return (sf >= 0 && sf < b.n_frames) ? sf : null;
+}
 
 // Draw a single engine's skeleton with custom colours. Largely a stripped-down
 // fork of skeleton.js drawSkeleton so we can colour everything one engine at a
