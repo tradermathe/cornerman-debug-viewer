@@ -343,6 +343,16 @@ function start(pose, poseSecondary = null) {
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;
+  // YOLO extraction (yolo_pose_extraction.ipynb) floors the start frame:
+  //   start_frame = int(actual_start_sec * fps); cap.set(POS_FRAMES, start_frame)
+  // and walks N frames from there. The .npy data therefore lives on
+  // source frames [start_frame_floor .. start_frame_floor + n_frames).
+  // If we set video.currentTime = start_sec + (f+0.5)/fps directly, when
+  // (start_sec * fps) has a fractional part >= 0.5, the +0.5 epsilon walks
+  // us past the floored frame's time slot into the next source frame —
+  // skeleton ends up drawn one frame late. Snap to the floored frame's
+  // timeline instead so seek and data agree.
+  state.start_frame = Math.floor(state.start_sec * state.fps);
   state.frame = 0;
 
   els.pickerCard.classList.add("loaded");
@@ -446,10 +456,10 @@ function seekToFrame(f) {
   f = Math.max(0, Math.min(state.n_frames - 1, Math.round(f)));
   state.frame = f;
   els.scrubber.value = f;
-  // Frame N of the cache lives at video time start_sec + (N + 0.5)/fps —
-  // the +0.5 lands in the middle of the frame's time slot so we don't end
-  // up on a boundary and get the previous video frame back.
-  els.video.currentTime = state.start_sec + (f + 0.5) / state.fps;
+  // Cache frame N lives on source frame (start_frame + N). The +0.5
+  // epsilon lands in the middle of that source frame's time slot so the
+  // browser doesn't pick the previous frame on a boundary.
+  els.video.currentTime = (state.start_frame + f + 0.5) / state.fps;
   // canvas redraw happens on the seeked event so video+overlay stay in sync.
 }
 
@@ -463,7 +473,7 @@ const hasRvfc = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
 let playbackHandle = null;
 
 function syncFromVideoTime(t_video) {
-  const f = Math.floor((t_video - state.start_sec) * state.fps);
+  const f = Math.floor(t_video * state.fps) - state.start_frame;
   if (f !== state.frame) {
     state.frame = Math.max(0, Math.min(f, state.n_frames - 1));
     els.scrubber.value = state.frame;
@@ -544,7 +554,7 @@ function seekThumb() {
   if (thumbTarget == null || !els.thumbVideo.src) return;
   const target = thumbTarget;
   thumbSeekInFlight = true;
-  els.thumbVideo.currentTime = state.start_sec + (target + 0.5) / state.fps;
+  els.thumbVideo.currentTime = (state.start_frame + target + 0.5) / state.fps;
   els.thumbVideo.onseeked = () => {
     drawThumb(target);
     thumbDrawn = target;
