@@ -1,53 +1,63 @@
-// Engine compare lens — overlays YOLO and Apple Vision skeletons on the
-// same frame so we can eyeball where they disagree, especially around the
-// wrists when gloves are on.
-//
-// Requires the cache folder to contain BOTH `<base>_yolo_r{N}.*` and
-// `<base>_vision_r{N}.*` for the loaded round. If only one engine is
-// present, the lens shows a "no comparison data" message and falls back
-// to drawing just the primary skeleton.
+// Engine compare lens — shows the source video twice, side by side, with
+// YOLO drawn on the main stage and Apple Vision drawn on a mirrored video
+// inside the lens panel. Each engine's skeleton stays on its own pane so
+// the small (~1 frame) seek-vs-walk timing difference between the two
+// extractions doesn't show up as a "ghost" overlay disagreement.
 //
 // Visual encoding:
-//   YOLO   — orange/yellow joints + warm bones
-//   Vision — cyan/green joints + cool bones
-//   wrists drawn larger so the divergence is easy to read
+//   YOLO   — orange/yellow joints + warm bones (main stage)
+//   Vision — cyan/green joints + cool bones    (lens-side mirror)
 
 import { J } from "../skeleton.js";
 
-const Y_BONE = "rgba(255,170,80,0.55)";   // YOLO bones
-const V_BONE = "rgba(110,200,255,0.55)";  // Vision bones
+const Y_BONE = "rgba(255,170,80,0.55)";
+const V_BONE = "rgba(110,200,255,0.55)";
 const Y_WRIST = "#ff8a3c";
 const V_WRIST = "#5fd1ff";
 const HIGHLIGHT = new Set([J.NOSE, J.L_WRIST, J.R_WRIST, J.L_ELBOW, J.R_ELBOW]);
 
 let host;
+let sideVideo = null;
+let sideCanvas = null;
+let mainVideo = null;
+let syncHandlers = null;
 
 export const EngineCompareRule = {
   id: "engine_compare",
   label: "Engine compare (YOLO vs Vision)",
 
-  // Suppress the base skeleton renderer — we draw both ourselves.
+  // Suppress the base skeleton renderer — we draw YOLO ourselves on the main
+  // canvas (so it's a single-engine overlay rather than two on top).
   skeletonStyle() {
     return { boneColor: "rgba(0,0,0,0)", jointRadius: 0, minConf: Infinity };
   },
 
   mount(_host, state) {
     host = _host;
+    teardownSync();
     const hasBoth = !!state.poseSecondary;
     host.innerHTML = `
       <h2>Engine compare (YOLO vs Vision)</h2>
-      ${hasBoth ? "" : `
+      <p class="hint">
+        Main stage shows <span style="color:${Y_WRIST}"><b>YOLO</b></span>.
+        Pane below shows the same source with
+        <span style="color:${V_WRIST}"><b>Apple Vision</b></span>.
+        Each skeleton stays on its own pane so the seek-vs-walk frame timing
+        difference doesn't read as overlay disagreement.
+      </p>
+
+      ${hasBoth ? `
+        <div class="ec-side-wrap">
+          <video id="ec-side-video" muted playsinline preload="auto"></video>
+          <canvas id="ec-side-canvas"></canvas>
+        </div>
+      ` : `
         <p class="hint" style="color:var(--bad)">
           No second engine for this round. Make sure the cache folder
           contains both <code>&lt;base&gt;_yolo_r{N}.*</code> and
           <code>&lt;base&gt;_vision_r{N}.*</code> files.
         </p>
       `}
-      <p class="hint">
-        <span style="color:${Y_WRIST}">orange/yellow</span> = YOLO,
-        <span style="color:${V_WRIST}">cyan/green</span> = Apple Vision.
-        Wrists drawn extra-large so disagreement reads at a glance.
-      </p>
 
       <h3>Per-frame Δ (raw px)</h3>
       <p class="hint">Distance between YOLO and Vision detection of each joint at this frame.</p>
@@ -68,9 +78,12 @@ export const EngineCompareRule = {
       <canvas id="ec-trace-r" width="320" height="100"></canvas>
       <div class="metric-sub" style="text-align:center">R wrist y</div>
     `;
+
+    if (hasBoth) setupSidePane(state);
   },
 
   draw(ctx, state) {
+    // Main canvas: YOLO only.
     const s = state.renderScale || 1;
     drawEngineSkeleton(ctx, state.pose, state.frame, {
       boneColor: Y_BONE, boneWidth: 2 * s,
@@ -78,20 +91,41 @@ export const EngineCompareRule = {
       wristColor: Y_WRIST, wristRadius: 9 * s,
       strokeWidth: 2 * s,
     });
-    if (state.poseSecondary) {
+
+    // Side canvas: Vision only, drawn at the secondary pose's frame (which
+    // we resolve by VIDEO TIME, not frame index — matters when start_sec/fps
+    // differ between engines after the NTSC drift fix).
+    if (sideCanvas && state.poseSecondary) {
+      const sCtx = sideCanvas.getContext("2d");
+      sCtx.clearRect(0, 0, sideCanvas.width, sideCanvas.height);
       const sf = secondaryFrame(state);
       if (sf != null) {
-        drawEngineSkeleton(ctx, state.poseSecondary, sf, {
-          boneColor: V_BONE, boneWidth: 2 * s,
-          jointColor: V_WRIST, jointRadius: 4 * s,
-          wristColor: V_WRIST, wristRadius: 9 * s,
-          strokeWidth: 2 * s,
+        const cssW = sideCanvas.getBoundingClientRect().width || sideCanvas.width;
+        const ss = sideCanvas.width / Math.max(1, cssW);
+        drawEngineSkeleton(sCtx, state.poseSecondary, sf, {
+          boneColor: V_BONE, boneWidth: 2 * ss,
+          jointColor: V_WRIST, jointRadius: 4 * ss,
+          wristColor: V_WRIST, wristRadius: 9 * ss,
+          strokeWidth: 2 * ss,
         });
       }
     }
   },
 
   update(state) {
+    // Mirror main video state into the side pane every redraw — covers
+    // keyboard scrub, scrubber drag, and play/pause without needing every
+    // event hooked up.
+    if (sideVideo && mainVideo) {
+      if (sideVideo.src !== mainVideo.src) sideVideo.src = mainVideo.src;
+      const dt = Math.abs(sideVideo.currentTime - mainVideo.currentTime);
+      if (dt > 0.04) sideVideo.currentTime = mainVideo.currentTime;
+      if (mainVideo.paused !== sideVideo.paused) {
+        if (mainVideo.paused) sideVideo.pause();
+        else sideVideo.play().catch(() => {});
+      }
+    }
+
     const f = state.frame;
     const a = state.pose;
     const b = state.poseSecondary;
@@ -125,6 +159,52 @@ export const EngineCompareRule = {
   },
 };
 
+function setupSidePane(state) {
+  sideVideo = host.querySelector("#ec-side-video");
+  sideCanvas = host.querySelector("#ec-side-canvas");
+  mainVideo = document.getElementById("video");
+
+  // Internal canvas resolution = source video's, so we draw with raw pixel
+  // skeleton coords just like the main canvas. CSS scales both together.
+  const w = state.poseSecondary.width  || mainVideo.videoWidth  || 16;
+  const h = state.poseSecondary.height || mainVideo.videoHeight || 9;
+  sideCanvas.width = w;
+  sideCanvas.height = h;
+
+  // Mirror aspect ratio so portrait videos don't blow up.
+  const wrap = host.querySelector(".ec-side-wrap");
+  if (wrap) wrap.style.setProperty("--video-ratio", `${w} / ${h}`);
+
+  // Boot the side video at the main's current state.
+  sideVideo.src = mainVideo.src;
+  sideVideo.currentTime = mainVideo.currentTime;
+  if (!mainVideo.paused) sideVideo.play().catch(() => {});
+
+  // Belt-and-braces sync — update() runs each redraw and is the main path,
+  // but these events let the side pane catch up faster on big jumps.
+  syncHandlers = {
+    seeked:    () => { sideVideo.currentTime = mainVideo.currentTime; },
+    play:      () => sideVideo.play().catch(() => {}),
+    pause:     () => sideVideo.pause(),
+    ratechange: () => { sideVideo.playbackRate = mainVideo.playbackRate; },
+  };
+  for (const [evt, h] of Object.entries(syncHandlers)) {
+    mainVideo.addEventListener(evt, h);
+  }
+}
+
+function teardownSync() {
+  if (syncHandlers && mainVideo) {
+    for (const [evt, h] of Object.entries(syncHandlers)) {
+      mainVideo.removeEventListener(evt, h);
+    }
+  }
+  syncHandlers = null;
+  sideVideo = null;
+  sideCanvas = null;
+  mainVideo = null;
+}
+
 // Map the primary's current frame to the secondary's frame index by VIDEO
 // TIME, not by frame index. Required because the two engines can have
 // (slightly) different start_sec or fps after the NTSC-drift fix —
@@ -138,9 +218,6 @@ function secondaryFrame(state) {
   return (sf >= 0 && sf < b.n_frames) ? sf : null;
 }
 
-// Draw a single engine's skeleton with custom colours. Largely a stripped-down
-// fork of skeleton.js drawSkeleton so we can colour everything one engine at a
-// time without fighting the highlight-set logic.
 function drawEngineSkeleton(ctx, pose, frame, style) {
   const EDGES = [
     [5,7],[7,9],[6,8],[8,10],
@@ -191,7 +268,6 @@ function drawWristTrace(canvas, a, b, jointIdx, frame) {
   const N = a.n_frames;
   const stride = Math.max(1, Math.floor(N / W));
 
-  // Autoscale across both engines.
   let yMin = Infinity, yMax = -Infinity;
   const sample = (p) => {
     for (let f = 0; f < N; f += stride) {

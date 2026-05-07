@@ -227,6 +227,29 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
 .muted { color: var(--fg-muted); }
 .small { font-size: 11px; }
 
+/* Engine compare lens — side mirror video. Same shape as .video-wrap but
+   sized to fill the side panel rather than competing for stage real estate. */
+.ec-side-wrap {
+  position: relative;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: var(--video-ratio, 16 / 9);
+  width: 100%;
+  margin: 0 0 12px;
+}
+.ec-side-wrap video,
+.ec-side-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.ec-side-wrap canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 /* ── Side panel ────────────────────────────────────────────────────────── */
 #side {
   background: var(--bg-card);
