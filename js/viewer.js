@@ -11,6 +11,7 @@ const els = {
   videoFile:    document.getElementById("video-file"),
   poseFile:     document.getElementById("pose-file"),
   cacheFolder:  document.getElementById("cache-folder"),
+  cacheClear:   document.getElementById("cache-clear"),
   cacheStatus:  document.getElementById("cache-status"),
   cacheSection: document.getElementById("cache-section"),
   roundSel:     document.getElementById("round-select"),
@@ -59,6 +60,7 @@ const state = {
 
 // ── File loading ────────────────────────────────────────────────────────────
 els.cacheFolder.addEventListener("change", onCacheFolder);
+els.cacheClear.addEventListener("click", onCacheClear);
 els.videoFile.addEventListener("change", onVideoPick);
 els.roundSel.addEventListener("change", onRoundPick);
 els.poseFile.addEventListener("change", onManualPose);
@@ -67,9 +69,14 @@ els.poseFile.addEventListener("change", onManualPose);
 // `<base>_<engine>_r<N>_meta.json`. `engine` is `yolo` or `vision`. Each
 // round entry tracks both engines independently so the viewer can offer a
 // YOLO-vs-Vision compare lens whenever both are present.
+//
+// Picks MERGE into the existing index (so the cross-platform workflow is
+// "pick yolo_pose_cache, then pick apple_vision_pose_cache"); use the
+// Clear button to start over. Re-picking a folder that already contributed
+// files just upserts those files — same files in same slot, no growth.
 function onCacheFolder(e) {
   const files = Array.from(e.target.files || []);
-  cacheIndex = new Map();
+  if (!cacheIndex) cacheIndex = new Map();
   for (const f of files) {
     if (f.name.endsWith(".bak.npy")) continue;
     const m = f.name.match(/^(.+?)_(yolo|vision)_r(\d+)(_meta)?\.(npy|json)$/);
@@ -101,26 +108,48 @@ function onCacheFolder(e) {
     if (rounds.size === 0) cacheIndex.delete(base);
   }
 
-  const nVideos = cacheIndex.size;
-  let nRounds = 0, nVision = 0;
-  for (const rounds of cacheIndex.values()) {
+  refreshCacheStatus();
+
+  // Reset the input so picking the same folder again still fires `change`
+  // (otherwise the second click is a no-op and the user thinks merging is
+  // broken).
+  els.cacheFolder.value = "";
+
+  // Re-evaluate any already-picked video against the updated index.
+  if (els.videoFile.files[0]) onVideoPick();
+}
+
+function onCacheClear() {
+  cacheIndex = null;
+  refreshCacheStatus();
+  populateRoundSelect(null);
+  if (els.videoFile.files[0]) onVideoPick();
+}
+
+function refreshCacheStatus() {
+  const nVideos = cacheIndex?.size || 0;
+  let nRounds = 0, nYolo = 0, nVision = 0;
+  for (const rounds of cacheIndex?.values() || []) {
     for (const slot of rounds.values()) {
       nRounds++;
+      if (slot.yolo)   nYolo++;
       if (slot.vision) nVision++;
     }
   }
   if (nRounds) {
-    const visionNote = nVision ? `, ${nVision} with Apple Vision` : "";
+    const parts = [];
+    if (nYolo)   parts.push(`${nYolo} YOLO`);
+    if (nVision) parts.push(`${nVision} Apple Vision`);
     els.cacheStatus.textContent =
-      `— ${nRounds} rounds across ${nVideos} videos${visionNote}`;
+      `— ${nRounds} rounds across ${nVideos} videos (${parts.join(" + ")})`;
     if (els.cacheSection) els.cacheSection.open = false;
+    els.cacheClear.hidden = false;
   } else {
-    els.cacheStatus.textContent =
-      "— no `_<engine>_r{N}.npy + _meta.json` pairs found in that folder";
+    els.cacheStatus.textContent = cacheIndex
+      ? "— no `_<engine>_r{N}.npy + _meta.json` pairs found in that folder"
+      : "— pick once per session";
+    els.cacheClear.hidden = true;
   }
-
-  // Re-evaluate any already-picked video against the new index.
-  if (els.videoFile.files[0]) onVideoPick();
 }
 
 function onVideoPick() {

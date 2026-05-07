@@ -16,15 +16,17 @@
     <details id="cache-section" open>
       <summary><span class="section-label">Cache folder</span> <span id="cache-status" class="muted small">— pick once per session</span></summary>
       <label class="folder-pick">
-        <span class="muted">Viewer auto-matches videos against this folder.</span>
+        <span class="muted">Viewer auto-matches videos against this folder. Pick again to add another folder; the index merges.</span>
         <input type="file" id="cache-folder" webkitdirectory directory multiple>
+        <button type="button" id="cache-clear" class="muted small" hidden>Clear index</button>
       </label>
       <p class="hint">
-        Typically
-        <code>~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/</code>.
-        Coords are de-normalised to pixels using the video's natural
-        dimensions. Files stay on your machine — the page uses the browser
-        File API and never uploads anywhere.
+        Pick <code>boxing_ai/yolo_pose_cache/</code>, then pick again for
+        <code>boxing_ai/apple_vision_pose_cache/</code> — works identically
+        on Mac and Windows, no need to point at the massive parent folder.
+        When both engines exist for a round, the engine-compare lens lights
+        up. Files stay on your machine — the page uses the browser File API
+        and never uploads anywhere.
       </p>
     </details>
 

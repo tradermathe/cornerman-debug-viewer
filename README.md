@@ -1,8 +1,10 @@
 # Cornerman rule debug viewer
 
-A static, dependency-free web app for inspecting YOLO-Pose Drive caches
-against the [Cornerman](https://github.com/tradermathe/cornerman-backend)
-rules engine, frame by frame.
+A static, dependency-free web app for inspecting YOLO-Pose and Apple
+Vision Drive caches against the
+[Cornerman](https://github.com/tradermathe/cornerman-backend) rules
+engine, frame by frame. When both engines exist for a round, the
+engine-compare lens overlays them side-by-side.
 
 **Live**: https://tradermathe.github.io/cornerman-debug-viewer/
 
@@ -22,10 +24,14 @@ nothing is uploaded.
 
 ## Workflow
 
-1. **Cache folder** — pick
-   `~/Google Drive/My Drive/boxing_ai/yolo_pose_cache/` once. The viewer
-   indexes every `<base>_yolo_r<N>.npy + <base>_yolo_r<N>_meta.json`
-   pair (skipping `.bak.npy` backups) and reports the count.
+1. **Cache folder** — pick `boxing_ai/yolo_pose_cache/`, then pick
+   again for `boxing_ai/apple_vision_pose_cache/`. The viewer indexes
+   every `<base>_<engine>_r<N>.npy + <base>_<engine>_r<N>_meta.json`
+   pair (`<engine>` is `yolo` or `vision`, `.bak.npy` backups skipped)
+   and **merges picks** so both engines end up in one index. Status
+   line reports counts per engine. Use *Clear index* to start over.
+   Same workflow on Mac and Windows — no symlinks, no parent-folder
+   pick.
 2. **Video** — pick an `.mp4`. If its basename matches an indexed video,
    the viewer auto-loads the only round, or shows a round dropdown when
    multiple rounds exist.
@@ -33,7 +39,7 @@ nothing is uploaded.
 
 ## Input format
 
-YOLO-Pose Drive cache:
+Drive cache (same shape for both YOLO-Pose and on-device Apple Vision):
 
 - `<round>.npy` — float32, shape `(N, 17, 3)`, one row per joint per
   frame holding `(x, y, conf)`. Layout is COCO-17. Coords are normalised
