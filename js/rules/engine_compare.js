@@ -145,6 +145,13 @@ function secondaryFrame(state) {
 // Draw a single engine's skeleton with custom colours. Largely a stripped-down
 // fork of skeleton.js drawSkeleton so we can colour everything one engine at a
 // time without fighting the highlight-set logic.
+// 0.3 gate: low enough that genuinely visible joints with reduced conf still
+// render (Vision's mean conf is ~0.6, well above this), high enough that
+// off-screen "guesses" Apple Vision keeps emitting at conf 0.1-0.2 don't
+// produce ghost bones into thin air. Tuned against the close-up cuts in
+// "3 BODY SHOT COMBOS" where the knees aren't in frame.
+const DRAW_CONF_GATE = 0.3;
+
 function drawEngineSkeleton(ctx, pose, frame, style) {
   const EDGES = [
     [5,7],[7,9],[6,8],[8,10],
@@ -157,7 +164,7 @@ function drawEngineSkeleton(ctx, pose, frame, style) {
   for (const [a, b] of EDGES) {
     const ca = pose.conf[frame * 17 + a];
     const cb = pose.conf[frame * 17 + b];
-    if (ca < 0.05 || cb < 0.05) continue;
+    if (ca < DRAW_CONF_GATE || cb < DRAW_CONF_GATE) continue;
     const ax = pose.skeleton[(frame * 17 + a) * 2];
     const ay = pose.skeleton[(frame * 17 + a) * 2 + 1];
     const bx = pose.skeleton[(frame * 17 + b) * 2];
@@ -169,7 +176,7 @@ function drawEngineSkeleton(ctx, pose, frame, style) {
   }
   for (let j = 0; j < 17; j++) {
     const c = pose.conf[frame * 17 + j];
-    if (c < 0.05) continue;
+    if (c < DRAW_CONF_GATE) continue;
     const x = pose.skeleton[(frame * 17 + j) * 2];
     const y = pose.skeleton[(frame * 17 + j) * 2 + 1];
     const isWrist = j === J.L_WRIST || j === J.R_WRIST;
