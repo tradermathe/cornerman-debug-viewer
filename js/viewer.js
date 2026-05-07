@@ -3,6 +3,15 @@
 // and get a chance to (a) draw extra overlay graphics each frame and (b) own
 // a side-panel DOM area that they refresh.
 
+// Bump this on every push so the user can tell whether the new code is
+// actually live or whether GitHub Pages / their browser is still serving
+// a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
+const BUILD = "2026-05-07.4";
+{
+  const el = document.getElementById("build-tag");
+  if (el) el.textContent = `build ${BUILD}`;
+}
+
 import { loadPose } from "./pose-loader.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
