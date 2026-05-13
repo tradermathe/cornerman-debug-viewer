@@ -25,7 +25,7 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // Same pattern that viewer.js's <input> picker uses — kept in sync so a
 // Drive-folder walk indexes exactly the same files a manual folder pick would.
 const CACHE_FILE_RE =
-  /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches)?\.(npy|json)$/;
+  /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches|_labels)?\.(npy|json)$/;
 
 // ── IndexedDB plumbing (tiny manual wrapper to avoid pulling in idb-keyval) ──
 
@@ -171,6 +171,7 @@ export async function walk(rootHandle) {
       if (ext === "npy")              engineSlot.npy = entry;
       else if (suffix === "_meta")    engineSlot.meta = entry;
       else if (suffix === "_punches") engineSlot.punches = entry;
+      else if (suffix === "_labels")  engineSlot.labels = entry;
     }
   }
 

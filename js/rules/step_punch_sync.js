@@ -39,6 +39,7 @@
 // * Threshold sliders.
 
 import { J, torsoHeight } from "../skeleton.js";
+import { fetchLiveLabels } from "../sheet-labels.js";
 
 const DEFAULTS = {
   stance: "orthodox",          // orthodox = lead is L; southpaw = lead is R
@@ -109,6 +110,42 @@ export const StepPunchSyncRule = {
       renderTables(state);
       seekHack(state, state.frame);
     });
+
+    // "Refresh from Sheet" — only meaningful when we have a labels binding.
+    const refreshBtn = host.querySelector("#sps-refresh");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", async () => {
+        if (!state.labels?.source_video) {
+          refreshBtn.textContent = "no labels file to refresh";
+          return;
+        }
+        refreshBtn.disabled = true;
+        const prev = refreshBtn.textContent;
+        refreshBtn.textContent = "fetching…";
+        const live = await fetchLiveLabels({
+          sourceVideo: state.labels.source_video,
+          cacheStartSec: state.labels.cache_start_sec || 0,
+          fps: state.pose.fps,
+          nFrames: state.pose.n_frames,
+        });
+        refreshBtn.disabled = false;
+        if (live.error) {
+          refreshBtn.textContent = `failed: ${live.error}`;
+          setTimeout(() => { refreshBtn.textContent = prev; }, 3000);
+          return;
+        }
+        state.labels = {
+          ...state.labels,
+          ...live,
+          detections: live.detections,
+        };
+        signals = computeAll(state, cfg);
+        renderTables(state);
+        seekHack(state, state.frame);
+        refreshBtn.textContent = `↻ refreshed (${live.detections.length} punches)`;
+        setTimeout(() => { refreshBtn.textContent = prev; }, 2500);
+      });
+    }
 
     wireSlider(state, "#sps-high",   "highVelThreshold",  v => v.toFixed(3));
     wireSlider(state, "#sps-low",    "lowVelThreshold",   v => v.toFixed(3));
@@ -218,6 +255,7 @@ function template() {
       <b>PLANT</b>. <b>Only lead-foot steps</b> count toward the sync verdict.</p>
 
     <div id="sps-source-pill" class="hint" style="margin-bottom:8px"></div>
+    <button type="button" id="sps-refresh" class="muted small" style="margin-bottom:8px">Refresh from Sheet</button>
 
     <h3>Stance</h3>
     <select id="sps-stance">
@@ -296,10 +334,26 @@ function renderTables(state) {
 
   // Source pill: tell the user where punches came from.
   const pill = host.querySelector("#sps-source-pill");
-  if (signals.source === "stgcn") {
-    pill.innerHTML = `<span class="role-lead">ST-GCN punches</span> · ${signals.punches.length} detected · from <code>${state.punches?.source || "punches.json"}</code>`;
+  const refreshBtn = host.querySelector("#sps-refresh");
+  if (signals.source === "labels") {
+    const liveTag = state.labels?.source === "labels_sheet_live"
+      ? ` · <span class="good">live</span> @ ${new Date(state.labels.fetched_at).toLocaleTimeString()}`
+      : ` · offline (sidecar)`;
+    pill.innerHTML =
+      `<span class="role-lead">Ground truth</span> · ${signals.punches.length} labels` +
+      `${liveTag} · video <code>${state.labels?.source_video || "?"}</code>`;
+    if (refreshBtn) refreshBtn.hidden = false;
+  } else if (signals.source === "stgcn") {
+    pill.innerHTML =
+      `<span class="role-rear">ST-GCN punches</span> · ${signals.punches.length} detected · ` +
+      `from <code>${state.punches?.source || "punches.json"}</code> · ` +
+      `(drop a <code>*_labels.json</code> for ground truth)`;
+    if (refreshBtn) refreshBtn.hidden = true;
   } else {
-    pill.innerHTML = `<span class="role-rear">Heuristic punches (no ST-GCN file)</span> · ${signals.punches.length} wrist-peak candidates · drop a sibling <code>*_punches.json</code> next to the cache for real detections.`;
+    pill.innerHTML =
+      `<span class="role-rear">Heuristic punches</span> · ${signals.punches.length} wrist-peak candidates · ` +
+      `drop a <code>*_labels.json</code> or <code>*_punches.json</code> next to the cache for real detections.`;
+    if (refreshBtn) refreshBtn.hidden = true;
   }
   host.querySelector("#sps-extmin-wrap").style.display =
     signals.source === "heuristic" ? "" : "none";
@@ -398,13 +452,28 @@ function computeAll(state, cfg) {
   const searchFrames = Math.max(2, Math.round(cfg.searchWindowSec * fps));
   const leadIdx = leadAnkleIdx(cfg.stance);
 
-  // Source 1: ST-GCN detections (preferred when available).
+  // Punch source priority:
+  //   1. state.labels  — ground truth from the labeler Sheet (preferred)
+  //   2. state.punches — ST-GCN export
+  //   3. wrist-extension peaks — heuristic fallback
   let source = "heuristic";
+  let sourceMeta = null;
   let punches = [];
-  if (state.punches && Array.isArray(state.punches.detections) &&
-      state.punches.detections.length > 0) {
+  let detections = null;
+  if (state.labels && Array.isArray(state.labels.detections) &&
+      state.labels.detections.length > 0) {
+    source = "labels";
+    sourceMeta = state.labels;
+    detections = state.labels.detections;
+  } else if (state.punches && Array.isArray(state.punches.detections) &&
+             state.punches.detections.length > 0) {
     source = "stgcn";
-    punches = state.punches.detections.map((d, idx) => {
+    sourceMeta = state.punches;
+    detections = state.punches.detections;
+  }
+
+  if (detections) {
+    punches = detections.map((d, idx) => {
       const side = punchSide(d.hand, cfg.stance);
       const wristJ = side === "L" ? J.L_WRIST : J.R_WRIST;
       const shoulderJ = side === "L" ? J.L_SHOULDER : J.R_SHOULDER;

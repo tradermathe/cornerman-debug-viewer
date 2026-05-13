@@ -70,7 +70,7 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   cursor: pointer;
 }
 #drive-connect:hover { filter: brightness(1.08); }
-#drive-disconnect {
+#drive-disconnect, #sps-refresh {
   background: transparent;
   color: var(--fg-muted);
   border: 1px solid var(--border);
@@ -79,7 +79,8 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   font: inherit;
   cursor: pointer;
 }
-#drive-disconnect:hover { color: var(--fg); }
+#drive-disconnect:hover, #sps-refresh:hover { color: var(--fg); }
+#sps-refresh:disabled { opacity: 0.5; cursor: progress; }
 
 .picker-row {
   display: grid;

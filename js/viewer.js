@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.3";
+const BUILD = "2026-05-13.4";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -14,6 +14,7 @@ const BUILD = "2026-05-13.3";
 
 import { loadPose } from "./pose-loader.js";
 import { loadPunches } from "./punches-loader.js";
+import { fetchLiveLabels } from "./sheet-labels.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 import * as drive from "./drive-folder.js";
@@ -289,13 +290,15 @@ function onCacheFolder(e) {
   if (!cacheIndex) cacheIndex = new Map();
   for (const f of files) {
     if (f.name.endsWith(".bak.npy")) continue;
-    // Three sibling patterns we recognize per round + engine:
+    // Four sibling patterns we recognize per round + engine:
     //   <base>_<engine>_r<N>.npy           — pose data
     //   <base>_<engine>_r<N>_meta.json     — pose metadata
     //   <base>_<engine>_r<N>_punches.json  — ST-GCN detections (optional;
     //                                        produced by dump_punches.py)
+    //   <base>_<engine>_r<N>_labels.json   — GT labels from the labeler Sheet
+    //                                        (optional; produced by dump_labels.py)
     const m = f.name.match(
-      /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches)?\.(npy|json)$/
+      /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches|_labels)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, engine, roundStr, suffix, ext] = m;
@@ -313,6 +316,7 @@ function onCacheFolder(e) {
     if (ext === "npy")                     engineSlot.npy = f;
     else if (suffix === "_meta")           engineSlot.meta = f;
     else if (suffix === "_punches")        engineSlot.punches = f;
+    else if (suffix === "_labels")         engineSlot.labels = f;
   }
 
   // Drop incomplete pose pairs (need .npy + _meta.json per engine). Punches
@@ -499,8 +503,65 @@ function loadFromIndex(videoFile, slot) {
           console.warn("punches load failed:", err.message);
         }
       }
+
+      // Optional sibling: ground-truth labels from the labeler Sheet. The
+      // sidecar JSON stores the cache↔source-video binding (source_video +
+      // cache_start_sec) so we can live-fetch the Sheet CSV here and surface
+      // new labels added since dump_labels.py was last run. If the network
+      // fetch fails, we fall back to whatever detections were serialized at
+      // dump time.
+      let labels = null;
+      if (primary.labels) {
+        try {
+          const labelsFile = await drive.toFile(primary.labels);
+          const offline = await loadPunches(labelsFile);
+          // Stash the binding fields from the raw JSON — loadPunches() only
+          // keeps detections, but we need source_video + cache_start_sec for
+          // the live refresh.
+          const raw = JSON.parse(await labelsFile.text());
+          labels = {
+            ...offline,
+            source: raw.source || "labels_xlsx",
+            source_video: raw.source_video || null,
+            cache_start_sec: Number(raw.cache_start_sec ?? 0),
+            n_frames: Number(raw.n_frames ?? posePrimary.n_frames),
+            file_name: labelsFile.name,
+          };
+
+          // Best-effort live refresh from the Sheet. Doesn't block the
+          // initial render — if it succeeds the lens panel auto-rerenders
+          // when state.labels changes after start() returns.
+          if (labels.source_video) {
+            fetchLiveLabels({
+              sourceVideo: labels.source_video,
+              cacheStartSec: labels.cache_start_sec,
+              fps: posePrimary.fps,
+              nFrames: posePrimary.n_frames,
+            }).then(live => {
+              if (token !== currentLoadToken) return;
+              if (live.error) {
+                console.warn("live label fetch failed:", live.error);
+                return;
+              }
+              state.labels = {
+                ...labels,
+                ...live,
+                source: live.source,
+                detections: live.detections,
+              };
+              // Re-mount the current rule so it picks up the fresh labels.
+              if (state.rule) state.rule.mount(els.ruleHost, state);
+              redraw();
+            }).catch(err => {
+              console.warn("live label fetch threw:", err);
+            });
+          }
+        } catch (err) {
+          console.warn("labels load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches);
+      start(posePrimary, poseSecondary, punches, labels);
     })
     .catch(err => {
       if (token !== currentLoadToken) return;
@@ -511,11 +572,12 @@ function loadFromIndex(videoFile, slot) {
 
 function loadFromFiles(videoFile, poseFiles) {
   // Manual file picker — single engine only. Pose loader takes the .npy and
-  // the _meta.json; a third file ending in _punches.json is consumed here as
-  // an optional ST-GCN-detection source for the step+punch-sync lens.
+  // the _meta.json; sibling _punches.json and _labels.json files are
+  // consumed here as optional inputs for the step+punch-sync lens.
   const all = Array.from(poseFiles);
-  const punchFile = all.find(f => /_punches\.json$/i.test(f.name));
-  const poseOnly = all.filter(f => f !== punchFile);
+  const punchFile  = all.find(f => /_punches\.json$/i.test(f.name));
+  const labelsFile = all.find(f => /_labels\.json$/i.test(f.name));
+  const poseOnly   = all.filter(f => f !== punchFile && f !== labelsFile);
   const names = all.map(f => f.name).join(" + ");
   els.loadStatus.textContent = `Loading ${videoFile.name} + ${names}…`;
   const token = ++currentLoadToken;
@@ -528,17 +590,45 @@ function loadFromFiles(videoFile, poseFiles) {
       });
       let punches = null;
       if (punchFile) {
+        try { punches = await loadPunches(punchFile); }
+        catch (err) { console.warn("punches load failed:", err.message); }
+      }
+      let labels = null;
+      if (labelsFile) {
         try {
-          punches = await loadPunches(punchFile);
+          const offline = await loadPunches(labelsFile);
+          const raw = JSON.parse(await labelsFile.text());
+          labels = {
+            ...offline,
+            source: raw.source || "labels_xlsx",
+            source_video: raw.source_video || null,
+            cache_start_sec: Number(raw.cache_start_sec ?? 0),
+            n_frames: Number(raw.n_frames ?? pose.n_frames),
+            file_name: labelsFile.name,
+          };
         } catch (err) {
-          console.warn("punches load failed:", err.message);
+          console.warn("labels load failed:", err.message);
         }
       }
-      return { pose, punches };
+      return { pose, punches, labels };
     })
     .then(loaded => {
       if (loaded == null || token !== currentLoadToken) return;
-      start(loaded.pose, null, loaded.punches);
+      start(loaded.pose, null, loaded.punches, loaded.labels);
+      // Best-effort live refresh of GT labels, same as the indexed path.
+      if (loaded.labels?.source_video) {
+        fetchLiveLabels({
+          sourceVideo: loaded.labels.source_video,
+          cacheStartSec: loaded.labels.cache_start_sec,
+          fps: loaded.pose.fps,
+          nFrames: loaded.pose.n_frames,
+        }).then(live => {
+          if (token !== currentLoadToken || live.error) return;
+          state.labels = { ...loaded.labels, ...live, detections: live.detections };
+          if (state.rule) state.rule.mount(els.ruleHost, state);
+          redraw();
+        }).catch(() => { /* network-only; ignore */ });
+      }
     })
     .catch(err => {
       if (token !== currentLoadToken) return;
@@ -584,10 +674,11 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null, punches = null) {
+function start(pose, poseSecondary = null, punches = null, labels = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.punches = punches;               // optional ST-GCN detections
+  state.labels = labels;                 // optional ground-truth labels (preferred over punches)
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;
