@@ -126,12 +126,19 @@ export const FacingDirectionRule = {
 function template() {
   return `
     <h2>Facing direction</h2>
-    <p class="hint">Per-frame estimate of the boxer's rotation around the
-      vertical body axis (i.e. <i>where is the chest pointing</i>).
-      0° = facing the camera, ±90° = sideways. Used as a competence gate
-      for rotation-sensitive rules — when the boxer is near 0° or 90°,
-      hip/shoulder rotation signals fall into their projection dead zones
-      and rules that depend on them should abstain.</p>
+    <p class="hint"><b>This tracks the body, not the face.</b> Magnitude
+      comes from hip and shoulder line lengths (the wider one each
+      frame); sign comes from face-joint confidence asymmetry (which
+      ear/eye is visible). Body and face usually rotate together but
+      can diverge — a boxer can keep their face square to the target
+      while rotating their hips. For gating rotation-based rules,
+      body angle is what matters.</p>
+    <p class="hint">0° = body facing the camera, ±90° = body sideways.
+      Rotation-based rules (hip rotation, shoulder rotation) hit
+      projection dead zones near 0° and near ±90° and should abstain
+      there. The magnitude is anchored to the boxer's own observed
+      range in this round: at their most-square frame it reads 0°,
+      at their most-bladed it reads 90°.</p>
 
     <h3>Now</h3>
     <div class="metric-grid">
@@ -259,30 +266,42 @@ function computeAll(state, cfg) {
     shoLine[f] = Math.hypot(lsx - rsx, lsy - rsy) / th;
   }
 
-  // Per-round max of each line (the boxer's most-square frame). Use the
-  // 95th percentile rather than absolute max so a single noisy frame
-  // doesn't peg the reference.
+  // Per-round 95th-percentile (most-square seen) AND 5th-percentile
+  // (most-bladed seen) for each line. Rescaling to the OBSERVED range
+  // matters: the skeleton estimator never lets the hip line go to truly
+  // zero even when the boxer is fully sideways (occluded joints still
+  // get a non-zero 2D best-guess), so without rescaling we'd top out at
+  // arccos(~0.3) ≈ 72° instead of 90°. Using the observed min as the
+  // floor anchors the "sideways = 90°" point at whatever the boxer's
+  // most-bladed frame actually projected to.
   const hipMax = percentile(hipLine, 0.95);
+  const hipMin = percentile(hipLine, 0.05);
   const shoMax = percentile(shoLine, 0.95);
+  const shoMin = percentile(shoLine, 0.05);
+  const hipRange = Math.max(1e-6, hipMax - hipMin);
+  const shoRange = Math.max(1e-6, shoMax - shoMin);
 
   const hipRatio = new Float32Array(N);
   const shoulderRatio = new Float32Array(N);
   const magnitudeDeg = new Float32Array(N);
-  const signDeg = new Float32Array(N);     // signed component, before magnitude
+  const signDeg = new Float32Array(N);
   const facingRaw = new Float32Array(N);
 
   for (let f = 0; f < N; f++) {
-    hipRatio[f]      = hipMax > 0 ? Math.min(1, hipLine[f] / hipMax) : 0;
-    shoulderRatio[f] = shoMax > 0 ? Math.min(1, shoLine[f] / shoMax) : 0;
-    // Magnitude: angle off-square. arccos returns [0, π/2] for ratio in
-    // [0, 1]. Use whichever line is wider — it's the less-occluded one
-    // this frame.
+    // Rescaled ratios: 1.0 at observed-max (most-square), 0.0 at
+    // observed-min (most-bladed). Clamped to [0, 1] to absorb noise
+    // outside the percentile band.
+    hipRatio[f]      = Math.min(1, Math.max(0, (hipLine[f] - hipMin) / hipRange));
+    shoulderRatio[f] = Math.min(1, Math.max(0, (shoLine[f] - shoMin) / shoRange));
+    // Use whichever line is wider — it's the less-occluded one this
+    // frame. Magnitude saturates at 90° by construction at the boxer's
+    // observed extremes.
     const ratio = Math.max(hipRatio[f], shoulderRatio[f]);
-    magnitudeDeg[f] = Math.acos(Math.min(1, Math.max(0, ratio))) * 180 / Math.PI;
-    // Sign: from face-joint asymmetry. Positive asym = L_ear/L_eye more
-    // visible = boxer rotated to the LEFT (their left ear toward camera),
-    // which we call POSITIVE in our convention.
-    signDeg[f] = faceAsymRaw[f];   // raw, will threshold below
+    magnitudeDeg[f] = Math.acos(ratio) * 180 / Math.PI;
+    // Sign: from face-joint asymmetry. Positive asym = L side more
+    // visible = boxer rotated such that their left flank is toward
+    // camera.
+    signDeg[f] = faceAsymRaw[f];
   }
 
   // Smooth + combine.
@@ -346,77 +365,102 @@ function zoneFor(angle, cfg) {
 // ── Drawing ────────────────────────────────────────────────────────────────
 
 function drawFacingArrow(ctx, pose, frame, angleDeg, scale) {
-  // Anchor at shoulder midpoint, extend a short line in the direction the
-  // boxer is facing (a 2D vector for visual clarity). Length is constant;
-  // angle = facing_angle.
-  const lsx = pose.skeleton[(frame * 17 + J.L_SHOULDER) * 2];
-  const lsy = pose.skeleton[(frame * 17 + J.L_SHOULDER) * 2 + 1];
-  const rsx = pose.skeleton[(frame * 17 + J.R_SHOULDER) * 2];
-  const rsy = pose.skeleton[(frame * 17 + J.R_SHOULDER) * 2 + 1];
-  const lsc = pose.conf[frame * 17 + J.L_SHOULDER];
-  const rsc = pose.conf[frame * 17 + J.R_SHOULDER];
-  if (lsc < 0.05 || rsc < 0.05) return;
-  const cx = (lsx + rsx) / 2;
-  const cy = (lsy + rsy) / 2;
-  const len = 60 * scale;
+  // Anchor at hip midpoint (well below the face) and draw a small, thin
+  // compass-style arrow indicating which way the boxer is rotated.
+  // Numeric label goes in the canvas's top-right corner so it never
+  // overlaps the boxer.
+  const lhx = pose.skeleton[(frame * 17 + J.L_HIP) * 2];
+  const lhy = pose.skeleton[(frame * 17 + J.L_HIP) * 2 + 1];
+  const rhx = pose.skeleton[(frame * 17 + J.R_HIP) * 2];
+  const rhy = pose.skeleton[(frame * 17 + J.R_HIP) * 2 + 1];
+  const lhc = pose.conf[frame * 17 + J.L_HIP];
+  const rhc = pose.conf[frame * 17 + J.R_HIP];
 
-  // Convention: angleDeg = 0 → arrow pointing OUT of the screen toward
-  // camera (we draw it as a small filled triangle at the chest). Non-zero
-  // angle → arrow rotates in 2D: + angle to the right, − to the left.
-  // We use sin for x-displacement (signed) and cos for "into the screen"
-  // (visualised as arrow length shrinking).
-  const rad = angleDeg * Math.PI / 180;
-  const dx = Math.sin(rad);   // horizontal component  -1..1
-  const intoScreen = Math.cos(rad); // 1 when facing camera, 0 when sideways
+  const haveHips = lhc >= 0.05 && rhc >= 0.05;
+  if (haveHips) {
+    const cx = (lhx + rhx) / 2;
+    const cy = (lhy + rhy) / 2;
+    // Arrow length scales with the (rescaled) hip line itself so it
+    // doesn't dwarf small boxers in the frame.
+    const hipPx = Math.hypot(lhx - rhx, lhy - rhy);
+    const len = Math.max(20 * scale, hipPx * 0.7);
 
+    const rad = angleDeg * Math.PI / 180;
+    const dx = Math.sin(rad);
+    const intoScreen = Math.cos(rad);
+
+    ctx.save();
+    // Small zone-colored dot under the hips. Subtle, doesn't obscure
+    // the skeleton.
+    const zone = zoneFor(angleDeg, cfg);
+    ctx.fillStyle = zone.color;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4 * scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Thin arrow body, anchored at hip midpoint.
+    const tipX = cx + dx * len;
+    const tipY = cy;     // keep horizontal — pure rotation indicator
+    ctx.strokeStyle = COLORS.arrow;
+    ctx.lineWidth = 2 * scale;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+
+    // Small arrowhead.
+    const ah = 6 * scale;
+    const angle = Math.atan2(tipY - cy, tipX - cx);
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - ah * Math.cos(angle - 0.4), tipY - ah * Math.sin(angle - 0.4));
+    ctx.lineTo(tipX - ah * Math.cos(angle + 0.4), tipY - ah * Math.sin(angle + 0.4));
+    ctx.closePath();
+    ctx.fillStyle = COLORS.arrow;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Top-right numeric label — independent of the boxer's position so it
+  // never overlaps the body.
+  drawCornerLabel(ctx, angleDeg, scale);
+}
+
+function drawCornerLabel(ctx, angleDeg, scale) {
+  const zone = zoneFor(angleDeg, cfg);
+  const angleTxt = formatAngle(angleDeg);
+  const zoneTxt = zone.label;
   ctx.save();
-
-  // Body-icon: a small filled half-circle at the chest indicating "front
-  // of body" direction. Color-coded by zone.
-  const zone = zoneFor(angleDeg, { sweetZoneMinDeg: 25, sweetZoneMaxDeg: 65 });
-  ctx.fillStyle = zone.color;
-  ctx.globalAlpha = 0.55 + 0.45 * intoScreen;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 12 * scale, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 1;
-
-  // Arrow: from chest center toward the camera-projected facing direction.
-  // We draw it at length proportional to "how visible the rotation is in 2D"
-  // (intoScreen scales the line length a bit but never to zero).
-  const tipX = cx + dx * len;
-  const tipY = cy - (8 * scale) * (1 - intoScreen);   // slight upward bias when sideways
-  ctx.strokeStyle = COLORS.arrow;
-  ctx.lineWidth = 4 * scale;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(tipX, tipY);
-  ctx.stroke();
-
-  // Arrowhead.
-  const ah = 9 * scale;
-  const angle = Math.atan2(tipY - cy, tipX - cx);
-  ctx.beginPath();
-  ctx.moveTo(tipX, tipY);
-  ctx.lineTo(tipX - ah * Math.cos(angle - 0.4), tipY - ah * Math.sin(angle - 0.4));
-  ctx.lineTo(tipX - ah * Math.cos(angle + 0.4), tipY - ah * Math.sin(angle + 0.4));
-  ctx.closePath();
-  ctx.fillStyle = COLORS.arrow;
-  ctx.fill();
-
-  // Label.
-  const txt = formatAngle(angleDeg);
   const fontPx = Math.round(13 * scale);
+  const subPx = Math.round(10 * scale);
   ctx.font = `bold ${fontPx}px ui-monospace, monospace`;
-  const tw = ctx.measureText(txt).width;
-  const lx = cx - tw / 2;
-  const ly = cy - 22 * scale;
-  ctx.fillStyle = "rgba(0,0,0,0.78)";
-  ctx.fillRect(lx - 4, ly - fontPx, tw + 8, fontPx + 4);
-  ctx.fillStyle = COLORS.arrow;
-  ctx.textBaseline = "alphabetic";
-  ctx.fillText(txt, lx, ly);
-
+  const w1 = ctx.measureText(angleTxt).width;
+  ctx.font = `${subPx}px ui-monospace, monospace`;
+  const w2 = ctx.measureText(zoneTxt).width;
+  const padX = 8 * scale, padY = 6 * scale;
+  const boxW = Math.max(w1, w2) + padX * 2;
+  const boxH = fontPx + subPx + padY * 2 + 2 * scale;
+  const x = ctx.canvas.width - boxW - 12 * scale;
+  const y = 12 * scale;
+  ctx.fillStyle = "rgba(0,0,0,0.72)";
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxW, boxH, 6 * scale);
+    ctx.fill();
+  } else {
+    ctx.fillRect(x, y, boxW, boxH);
+  }
+  ctx.fillStyle = zone.color;
+  ctx.fillRect(x, y, 4 * scale, boxH);
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "top";
+  ctx.font = `bold ${fontPx}px ui-monospace, monospace`;
+  ctx.fillText(angleTxt, x + padX, y + padY);
+  ctx.fillStyle = zone.color;
+  ctx.font = `${subPx}px ui-monospace, monospace`;
+  ctx.fillText(zoneTxt, x + padX, y + padY + fontPx + 2 * scale);
   ctx.restore();
 }
 
