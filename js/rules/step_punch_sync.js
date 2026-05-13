@@ -151,6 +151,7 @@ export const StepPunchSyncRule = {
     setText("sps-gap",  signals.gap[f]?.toFixed(3) ?? "—");
     setText("sps-baseline", signals.baseline.toFixed(3));
     setText("sps-ext-above", (signals.gap[f] - signals.baseline).toFixed(3));
+    setText("sps-noise", `±${signals.noiseFloor.toFixed(3)}`);
 
     const ap = activePunchAt(signals, f, cfg);
     setText("sps-active", describeActive(ap, f, signals.fps, cfg));
@@ -171,6 +172,21 @@ export const StepPunchSyncRule = {
 
     const li = leadAnkleIdx(cfg.stance);
     const ri = rearAnkleIdx(cfg.stance);
+
+    // Persistent markers: whenever the current frame IS the LAND or PLANT
+    // frame of any punch, draw the matching ring + label — independent of
+    // whether we're inside a search window. This way scrubbing through the
+    // round always shows "yes, the algorithm called the plant here."
+    for (const p2 of signals.punches) {
+      if (p2.has_land && p2.land_frame === f) {
+        const wristJ = p2.side === "L" ? J.L_WRIST : J.R_WRIST;
+        emphasizeJoint(ctx, p, f, wristJ, COLORS.arm, "LAND", 14, s);
+      }
+      if (p2.step_found && p2.plant_frame === f) {
+        const color = p2.is_out_of_sync ? COLORS.oos : COLORS.lead;
+        emphasizeJoint(ctx, p, f, li, color, "PLANT", 16, s);
+      }
+    }
 
     if (ap) {
       drawSeg(ctx, p, f,
@@ -237,6 +253,11 @@ function template() {
       <div class="metric"><div class="metric-label">gap</div><div class="metric-val" id="sps-gap">—</div></div>
       <div class="metric"><div class="metric-label">baseline</div><div class="metric-val" id="sps-baseline">—</div></div>
       <div class="metric"><div class="metric-label">ext above baseline</div><div class="metric-val" id="sps-ext-above">—</div></div>
+      <div class="metric">
+        <div class="metric-label">noise floor</div>
+        <div class="metric-val" id="sps-noise">—</div>
+        <div class="metric-sub muted">idle wobble · threshold should clear this</div>
+      </div>
     </div>
     <p class="hint" style="margin-top:4px"><span id="sps-active" class="muted">—</span></p>
 
@@ -394,6 +415,10 @@ function computeAll(state, cfg) {
   // Baseline = median over the whole clip. Robust to brief excursions
   // (steps) — gives us the boxer's idle stance width.
   const baseline = median(gap);
+  // Empirical noise floor: MAD of |gap − baseline| on the inner 60 % of
+  // values, so step excursions don't inflate it. This is the threshold
+  // bar that min_step_extension needs to clear.
+  const noiseFloor = mad(gap, baseline);
 
   // Wrist-extension tracks (for LAND).
   const extL = wristExt(pose, J.L_WRIST, J.L_SHOULDER);
@@ -417,9 +442,20 @@ function computeAll(state, cfg) {
   );
 
   return {
-    gap, baseline, extL, extR, punches, source,
+    gap, baseline, noiseFloor, extL, extR, punches, source,
     fps, smoothFrames, searchFrames,
   };
+}
+
+// MAD of |arr - center| on the inner 60% (excludes step excursions).
+function mad(arr, center) {
+  const devs = Array.from(arr, v => Math.abs(v - center));
+  devs.sort((a, b) => a - b);
+  const lo = Math.floor(devs.length * 0.2);
+  const hi = Math.floor(devs.length * 0.8);
+  const inner = devs.slice(lo, hi);
+  if (!inner.length) return 0;
+  return inner[Math.floor(inner.length / 2)];
 }
 
 function analyzePunch(d, idx, gap, baseline, extL, extR, searchFrames, N, fps, cfg) {
@@ -683,6 +719,14 @@ function drawGapTrace(canvas, signals, frame, cfg) {
     ctx.fillRect(x1, 0, x2 - x1, H);
   }
 
+  // Noise-floor band around baseline.
+  if (signals.noiseFloor > 0) {
+    const yn1 = ymap(signals.baseline + signals.noiseFloor);
+    const yn2 = ymap(signals.baseline - signals.noiseFloor);
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(0, yn1, W, yn2 - yn1);
+  }
+
   // Baseline + min_step_extension threshold lines.
   ctx.strokeStyle = COLORS.baseline;
   ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
@@ -693,7 +737,7 @@ function drawGapTrace(canvas, signals, frame, cfg) {
   ctx.setLineDash([]);
   ctx.fillStyle = "rgba(255,255,255,0.55)";
   ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText(`baseline ${signals.baseline.toFixed(3)}`, 4, yb - 2);
+  ctx.fillText(`baseline ${signals.baseline.toFixed(3)} (±${signals.noiseFloor.toFixed(3)} noise)`, 4, yb - 2);
   ctx.fillText(`+ min_step ${cfg.minStepExtension.toFixed(2)}`, 4, yt - 2);
 
   drawLine(ctx, signals.gap, stride, xmap, ymap, COLORS.gap);

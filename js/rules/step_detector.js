@@ -86,6 +86,7 @@ export const StepDetectorRule = {
     setText("sd-gap",       signals.gap[f]?.toFixed(3) ?? "—");
     setText("sd-baseline",  signals.baseline.toFixed(3));
     setText("sd-ext-above", (signals.gap[f] - signals.baseline).toFixed(3));
+    setText("sd-noise",     `±${signals.noiseFloor.toFixed(3)}`);
     setText("sd-source",    sourceText(signals));
 
     renderStatus(signals, f, cfg);
@@ -105,15 +106,27 @@ export const StepDetectorRule = {
     const p = state.pose;
     const s = state.renderScale || 1;
 
-    // Draw the gap line between the two ankles, color-coded by whether we're
-    // currently above baseline + min_step_extension (= a "step-like" gap).
+    // Draw the gap line + a single midpoint label (gap is a single scalar —
+    // no point putting it on each ankle).
     drawGapSegment(ctx, p, f, signals, cfg, s);
 
-    // Annotate each ankle with its joint label and the live gap value.
-    drawAnkleLabel(ctx, p, f, J.L_ANKLE, "L", signals, s);
-    drawAnkleLabel(ctx, p, f, J.R_ANKLE, "R", signals, s);
+    // Persistent PLANT marker — visible at the exact frame the algorithm
+    // says the foot planted, for every punch with step_found. (Step
+    // detector assumes orthodox; the step+punch-sync lens has the
+    // stance UI for the stance-aware case.)
+    for (const p2 of signals.punches) {
+      if (p2.step_found && p2.plant_frame === f) {
+        emphasizeJoint(ctx, p, f, J.L_ANKLE,
+          p2.is_out_of_sync ? COLORS.plantBad : COLORS.plantGood,
+          `PLANT`, 16, s);
+      }
+      if (p2.land_frame === f && p2.land_frame != null) {
+        const wristJ = p2.side === "L" ? J.L_WRIST : J.R_WRIST;
+        emphasizeJoint(ctx, p, f, wristJ, COLORS.landMark, `LAND`, 14, s);
+      }
+    }
 
-    // If we're inside a punch's search window, show a top-right banner.
+    // Top-right banner if we're inside a punch's search window.
     const active = activePunchAt(signals, f, cfg);
     if (active) drawTopBanner(ctx, active, signals, cfg, s);
   },
@@ -138,6 +151,11 @@ function template() {
       <div class="metric"><div class="metric-label">gap</div><div class="metric-val" id="sd-gap">—</div></div>
       <div class="metric"><div class="metric-label">baseline</div><div class="metric-val" id="sd-baseline">—</div></div>
       <div class="metric"><div class="metric-label">ext above baseline</div><div class="metric-val" id="sd-ext-above">—</div></div>
+      <div class="metric">
+        <div class="metric-label">noise floor</div>
+        <div class="metric-val" id="sd-noise">—</div>
+        <div class="metric-sub muted">typical idle wobble · threshold should be &gt; this</div>
+      </div>
     </div>
 
     <h3>gap (full clip)</h3>
@@ -261,6 +279,11 @@ function computeAll(state, cfg) {
   const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
   const gap = movingAvg(gapRaw, smoothFrames);
   const baseline = median(gap);
+  // Empirical noise floor: MAD of |gap[f] − baseline| restricted to the
+  // BOTTOM 60 % of values (i.e. excluding the obvious step excursions).
+  // Tells us how much gap variation we see when the boxer is "at rest"
+  // — the threshold needs to clear this comfortably.
+  const noiseFloor = mad(gap, baseline);
 
   // Wrist-extension tracks per anatomical side for LAND detection.
   const extL = wristExt(pose, J.L_WRIST, J.L_SHOULDER);
@@ -279,7 +302,20 @@ function computeAll(state, cfg) {
     analyzePunch(d, idx, gap, baseline, extL, extR, searchFrames, N, fps, cfg)
   );
 
-  return { gap, baseline, punches, source, fps, smoothFrames, searchFrames };
+  return { gap, baseline, noiseFloor, punches, source, fps, smoothFrames, searchFrames };
+}
+
+// Median absolute deviation of |arr[f] - center|, on the bottom 60% only
+// (so step excursions don't inflate the noise estimate).
+function mad(arr, center) {
+  const devs = Array.from(arr, v => Math.abs(v - center));
+  devs.sort((a, b) => a - b);
+  // Take the inner 60 % of the sorted deviations and use their median.
+  const lo = Math.floor(devs.length * 0.2);
+  const hi = Math.floor(devs.length * 0.8);
+  const inner = devs.slice(lo, hi);
+  if (!inner.length) return 0;
+  return inner[Math.floor(inner.length / 2)];
 }
 
 function analyzePunch(d, idx, gap, baseline, extL, extR, searchFrames, N, fps, cfg) {
@@ -413,29 +449,51 @@ function drawGapSegment(ctx, pose, frame, signals, cfg, scale) {
   ctx.moveTo(lx, ly);
   ctx.lineTo(rx, ry);
   ctx.stroke();
+
+  // Small dots on each ankle so they're visible without per-foot labels.
+  ctx.fillStyle = COLORS.ankle;
+  ctx.beginPath(); ctx.arc(lx, ly, 4 * scale, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(rx, ry, 4 * scale, 0, Math.PI * 2); ctx.fill();
+
+  // Single midpoint label: gap (= |L-R|/torso). One value shared by both feet.
+  const mx = (lx + rx) / 2, my = (ly + ry) / 2;
+  const fontPx = Math.round(11 * scale);
+  ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
+  const gapVal = signals.gap[frame] ?? 0;
+  const ext = gapVal - signals.baseline;
+  const sign = ext >= 0 ? "+" : "";
+  const txt = `gap ${gapVal.toFixed(2)}  (${sign}${ext.toFixed(2)})`;
+  const tw = ctx.measureText(txt).width;
+  ctx.fillStyle = "rgba(0,0,0,0.7)";
+  ctx.fillRect(mx - tw / 2 - 4, my - 6 * scale - fontPx,
+               tw + 8, fontPx + 4);
+  ctx.fillStyle = aboveBaseline ? COLORS.ankleStepping : COLORS.gapLine;
+  ctx.fillText(txt, mx - tw / 2, my - 8 * scale);
   ctx.restore();
 }
 
-function drawAnkleLabel(ctx, pose, frame, jointIdx, label, signals, scale) {
+// Persistent emphasis ring + label on a joint at the current frame.
+function emphasizeJoint(ctx, pose, frame, jointIdx, color, label, radius, scale) {
   const c = pose.conf[frame * 17 + jointIdx];
   if (c < 0.05) return;
   const x = pose.skeleton[(frame * 17 + jointIdx) * 2];
   const y = pose.skeleton[(frame * 17 + jointIdx) * 2 + 1];
   ctx.save();
-  ctx.fillStyle = COLORS.ankle;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3 * scale;
   ctx.beginPath();
-  ctx.arc(x, y, 5 * scale, 0, Math.PI * 2);
-  ctx.fill();
-  const fontPx = Math.round(11 * scale);
+  ctx.arc(x, y, radius * scale, 0, Math.PI * 2);
+  ctx.stroke();
+  const fontPx = Math.round(12 * scale);
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
-  const txt = `${label} gap=${signals.gap[frame]?.toFixed(3) ?? "?"}`;
-  const tw = ctx.measureText(txt).width;
-  const tx = x + 10 * scale;
-  const ty = y + 4 * scale;
-  ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(tx - 2, ty - fontPx, tw + 6, fontPx + 4);
-  ctx.fillStyle = COLORS.gapLine;
-  ctx.fillText(txt, tx + 2, ty);
+  const pad = 4 * scale;
+  const tw = ctx.measureText(label).width;
+  const bx = x + (radius + 4) * scale;
+  const by = y - 4 * scale;
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  ctx.fillRect(bx - 2, by - fontPx, tw + pad * 2, fontPx + 4);
+  ctx.fillStyle = color;
+  ctx.fillText(label, bx + pad - 2, by);
   ctx.restore();
 }
 
@@ -508,6 +566,15 @@ function drawGapTrace(canvas, signals, frame, cfg) {
     ctx.fillRect(x1, 0, x2 - x1, H);
   }
 
+  // Noise-floor band: ± noiseFloor around the baseline. The threshold has
+  // to clear this convincingly to actually separate steps from idle wobble.
+  if (signals.noiseFloor > 0) {
+    const yn1 = ymap(signals.baseline + signals.noiseFloor);
+    const yn2 = ymap(signals.baseline - signals.noiseFloor);
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(0, yn1, W, yn2 - yn1);
+  }
+
   // Baseline + threshold lines.
   ctx.strokeStyle = COLORS.baseline;
   ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
@@ -518,7 +585,7 @@ function drawGapTrace(canvas, signals, frame, cfg) {
   ctx.setLineDash([]);
   ctx.fillStyle = "rgba(255,255,255,0.65)";
   ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText(`baseline ${signals.baseline.toFixed(3)}`, 4, yb - 2);
+  ctx.fillText(`baseline ${signals.baseline.toFixed(3)} (±${signals.noiseFloor.toFixed(3)} noise)`, 4, yb - 2);
   ctx.fillText(`+ min_step ${cfg.minStepExtension.toFixed(2)}`, 4, yt - 2);
 
   drawLine(ctx, signals.gap, stride, xmap, ymap, COLORS.gapLine);
