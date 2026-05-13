@@ -301,12 +301,49 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
 .good { color: var(--good); }
 .bad  { color: var(--bad); }
 
-#trace-canvas, #conf-canvas {
+#trace-canvas, #conf-canvas,
+#sps-vel-canvas, #sps-ext-canvas {
   width: 100%;
   height: auto;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+/* step-punch-sync rule panel */
+.sps-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.sps-tbl th, .sps-tbl td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sps-tbl th {
+  color: var(--fg-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+.sps-tbl tr:hover { background: var(--bg-elev); }
+.sps-tbl tr.unscored td { color: var(--fg-muted); font-style: italic; }
+.role-lead {
+  background: rgba(95,217,122,0.18);
+  color: var(--good);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.role-rear {
+  background: rgba(245,185,69,0.18);
+  color: #f5b945;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
 }
 
 .slider {

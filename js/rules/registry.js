@@ -14,10 +14,12 @@ import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
 import { ForearmProjectionRule } from "./forearm_projection.js";
 import { EngineCompareRule } from "./engine_compare.js";
+import { StepPunchSyncRule } from "./step_punch_sync.js";
 
 export const RULES = [
   OverviewRule,
   GuardDropRule,
   ForearmProjectionRule,
   EngineCompareRule,
+  StepPunchSyncRule,
 ];
