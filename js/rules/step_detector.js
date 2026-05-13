@@ -72,6 +72,20 @@ export const StepDetectorRule = {
     wireSlider(state, "#sd-smooth", "velSmoothSeconds",     v => `${(v*1000).toFixed(0)} ms`);
     wireSlider(state, "#sd-plantn", "plantFramesRequired",  v => `${v.toFixed(0)} frames`);
 
+    // Click anywhere on the velocity sparkline to seek to that frame.
+    const canvas = host.querySelector("#sd-vel-canvas");
+    if (canvas) {
+      canvas.style.cursor = "pointer";
+      canvas.addEventListener("click", evt => {
+        const rect = canvas.getBoundingClientRect();
+        const px = evt.clientX - rect.left;
+        const frac = px / rect.width;
+        const N = state.pose.n_frames;
+        const target = Math.max(0, Math.min(N - 1, Math.round(frac * (N - 1))));
+        seekHackSimple(target);
+      });
+    }
+
     renderEventsTable();
   },
 
@@ -90,13 +104,14 @@ export const StepDetectorRule = {
     setText("sd-state-l", describeFootState(vL, cfg));
     setText("sd-state-r", describeFootState(vR, cfg));
     setText("sd-fps", `${signals.fps.toFixed(1)} fps · smoothing ≈ ${signals.smoothFrames}f`);
-    setText("sd-context", describeContext(signals, f, cfg));
+
+    renderStatus(signals, f, cfg);
 
     // Highlight the active row in the events table if any.
     host.querySelectorAll("tr[data-event-idx]").forEach(tr => {
       const idx = parseInt(tr.getAttribute("data-event-idx"), 10);
       const ev = signals.events[idx];
-      const active = ev && f >= ev.peak - 2 && f <= ev.plant + 2;
+      const active = ev && f >= ev.peak && f <= ev.plant;
       tr.classList.toggle("active", !!active);
     });
 
@@ -109,12 +124,66 @@ export const StepDetectorRule = {
     const s = state.renderScale || 1;
     const marginFrames = Math.max(1, Math.round(cfg.labelMarginMs * signals.fps / 1000));
 
-    // For each ankle, paint a velocity-bucket ring + live number label,
-    // plus PEAK / PLANT markers when within a step event's vicinity.
-    drawAnkle(ctx, p, f, J.L_ANKLE, "L", signals.velL, signals.events.filter(e => e.ankle === J.L_ANKLE), marginFrames, signals.fps, s, cfg);
-    drawAnkle(ctx, p, f, J.R_ANKLE, "R", signals.velR, signals.events.filter(e => e.ankle === J.R_ANKLE), marginFrames, signals.fps, s, cfg);
+    // Per ankle: velocity-bucket ring + live number, plus a thick
+    // step-progress ring during the peak→plant span and PEAK/PLANT
+    // labels at those exact frames.
+    drawAnkle(ctx, p, f, J.L_ANKLE, "L", signals.velL,
+      signals.events.filter(e => e.ankle === J.L_ANKLE), marginFrames, signals.fps, s, cfg);
+    drawAnkle(ctx, p, f, J.R_ANKLE, "R", signals.velR,
+      signals.events.filter(e => e.ankle === J.R_ANKLE), marginFrames, signals.fps, s, cfg);
+
+    // Video overlay banner — only when we're inside a detected step.
+    const active = activeStepAt(signals, f);
+    if (active && (active.where === "peak" || active.where === "plant" || active.where === "inside")) {
+      drawTopBanner(ctx, active, s);
+    }
   },
 };
+
+// Big top-right banner on the video itself so the detection is obvious
+// without having to look at the side panel.
+function drawTopBanner(ctx, { ev, where }, scale) {
+  const ankle = ev.ankle === J.L_ANKLE ? "L" : "R";
+  const color = ev.ankle === J.L_ANKLE ? "#7ec8ff" : "#ff8a5c";
+  const title = `STEP — ${ankle} ankle`;
+  const sub = where === "peak"  ? `PEAK frame · vel ${ev.peakVel.toFixed(3)}`
+            : where === "plant" ? `PLANT frame · dwell ${ev.plant - ev.peak}f`
+            : `inside step · peak f${ev.peak} → plant f${ev.plant}`;
+
+  ctx.save();
+  const padX = 12 * scale;
+  const padY = 10 * scale;
+  const titleSize = Math.round(15 * scale);
+  const subSize = Math.round(11 * scale);
+  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
+  const tw = ctx.measureText(title).width;
+  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
+  const sw = ctx.measureText(sub).width;
+  const w = Math.max(tw, sw) + padX * 2;
+  const h = titleSize + subSize + padY * 2 + 4 * scale;
+  const x = ctx.canvas.width - w - 12 * scale;
+  const y = 12 * scale;
+
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8 * scale);
+    ctx.fill();
+  } else {
+    ctx.fillRect(x, y, w, h);
+  }
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, 4 * scale, h);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
+  ctx.textBaseline = "top";
+  ctx.fillText(title, x + padX, y + padY);
+  ctx.fillStyle = "#e6e9ef";
+  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
+  ctx.fillText(sub, x + padX, y + padY + titleSize + 4 * scale);
+  ctx.restore();
+}
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 
@@ -127,46 +196,52 @@ function template() {
       peak where velocity stays below <code>step_low</code> for
       <code>plant_frames</code> frames. <span id="sd-fps" class="muted small">—</span></p>
 
+    <h3>Now</h3>
+    <div id="sd-step-status">—</div>
+
+    <h3>Detected step events <span class="muted small" id="sd-events-count">(0)</span></h3>
+    <div id="sd-events-table"></div>
+
     <h3>Current frame</h3>
     <div class="metric-grid">
       <div class="metric">
-        <div class="metric-label">Lead-side L ankle</div>
+        <div class="metric-label">L ankle vel</div>
         <div class="metric-val" id="sd-vel-l">—</div>
         <div class="metric-sub muted" id="sd-state-l">—</div>
       </div>
       <div class="metric">
-        <div class="metric-label">Lead-side R ankle</div>
+        <div class="metric-label">R ankle vel</div>
         <div class="metric-val" id="sd-vel-r">—</div>
         <div class="metric-sub muted" id="sd-state-r">—</div>
       </div>
     </div>
-    <p class="hint" style="margin-top:4px"><span id="sd-context" class="muted">—</span></p>
 
     <h3>Velocity (full clip)</h3>
     <p class="hint">L = blue, R = orange. Dashed lines = step_high (top) and
-      step_low (bottom). Vertical ticks at the bottom = detected plant frames
-      (red = L, amber = R).</p>
+      step_low (bottom). The shaded bands span every detected step
+      (peak → plant). Click anywhere to seek.</p>
     <canvas id="sd-vel-canvas" width="320" height="140"></canvas>
-
-    <h3>Detected step events</h3>
-    <div id="sd-events-table"></div>
 
     <h3>Thresholds</h3>
     <label class="slider">
-      <span>step_high = <output id="sd-high-out">${cfg.highVelThreshold.toFixed(3)}</output></span>
+      <span>step_high = <output id="sd-high-out">${cfg.highVelThreshold.toFixed(3)}</output> <span class="muted small">torso/frame</span></span>
       <input type="range" id="sd-high" min="0.005" max="0.05" step="0.001" value="${cfg.highVelThreshold}">
+      <span class="muted small">Onset gate. Ankle velocity must exceed this for at least one frame for a step to start. Higher = stricter (only obvious steps).</span>
     </label>
     <label class="slider">
-      <span>step_low = <output id="sd-low-out">${cfg.lowVelThreshold.toFixed(3)}</output></span>
+      <span>step_low = <output id="sd-low-out">${cfg.lowVelThreshold.toFixed(3)}</output> <span class="muted small">torso/frame</span></span>
       <input type="range" id="sd-low" min="0.001" max="0.020" step="0.001" value="${cfg.lowVelThreshold}">
+      <span class="muted small">Plant gate. After the peak, velocity must drop below this (for <code>plant_frames</code> frames) to register the plant. Lower = stricter (boxer must really stand still).</span>
     </label>
     <label class="slider">
       <span>smoothing = <output id="sd-smooth-out">${(cfg.velSmoothSeconds*1000).toFixed(0)} ms</output></span>
       <input type="range" id="sd-smooth" min="0" max="0.250" step="0.01" value="${cfg.velSmoothSeconds}">
+      <span class="muted small">Moving-average window applied to the raw velocity. Filters jitter, but too wide blurs short spikes.</span>
     </label>
     <label class="slider">
       <span>plant_frames = <output id="sd-plantn-out">${cfg.plantFramesRequired.toFixed(0)} frames</output></span>
       <input type="range" id="sd-plantn" min="1" max="6" step="1" value="${cfg.plantFramesRequired}">
+      <span class="muted small">How many consecutive sub-<code>step_low</code> frames the algorithm needs to call the foot "planted".</span>
     </label>
   `;
 }
@@ -188,26 +263,84 @@ function renderEventsTable() {
   if (!signals) return;
   const rows = signals.events.map((e, i) => {
     const ankleLabel = e.ankle === J.L_ANKLE ? "L" : "R";
-    return `<tr data-seek="${e.plant}" data-event-idx="${i}">
+    const ankleCls = e.ankle === J.L_ANKLE ? "role-lead" : "role-rear";
+    return `<tr data-seek="${e.peak}" data-event-idx="${i}">
       <td>${(e.peak / signals.fps).toFixed(2)}s</td>
-      <td>${ankleLabel}</td>
-      <td>peak f${e.peak} → plant f${e.plant}</td>
-      <td>${(e.plant - e.peak)} frames</td>
+      <td><span class="${ankleCls}">${ankleLabel}</span></td>
+      <td>f${e.peak} → f${e.plant}</td>
+      <td>${e.plant - e.peak}f</td>
       <td>${e.peakVel.toFixed(3)}</td>
     </tr>`;
   }).join("");
   host.querySelector("#sd-events-table").innerHTML = `
     <table class="sps-tbl">
-      <thead><tr><th>t (peak)</th><th>Foot</th><th>Peak→Plant</th><th>Δ</th><th>Peak vel</th></tr></thead>
+      <thead><tr><th>t</th><th>Foot</th><th>Peak→Plant</th><th>Δ</th><th>Peak vel</th></tr></thead>
       <tbody>${rows || `<tr><td colspan="5" class="muted">no steps detected — try lowering step_high or raising step_low</td></tr>`}</tbody>
     </table>
   `;
+  setText("sd-events-count", `(${signals.events.length} total)`);
   host.querySelectorAll("tr[data-seek]").forEach(tr => {
     tr.style.cursor = "pointer";
     tr.addEventListener("click", () => {
       seekHackSimple(parseInt(tr.getAttribute("data-seek"), 10));
     });
   });
+}
+
+// Big "STEP DETECTED" banner at the top of the panel, plus a relative
+// position read-out telling the user where the cursor sits within the
+// step's [peak, plant] span.
+function renderStatus(signals, f, cfg) {
+  const el = host.querySelector("#sd-step-status");
+  if (!el) return;
+  const active = activeStepAt(signals, f);
+  if (!active) {
+    el.innerHTML = `<div class="sd-banner sd-banner-idle">No active step at this frame</div>`;
+    return;
+  }
+  const { ev, where } = active;
+  const ankle = ev.ankle === J.L_ANKLE ? "L" : "R";
+  const sideClass = ev.ankle === J.L_ANKLE ? "sd-banner-l" : "sd-banner-r";
+  // Where in the span are we?
+  let pos;
+  if (where === "peak")  pos = `at PEAK frame`;
+  else if (where === "plant") pos = `at PLANT frame`;
+  else if (where === "inside") {
+    const dwell = ev.plant - ev.peak;
+    const into = f - ev.peak;
+    pos = `inside step, frame ${into + 1} of ${dwell + 1}`;
+  } else if (where === "approach") pos = `step about to start`;
+  else if (where === "decay") pos = `step just ended`;
+  el.innerHTML = `
+    <div class="sd-banner ${sideClass}">
+      STEP DETECTED · ${ankle} ankle
+      <div class="sd-banner-sub">
+        peak <b>f${ev.peak}</b> → plant <b>f${ev.plant}</b>
+        · peak vel <b>${ev.peakVel.toFixed(3)}</b>
+        · dwell <b>${ev.plant - ev.peak}f</b>
+        · <i>${pos}</i>
+      </div>
+    </div>
+  `;
+}
+
+// Returns { ev, where } where `where` is one of:
+//   peak       — current frame is the peak
+//   inside     — between peak and plant (exclusive of endpoints)
+//   plant      — current frame is the plant
+//   approach   — within labelMarginMs frames BEFORE the peak
+//   decay      — within labelMarginMs frames AFTER the plant
+// Or null when no step is anywhere near.
+function activeStepAt(signals, f) {
+  const margin = Math.max(1, Math.round(cfg.labelMarginMs * signals.fps / 1000));
+  for (const ev of signals.events) {
+    if (f === ev.peak)              return { ev, where: "peak" };
+    if (f === ev.plant)             return { ev, where: "plant" };
+    if (f > ev.peak && f < ev.plant) return { ev, where: "inside" };
+    if (f >= ev.peak - margin && f < ev.peak)  return { ev, where: "approach" };
+    if (f > ev.plant && f <= ev.plant + margin) return { ev, where: "decay" };
+  }
+  return null;
 }
 
 // ── Compute ────────────────────────────────────────────────────────────────
@@ -326,8 +459,31 @@ function drawAnkle(ctx, pose, frame, jointIdx, label, vel, events, marginFrames,
   const v = vel[frame] || 0;
   const ringColor = bucketColor(v, cfg);
 
+  // Are we inside a detected step's full peak→plant span?
+  let activeSpan = null;
+  let nearActive = null;
+  for (const e of events) {
+    if (frame >= e.peak && frame <= e.plant) { activeSpan = e; break; }
+    if (frame >= e.peak - marginFrames && frame <= e.plant + marginFrames) {
+      nearActive = e;
+    }
+  }
+
   ctx.save();
-  // Velocity-bucket ring around the ankle.
+  // Thick "step in progress" outer ring that lights up for every frame
+  // between peak and plant — the unambiguous "I detected a step here" signal.
+  if (activeSpan) {
+    const accent = jointIdx === J.L_ANKLE ? "#7ec8ff" : "#ff8a5c";
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 4 * scale;
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = 8 * scale;
+    ctx.beginPath();
+    ctx.arc(x, y, 16 * scale, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+  // Inner velocity-bucket ring — same as before.
   ctx.strokeStyle = ringColor;
   ctx.lineWidth = 2.2 * scale;
   ctx.beginPath();
@@ -339,31 +495,25 @@ function drawAnkle(ctx, pose, frame, jointIdx, label, vel, events, marginFrames,
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
   const txt = `${label} ${v.toFixed(3)}`;
   const txtW = ctx.measureText(txt).width;
-  const tx = x + 12 * scale;
+  const tx = x + 18 * scale;
   const ty = y + 4 * scale;
-  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillStyle = "rgba(0,0,0,0.65)";
   ctx.fillRect(tx - 2, ty - fontPx, txtW + 6, fontPx + 4);
   ctx.fillStyle = ringColor;
   ctx.fillText(txt, tx + 2, ty);
   ctx.restore();
 
-  // Persistent PEAK / PLANT marker if we're near a step event for this foot.
-  let active = null;
-  for (const e of events) {
-    if (frame >= e.peak - marginFrames && frame <= e.plant + marginFrames) {
-      active = e; break;
-    }
+  // PEAK / PLANT markers (only at exactly those frames, hard-edged so the
+  // user can tell them apart from the progress ring).
+  const ev = activeSpan || nearActive;
+  if (!ev) return;
+  if (frame === ev.peak) {
+    drawEventMarker(ctx, x, y, "PEAK", offsetText(ev.peak, frame, fps),
+      COLORS.peakAccent, -22, scale);
   }
-  if (!active) return;
-  // Peak marker (top): when near the peak frame.
-  if (Math.abs(frame - active.peak) <= marginFrames) {
-    drawEventMarker(ctx, x, y, "PEAK", offsetText(active.peak, frame, fps),
-      COLORS.peakAccent, -18, scale);
-  }
-  // Plant marker (bottom).
-  if (Math.abs(frame - active.plant) <= marginFrames) {
-    drawEventMarker(ctx, x, y, "PLANT", offsetText(active.plant, frame, fps),
-      COLORS.plantAccent, +28, scale);
+  if (frame === ev.plant) {
+    drawEventMarker(ctx, x, y, "PLANT", offsetText(ev.plant, frame, fps),
+      COLORS.plantAccent, +32, scale);
   }
 }
 
@@ -412,29 +562,42 @@ function drawVelTrace(canvas, signals, frame, cfg) {
   const ymap = v => H - (v / yMax) * (H - 8) - 6;
   const xmap = f => (f / Math.max(1, N - 1)) * (W - 2) + 1;
 
+  // Step spans — translucent full-height bands across [peak, plant].
+  // L (blue) and R (orange) are tinted differently so overlapping bands stay
+  // legible; the current-frame line is rendered on top.
+  for (const e of signals.events) {
+    const x1 = xmap(e.peak);
+    const x2 = Math.max(x1 + 2, xmap(e.plant));
+    ctx.fillStyle = (e.ankle === J.L_ANKLE)
+      ? "rgba(126,200,255,0.18)"
+      : "rgba(255,138,92,0.18)";
+    ctx.fillRect(x1, 0, x2 - x1, H);
+  }
+
   // Threshold lines.
-  ctx.strokeStyle = "rgba(255,255,255,0.22)";
+  ctx.strokeStyle = "rgba(255,255,255,0.28)";
   ctx.setLineDash([3, 3]);
   ctx.lineWidth = 1;
   const yh = ymap(cfg.highVelThreshold), yl = ymap(cfg.lowVelThreshold);
   ctx.beginPath(); ctx.moveTo(0, yh); ctx.lineTo(W, yh); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(W, yl); ctx.stroke();
   ctx.setLineDash([]);
-  // Threshold labels.
-  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
   ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText(`high ${cfg.highVelThreshold.toFixed(3)}`, 4, yh - 2);
-  ctx.fillText(`low ${cfg.lowVelThreshold.toFixed(3)}`, 4, yl + 10);
+  ctx.fillText(`step_high ${cfg.highVelThreshold.toFixed(3)}`, 4, yh - 2);
+  ctx.fillText(`step_low ${cfg.lowVelThreshold.toFixed(3)}`, 4, yl + 10);
 
   drawLine(ctx, signals.velL, stride, xmap, ymap, "#7ec8ff");   // L = blue
   drawLine(ctx, signals.velR, stride, xmap, ymap, "#ff8a5c");   // R = orange
 
-  // Plant ticks at bottom.
+  // Peak + plant markers along the top edge so each span has clear bookends.
   for (const e of signals.events) {
-    const x = xmap(e.plant);
-    ctx.strokeStyle = (e.ankle === J.L_ANKLE) ? "#7ec8ff" : "#ff8a5c";
-    ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(x, H - 5); ctx.lineTo(x, H); ctx.stroke();
+    const color = (e.ankle === J.L_ANKLE) ? "#7ec8ff" : "#ff8a5c";
+    ctx.fillStyle = color;
+    const px = xmap(e.peak);
+    const pl = xmap(e.plant);
+    ctx.fillRect(px - 1, 0, 3, 6);   // peak — top
+    ctx.fillRect(pl - 1, H - 6, 3, 6); // plant — bottom
   }
 
   // Current frame line.

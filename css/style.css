@@ -377,6 +377,40 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   font-size: 11px;
 }
 
+/* step detector banner */
+.sd-banner {
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  border-left: 4px solid var(--fg-muted);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.sd-banner-idle {
+  color: var(--fg-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+.sd-banner-l {
+  border-left-color: #7ec8ff;
+  background: rgba(126,200,255,0.10);
+  color: #7ec8ff;
+}
+.sd-banner-r {
+  border-left-color: #ff8a5c;
+  background: rgba(255,138,92,0.10);
+  color: #ff8a5c;
+}
+.sd-banner-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg);
+  opacity: 0.85;
+}
+.sd-banner-sub i { color: var(--fg-muted); }
+
 .slider {
   display: flex;
   flex-direction: column;
