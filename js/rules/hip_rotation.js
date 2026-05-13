@@ -27,6 +27,7 @@
 //     in real time.
 
 import { J, torsoHeight } from "../skeleton.js";
+import { activePunches, drawPunchHudStack } from "./overview.js";
 
 const DEFAULTS = {
   gapSmoothSeconds: 0.083,
@@ -128,7 +129,13 @@ export const HipRotationRule = {
     // Persistent hip line on every frame so you can SEE rotation as you scrub.
     drawHipLine(ctx, p, f, s);
 
-    // At the exact LAND frame of any labeled punch, draw a verdict label.
+    // Top-left labeler-style HUD: every punch whose [start, end] window
+    // contains the current frame, stacked. Same helper Overview uses.
+    const aps = activePunches(state, f);
+    if (aps.length) drawPunchHudStack(ctx, aps, state, s);
+
+    // At the exact LAND frame of any labeled punch we score, draw a verdict
+    // label next to the boxer's head — separate from (and below) the HUD.
     for (const punch of signals.punches) {
       if (punch.land_frame === f) {
         drawLandLabel(ctx, p, f, punch, s);

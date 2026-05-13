@@ -65,7 +65,10 @@ export const OverviewRule = {
 // end_frame] window contains `frame`. Labels win over punches when both
 // exist — we never mix sources in the same stack to avoid double-labelling.
 // Ordered by start_frame so the earliest-starting punch is on top.
-function activePunches(state, frame) {
+//
+// Exported so other lenses (e.g. hip_rotation) can paint the same
+// labeler-style HUD without duplicating logic.
+export function activePunches(state, frame) {
   const src = pickSource(state);
   if (!src) return [];
   const hits = [];
@@ -124,7 +127,7 @@ function renderSourceLine(state) {
 // active punch vertically when multiple windows overlap (fast combos / paired
 // hand events). Only drawn when at least one detection's window contains the
 // current frame.
-function drawPunchHudStack(ctx, aps, state, scale) {
+export function drawPunchHudStack(ctx, aps, state, scale) {
   const margin = 12 * scale;
   const gap    = 6 * scale;     // gap between stacked blocks
   let cursorY  = margin;
