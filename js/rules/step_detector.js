@@ -1,44 +1,34 @@
-// Step detector — standalone lens for inspecting *only* the foot-step half
-// of the step+punch-sync rule. Use this when "no step" is showing up
-// suspiciously and you want to see what the algorithm sees.
+// Step detector — gap-focused debugging companion to step+punch-sync.
 //
-// Mirrors the algorithm in cornerman_rules/rules/step_punch_sync.py and the
-// step+punch-sync lens, so what you see here is what the rule sees:
+// Same per-punch algorithm as step_punch_sync (gap = inter-ankle distance
+// over torso height, smoothed; baseline = median across the clip; a step
+// is the gap peak inside each punch's search window if it clears
+// baseline + min_step_extension). This lens trims the panel down to just
+// the gap signal + per-punch verdicts so you can iterate on the
+// thresholds without the sync-side distractions.
 //
-//   1. Per-frame ankle velocity (torso-heights per frame), smoothed over a
-//      configurable window.
-//   2. A "step" = a contiguous run above step_high. The peak of that run
-//      is the step's onset frame.
-//   3. The "plant" = first frame after the peak where velocity stays below
-//      step_low for 2+ frames. If no such plant exists in the cache, the
-//      step is dropped — that's the brittle bit.
-//
-// Visuals:
-//   * Overlay: each ankle dot colour-coded by its velocity bucket
-//     (planted / transitioning / stepping) + a label with the live
-//     velocity number. PEAK and PLANT frames get persistent labels with
-//     frame/ms offsets so you can scrub to them.
-//   * Side panel: live current-frame metrics, ankle-velocity sparkline
-//     with both threshold lines, full step-event table.
-//   * Threshold sliders re-run detection on the fly.
+// Requires a punch source loaded (state.labels or state.punches). With no
+// punches we can't run per-punch detection — the panel says so and the
+// gap track is shown unannotated.
 
 import { J, torsoHeight } from "../skeleton.js";
 
 const DEFAULTS = {
-  highVelThreshold: 0.020,    // ankle is clearly moving (torso/frame)
-  lowVelThreshold:  0.005,    // ankle is "planted"
-  velSmoothSeconds: 0.083,    // moving average window
-  plantFramesRequired: 2,     // consecutive sub-low frames to call it planted
-  labelMarginMs:    120,      // how far before/after a step we keep the label
+  gapSmoothSeconds: 0.083,
+  searchWindowSec:  0.4,
+  minStepExtension: 0.10,
+  labelMarginMs:    120,
 };
 
 const COLORS = {
-  stepping:     "#ef4444",    // red — above HIGH
-  transit:      "#facc15",    // amber — between HIGH and LOW
-  planted:      "#5fd97a",    // green — below LOW
-  ankleLabel:   "#ffffff",
-  peakAccent:   "#ef4444",
-  plantAccent:  "#5fd97a",
+  gapLine:       "#a78bfa",
+  baseline:      "rgba(255,255,255,0.45)",
+  ankle:         "#ffffff",
+  ankleStepping: "#ef4444",
+  searchBand:    "rgba(255,255,255,0.07)",
+  plantGood:     "#5fd97a",
+  plantBad:      "#e85a5a",
+  landMark:      "#ff8a5c",
 };
 
 let host;
@@ -52,11 +42,11 @@ export const StepDetectorRule = {
 
   skeletonStyle() {
     return {
-      boneColor: "rgba(255,255,255,0.22)",
+      boneColor: "rgba(255,255,255,0.20)",
       boneWidth: 1.5,
       jointRadius: 3,
       highlightJoints: new Set([
-        J.L_ANKLE, J.R_ANKLE, J.L_KNEE, J.R_KNEE, J.L_HIP, J.R_HIP,
+        J.L_ANKLE, J.R_ANKLE, J.L_HIP, J.R_HIP,
       ]),
     };
   },
@@ -67,181 +57,114 @@ export const StepDetectorRule = {
     signals = computeAll(state, cfg);
     lastPose = state.pose;
 
-    wireSlider(state, "#sd-high",   "highVelThreshold",     v => v.toFixed(3));
-    wireSlider(state, "#sd-low",    "lowVelThreshold",      v => v.toFixed(3));
-    wireSlider(state, "#sd-smooth", "velSmoothSeconds",     v => `${(v*1000).toFixed(0)} ms`);
-    wireSlider(state, "#sd-plantn", "plantFramesRequired",  v => `${v.toFixed(0)} frames`);
+    wireSlider(state, "#sd-ext",    "minStepExtension",  v => v.toFixed(2));
+    wireSlider(state, "#sd-smooth", "gapSmoothSeconds",  v => `${(v*1000).toFixed(0)} ms`);
+    wireSlider(state, "#sd-search", "searchWindowSec",   v => `${(v*1000).toFixed(0)} ms`);
 
-    // Click anywhere on the velocity sparkline to seek to that frame.
-    const canvas = host.querySelector("#sd-vel-canvas");
+    const canvas = host.querySelector("#sd-gap-canvas");
     if (canvas) {
       canvas.style.cursor = "pointer";
       canvas.addEventListener("click", evt => {
         const rect = canvas.getBoundingClientRect();
-        const px = evt.clientX - rect.left;
-        const frac = px / rect.width;
+        const frac = (evt.clientX - rect.left) / rect.width;
         const N = state.pose.n_frames;
         const target = Math.max(0, Math.min(N - 1, Math.round(frac * (N - 1))));
         seekHackSimple(target);
       });
     }
 
-    renderEventsTable();
+    renderPunchesTable();
   },
 
   update(state) {
     if (state.pose !== lastPose) {
       signals = computeAll(state, cfg);
       lastPose = state.pose;
-      renderEventsTable();
+      renderPunchesTable();
     }
-
     const f = state.frame;
-    const vL = signals.velL[f];
-    const vR = signals.velR[f];
-    setText("sd-vel-l", vL.toFixed(4), bucketColor(vL, cfg));
-    setText("sd-vel-r", vR.toFixed(4), bucketColor(vR, cfg));
-    setText("sd-state-l", describeFootState(vL, cfg));
-    setText("sd-state-r", describeFootState(vR, cfg));
-    setText("sd-fps", `${signals.fps.toFixed(1)} fps · smoothing ≈ ${signals.smoothFrames}f`);
+    setText("sd-gap",       signals.gap[f]?.toFixed(3) ?? "—");
+    setText("sd-baseline",  signals.baseline.toFixed(3));
+    setText("sd-ext-above", (signals.gap[f] - signals.baseline).toFixed(3));
+    setText("sd-source",    sourceText(signals));
 
     renderStatus(signals, f, cfg);
 
-    // Highlight the active row in the events table if any.
-    host.querySelectorAll("tr[data-event-idx]").forEach(tr => {
-      const idx = parseInt(tr.getAttribute("data-event-idx"), 10);
-      const ev = signals.events[idx];
-      const active = ev && f >= ev.peak && f <= ev.plant;
+    host.querySelectorAll("tr[data-punch-idx]").forEach(tr => {
+      const idx = parseInt(tr.getAttribute("data-punch-idx"), 10);
+      const p = signals.punches[idx];
+      const active = p && f >= p.search_start && f <= p.search_end;
       tr.classList.toggle("active", !!active);
     });
 
-    drawVelTrace(host.querySelector("#sd-vel-canvas"), signals, f, cfg);
+    drawGapTrace(host.querySelector("#sd-gap-canvas"), signals, f, cfg);
   },
 
   draw(ctx, state) {
     const f = state.frame;
     const p = state.pose;
     const s = state.renderScale || 1;
-    const marginFrames = Math.max(1, Math.round(cfg.labelMarginMs * signals.fps / 1000));
 
-    // Per ankle: velocity-bucket ring + live number, plus a thick
-    // step-progress ring during the peak→plant span and PEAK/PLANT
-    // labels at those exact frames.
-    drawAnkle(ctx, p, f, J.L_ANKLE, "L", signals.velL,
-      signals.events.filter(e => e.ankle === J.L_ANKLE), marginFrames, signals.fps, s, cfg);
-    drawAnkle(ctx, p, f, J.R_ANKLE, "R", signals.velR,
-      signals.events.filter(e => e.ankle === J.R_ANKLE), marginFrames, signals.fps, s, cfg);
+    // Draw the gap line between the two ankles, color-coded by whether we're
+    // currently above baseline + min_step_extension (= a "step-like" gap).
+    drawGapSegment(ctx, p, f, signals, cfg, s);
 
-    // Video overlay banner — only when we're inside a detected step.
-    const active = activeStepAt(signals, f);
-    if (active && (active.where === "peak" || active.where === "plant" || active.where === "inside")) {
-      drawTopBanner(ctx, active, s);
-    }
+    // Annotate each ankle with its joint label and the live gap value.
+    drawAnkleLabel(ctx, p, f, J.L_ANKLE, "L", signals, s);
+    drawAnkleLabel(ctx, p, f, J.R_ANKLE, "R", signals, s);
+
+    // If we're inside a punch's search window, show a top-right banner.
+    const active = activePunchAt(signals, f, cfg);
+    if (active) drawTopBanner(ctx, active, signals, cfg, s);
   },
 };
-
-// Big top-right banner on the video itself so the detection is obvious
-// without having to look at the side panel.
-function drawTopBanner(ctx, { ev, where }, scale) {
-  const ankle = ev.ankle === J.L_ANKLE ? "L" : "R";
-  const color = ev.ankle === J.L_ANKLE ? "#7ec8ff" : "#ff8a5c";
-  const title = `STEP — ${ankle} ankle`;
-  const sub = where === "peak"  ? `PEAK frame · vel ${ev.peakVel.toFixed(3)}`
-            : where === "plant" ? `PLANT frame · dwell ${ev.plant - ev.peak}f`
-            : `inside step · peak f${ev.peak} → plant f${ev.plant}`;
-
-  ctx.save();
-  const padX = 12 * scale;
-  const padY = 10 * scale;
-  const titleSize = Math.round(15 * scale);
-  const subSize = Math.round(11 * scale);
-  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
-  const tw = ctx.measureText(title).width;
-  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
-  const sw = ctx.measureText(sub).width;
-  const w = Math.max(tw, sw) + padX * 2;
-  const h = titleSize + subSize + padY * 2 + 4 * scale;
-  const x = ctx.canvas.width - w - 12 * scale;
-  const y = 12 * scale;
-
-  ctx.fillStyle = "rgba(0,0,0,0.78)";
-  if (typeof ctx.roundRect === "function") {
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 8 * scale);
-    ctx.fill();
-  } else {
-    ctx.fillRect(x, y, w, h);
-  }
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, 4 * scale, h);
-
-  ctx.fillStyle = "#fff";
-  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
-  ctx.textBaseline = "top";
-  ctx.fillText(title, x + padX, y + padY);
-  ctx.fillStyle = "#e6e9ef";
-  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
-  ctx.fillText(sub, x + padX, y + padY + titleSize + 4 * scale);
-  ctx.restore();
-}
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 
 function template() {
   return `
     <h2>Step detector</h2>
-    <p class="hint">Velocity = ankle displacement between consecutive frames,
-      normalized by torso height. A <b>step</b> is a contiguous run above
-      <code>step_high</code>; the <b>plant</b> is the first frame after the
-      peak where velocity stays below <code>step_low</code> for
-      <code>plant_frames</code> frames. <span id="sd-fps" class="muted small">—</span></p>
+    <p class="hint">For each punch the lens looks at <code>gap[f]</code> =
+      inter-ankle distance / torso height, inside a window around the
+      punch. If the gap peak inside that window exceeds the boxer's
+      baseline by <code>min_step_extension</code>, the peak frame is
+      called the <b>plant</b>. <span id="sd-source" class="muted small"></span></p>
 
     <h3>Now</h3>
     <div id="sd-step-status">—</div>
 
-    <h3>Detected step events <span class="muted small" id="sd-events-count">(0)</span></h3>
-    <div id="sd-events-table"></div>
-
     <h3>Current frame</h3>
     <div class="metric-grid">
-      <div class="metric">
-        <div class="metric-label">L ankle vel</div>
-        <div class="metric-val" id="sd-vel-l">—</div>
-        <div class="metric-sub muted" id="sd-state-l">—</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">R ankle vel</div>
-        <div class="metric-val" id="sd-vel-r">—</div>
-        <div class="metric-sub muted" id="sd-state-r">—</div>
-      </div>
+      <div class="metric"><div class="metric-label">gap</div><div class="metric-val" id="sd-gap">—</div></div>
+      <div class="metric"><div class="metric-label">baseline</div><div class="metric-val" id="sd-baseline">—</div></div>
+      <div class="metric"><div class="metric-label">ext above baseline</div><div class="metric-val" id="sd-ext-above">—</div></div>
     </div>
 
-    <h3>Velocity (full clip)</h3>
-    <p class="hint">L = blue, R = orange. Dashed lines = step_high (top) and
-      step_low (bottom). The shaded bands span every detected step
-      (peak → plant). Click anywhere to seek.</p>
-    <canvas id="sd-vel-canvas" width="320" height="140"></canvas>
+    <h3>gap (full clip)</h3>
+    <p class="hint">Translucent bands = punch search windows. Dashed = baseline
+      and baseline + min_step_extension. Green ticks = step-found plant
+      frames, red = same but out of sync, dotted orange = punch LAND.
+      Click to seek.</p>
+    <canvas id="sd-gap-canvas" width="320" height="160"></canvas>
+
+    <h3>Per-punch verdicts</h3>
+    <div id="sd-punches-table"></div>
 
     <h3>Thresholds</h3>
     <label class="slider">
-      <span>step_high = <output id="sd-high-out">${cfg.highVelThreshold.toFixed(3)}</output> <span class="muted small">torso/frame</span></span>
-      <input type="range" id="sd-high" min="0.005" max="0.05" step="0.001" value="${cfg.highVelThreshold}">
-      <span class="muted small">Onset gate. Ankle velocity must exceed this for at least one frame for a step to start. Higher = stricter (only obvious steps).</span>
+      <span>min_step_extension = <output id="sd-ext-out">${cfg.minStepExtension.toFixed(2)}</output> <span class="muted small">torso</span></span>
+      <input type="range" id="sd-ext" min="0.02" max="0.40" step="0.01" value="${cfg.minStepExtension}">
+      <span class="muted small">How far the gap must rise above baseline to count as a step.</span>
     </label>
     <label class="slider">
-      <span>step_low = <output id="sd-low-out">${cfg.lowVelThreshold.toFixed(3)}</output> <span class="muted small">torso/frame</span></span>
-      <input type="range" id="sd-low" min="0.001" max="0.020" step="0.001" value="${cfg.lowVelThreshold}">
-      <span class="muted small">Plant gate. After the peak, velocity must drop below this (for <code>plant_frames</code> frames) to register the plant. Lower = stricter (boxer must really stand still).</span>
+      <span>search_window = <output id="sd-search-out">${(cfg.searchWindowSec*1000).toFixed(0)} ms</output></span>
+      <input type="range" id="sd-search" min="0.10" max="0.80" step="0.05" value="${cfg.searchWindowSec}">
+      <span class="muted small">±this far around each punch window we hunt for the gap peak.</span>
     </label>
     <label class="slider">
-      <span>smoothing = <output id="sd-smooth-out">${(cfg.velSmoothSeconds*1000).toFixed(0)} ms</output></span>
-      <input type="range" id="sd-smooth" min="0" max="0.250" step="0.01" value="${cfg.velSmoothSeconds}">
-      <span class="muted small">Moving-average window applied to the raw velocity. Filters jitter, but too wide blurs short spikes.</span>
-    </label>
-    <label class="slider">
-      <span>plant_frames = <output id="sd-plantn-out">${cfg.plantFramesRequired.toFixed(0)} frames</output></span>
-      <input type="range" id="sd-plantn" min="1" max="6" step="1" value="${cfg.plantFramesRequired}">
-      <span class="muted small">How many consecutive sub-<code>step_low</code> frames the algorithm needs to call the foot "planted".</span>
+      <span>smoothing = <output id="sd-smooth-out">${(cfg.gapSmoothSeconds*1000).toFixed(0)} ms</output></span>
+      <input type="range" id="sd-smooth" min="0" max="0.250" step="0.01" value="${cfg.gapSmoothSeconds}">
+      <span class="muted small">Moving-average window. Filters tracker jitter + idle sway.</span>
     </label>
   `;
 }
@@ -254,31 +177,63 @@ function wireSlider(state, sel, key, fmt) {
     cfg[key] = parseFloat(s.value);
     out.textContent = fmt(cfg[key]);
     signals = computeAll(state, cfg);
-    renderEventsTable();
+    renderPunchesTable();
     seekHack(state, state.frame);
   });
 }
 
-function renderEventsTable() {
+function renderStatus(signals, f, cfg) {
+  const el = host.querySelector("#sd-step-status");
+  if (!el) return;
+  const active = activePunchAt(signals, f, cfg);
+  if (!active) {
+    el.innerHTML = `<div class="sd-banner sd-banner-idle">Not inside any punch's search window</div>`;
+    return;
+  }
+  const verdict = !active.step_found
+    ? `NO STEP (peak gap +${active.gap_above_baseline.toFixed(2)} < ${cfg.minStepExtension.toFixed(2)})`
+    : `STEP at f${active.plant_frame} (+${active.gap_above_baseline.toFixed(2)} above baseline)`;
+  const cls = !active.step_found ? "sd-banner-idle"
+    : active.is_out_of_sync ? "sd-banner-r"
+    : "sd-banner-l";
+  el.innerHTML = `
+    <div class="sd-banner ${cls}">
+      ${verdict}
+      <div class="sd-banner-sub">
+        punch <b>${(active.punch_type || "?").replace(/_/g, " ")}</b> · ${active.hand}·${active.side}
+        · LAND <b>f${active.land_frame ?? "?"}</b>
+        ${active.gap_ms != null
+          ? `· sync gap <b>${active.gap_ms >= 0 ? "+" : ""}${active.gap_ms.toFixed(0)} ms</b>`
+          : ""}
+      </div>
+    </div>`;
+}
+
+function renderPunchesTable() {
   if (!signals) return;
-  const rows = signals.events.map((e, i) => {
-    const ankleLabel = e.ankle === J.L_ANKLE ? "L" : "R";
-    const ankleCls = e.ankle === J.L_ANKLE ? "role-lead" : "role-rear";
-    return `<tr data-seek="${e.peak}" data-event-idx="${i}">
-      <td>${(e.peak / signals.fps).toFixed(2)}s</td>
-      <td><span class="${ankleCls}">${ankleLabel}</span></td>
-      <td>f${e.peak} → f${e.plant}</td>
-      <td>${e.plant - e.peak}f</td>
-      <td>${e.peakVel.toFixed(3)}</td>
+  const rows = signals.punches.map((p, i) => {
+    const cls = !p.step_found ? "unscored" : (p.is_out_of_sync ? "skipped" : "scored");
+    const stepCell = p.step_found
+      ? `<span class="role-lead">+${p.gap_above_baseline.toFixed(2)}</span>`
+      : `<span class="muted">+${p.gap_above_baseline.toFixed(2)}</span>`;
+    const gapCell = p.gap_ms != null
+      ? `${p.gap_ms >= 0 ? "+" : ""}${p.gap_ms.toFixed(0)} ms`
+      : "—";
+    return `<tr data-seek="${p.land_frame ?? p.start_frame}" data-punch-idx="${i}">
+      <td>${p.timestamp.toFixed(2)}s</td>
+      <td>${(p.punch_type || "?").replace(/_/g, " ")}</td>
+      <td>${stepCell}</td>
+      <td>${gapCell}</td>
     </tr>`;
   }).join("");
-  host.querySelector("#sd-events-table").innerHTML = `
+  const found = signals.punches.filter(p => p.step_found).length;
+  host.querySelector("#sd-punches-table").innerHTML = `
+    <p class="hint" style="margin:0 0 6px">${found}/${signals.punches.length} punches have a detected step.</p>
     <table class="sps-tbl">
-      <thead><tr><th>t</th><th>Foot</th><th>Peak→Plant</th><th>Δ</th><th>Peak vel</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="5" class="muted">no steps detected — try lowering step_high or raising step_low</td></tr>`}</tbody>
+      <thead><tr><th>t</th><th>Type</th><th>Ext above</th><th>Sync gap</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4" class="muted">no punches loaded</td></tr>`}</tbody>
     </table>
   `;
-  setText("sd-events-count", `(${signals.events.length} total)`);
   host.querySelectorAll("tr[data-seek]").forEach(tr => {
     tr.style.cursor = "pointer";
     tr.addEventListener("click", () => {
@@ -287,87 +242,112 @@ function renderEventsTable() {
   });
 }
 
-// Big "STEP DETECTED" banner at the top of the panel, plus a relative
-// position read-out telling the user where the cursor sits within the
-// step's [peak, plant] span.
-function renderStatus(signals, f, cfg) {
-  const el = host.querySelector("#sd-step-status");
-  if (!el) return;
-  const active = activeStepAt(signals, f);
-  if (!active) {
-    el.innerHTML = `<div class="sd-banner sd-banner-idle">No active step at this frame</div>`;
-    return;
-  }
-  const { ev, where } = active;
-  const ankle = ev.ankle === J.L_ANKLE ? "L" : "R";
-  const sideClass = ev.ankle === J.L_ANKLE ? "sd-banner-l" : "sd-banner-r";
-  // Where in the span are we?
-  let pos;
-  if (where === "peak")  pos = `at PEAK frame`;
-  else if (where === "plant") pos = `at PLANT frame`;
-  else if (where === "inside") {
-    const dwell = ev.plant - ev.peak;
-    const into = f - ev.peak;
-    pos = `inside step, frame ${into + 1} of ${dwell + 1}`;
-  } else if (where === "approach") pos = `step about to start`;
-  else if (where === "decay") pos = `step just ended`;
-  el.innerHTML = `
-    <div class="sd-banner ${sideClass}">
-      STEP DETECTED · ${ankle} ankle
-      <div class="sd-banner-sub">
-        peak <b>f${ev.peak}</b> → plant <b>f${ev.plant}</b>
-        · peak vel <b>${ev.peakVel.toFixed(3)}</b>
-        · dwell <b>${ev.plant - ev.peak}f</b>
-        · <i>${pos}</i>
-      </div>
-    </div>
-  `;
-}
-
-// Returns { ev, where } where `where` is one of:
-//   peak       — current frame is the peak
-//   inside     — between peak and plant (exclusive of endpoints)
-//   plant      — current frame is the plant
-//   approach   — within labelMarginMs frames BEFORE the peak
-//   decay      — within labelMarginMs frames AFTER the plant
-// Or null when no step is anywhere near.
-function activeStepAt(signals, f) {
-  const margin = Math.max(1, Math.round(cfg.labelMarginMs * signals.fps / 1000));
-  for (const ev of signals.events) {
-    if (f === ev.peak)              return { ev, where: "peak" };
-    if (f === ev.plant)             return { ev, where: "plant" };
-    if (f > ev.peak && f < ev.plant) return { ev, where: "inside" };
-    if (f >= ev.peak - margin && f < ev.peak)  return { ev, where: "approach" };
-    if (f > ev.plant && f <= ev.plant + margin) return { ev, where: "decay" };
-  }
-  return null;
-}
-
-// ── Compute ────────────────────────────────────────────────────────────────
+// ── Compute (shared algorithm with step+punch-sync) ────────────────────────
 
 function computeAll(state, cfg) {
   const pose = state.pose;
   const fps = pose.fps || 30;
   const N = pose.n_frames;
-  const smoothFrames = Math.max(1, Math.round(cfg.velSmoothSeconds * fps));
-  const velL = ankleVel(pose, J.L_ANKLE, smoothFrames);
-  const velR = ankleVel(pose, J.R_ANKLE, smoothFrames);
-  const stepsL = findSteps(velL, cfg, J.L_ANKLE);
-  const stepsR = findSteps(velR, cfg, J.R_ANKLE);
-  const events = [...stepsL, ...stepsR].sort((a, b) => a.peak - b.peak);
-  return { velL, velR, events, fps, smoothFrames };
+
+  const gapRaw = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const lx = pose.skeleton[(i * 17 + J.L_ANKLE) * 2];
+    const ly = pose.skeleton[(i * 17 + J.L_ANKLE) * 2 + 1];
+    const rx = pose.skeleton[(i * 17 + J.R_ANKLE) * 2];
+    const ry = pose.skeleton[(i * 17 + J.R_ANKLE) * 2 + 1];
+    const th = Math.max(1e-6, torsoHeight(pose, i));
+    gapRaw[i] = Math.hypot(lx - rx, ly - ry) / th;
+  }
+  const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
+  const gap = movingAvg(gapRaw, smoothFrames);
+  const baseline = median(gap);
+
+  // Wrist-extension tracks per anatomical side for LAND detection.
+  const extL = wristExt(pose, J.L_WRIST, J.L_SHOULDER);
+  const extR = wristExt(pose, J.R_WRIST, J.R_SHOULDER);
+
+  let source = "none";
+  let detections = null;
+  if (state.labels?.detections?.length) {
+    source = "labels"; detections = state.labels.detections;
+  } else if (state.punches?.detections?.length) {
+    source = "stgcn"; detections = state.punches.detections;
+  }
+
+  const searchFrames = Math.max(2, Math.round(cfg.searchWindowSec * fps));
+  const punches = (detections || []).map((d, idx) =>
+    analyzePunch(d, idx, gap, baseline, extL, extR, searchFrames, N, fps, cfg)
+  );
+
+  return { gap, baseline, punches, source, fps, smoothFrames, searchFrames };
 }
 
-function ankleVel(pose, ankleIdx, smoothFrames) {
-  const N = pose.n_frames;
-  const v = new Float32Array(N);
-  for (let i = 1; i < N; i++) {
-    const dx = pose.skeleton[(i * 17 + ankleIdx) * 2]     - pose.skeleton[((i-1) * 17 + ankleIdx) * 2];
-    const dy = pose.skeleton[(i * 17 + ankleIdx) * 2 + 1] - pose.skeleton[((i-1) * 17 + ankleIdx) * 2 + 1];
-    const th = Math.max(1e-6, torsoHeight(pose, i));
-    v[i] = Math.hypot(dx, dy) / th;
+function analyzePunch(d, idx, gap, baseline, extL, extR, searchFrames, N, fps, cfg) {
+  // Stance auto-defaults to orthodox here; the user can override via the
+  // step+punch-sync lens stance dropdown. Both lenses share state but not
+  // cfg so we don't try to be clever about which side stepped — we report
+  // the gap-peak frame regardless. The step+punch-sync lens is the place
+  // for stance-aware scoring.
+  const side = d.hand === "lead" ? "L" : d.hand === "rear" ? "R" : "?";
+  const ext = side === "L" ? extL : extR;
+  const sf = Math.max(0, d.start_frame);
+  const ef = Math.min(N - 1, d.end_frame);
+
+  // LAND = peak wrist→shoulder extension in the punch window.
+  let landFrame = null, bestExt = -Infinity;
+  for (let f = sf; f <= ef; f++) {
+    if (ext[f] > bestExt) { bestExt = ext[f]; landFrame = f; }
   }
-  return movingAvg(v, smoothFrames);
+
+  const searchStart = Math.max(1, sf - searchFrames);
+  const searchEnd   = Math.min(N - 1, ef + searchFrames);
+  let peakF = searchStart, peakG = gap[searchStart] || 0;
+  for (let f = searchStart; f <= searchEnd; f++) {
+    if (gap[f] > peakG) { peakG = gap[f]; peakF = f; }
+  }
+  const gapAboveBaseline = peakG - baseline;
+  const stepFound = gapAboveBaseline >= cfg.minStepExtension;
+  const gap_ms = stepFound && landFrame != null
+    ? (landFrame - peakF) * 1000 / fps
+    : null;
+  // Out-of-sync uses a fixed 100ms threshold here for visualization — the
+  // step+punch-sync lens owns the configurable sync tolerance.
+  const isOut = stepFound && gap_ms != null && Math.abs(gap_ms) > 100;
+  return {
+    idx,
+    timestamp: d.timestamp,
+    hand: d.hand,
+    side,
+    punch_type: d.punch_type,
+    start_frame: sf,
+    end_frame: ef,
+    search_start: searchStart,
+    search_end: searchEnd,
+    land_frame: landFrame,
+    plant_frame: stepFound ? peakF : null,
+    peak_gap: peakG,
+    gap_above_baseline: gapAboveBaseline,
+    step_found: stepFound,
+    gap_ms,
+    is_out_of_sync: !!isOut,
+  };
+}
+
+function wristExt(pose, wristIdx, shoulderIdx) {
+  const N = pose.n_frames;
+  const e = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const wc = pose.conf[i * 17 + wristIdx];
+    if (wc < 0.05) { e[i] = 0; continue; }
+    const wx = pose.skeleton[(i * 17 + wristIdx) * 2];
+    const wy = pose.skeleton[(i * 17 + wristIdx) * 2 + 1];
+    const sx = pose.skeleton[(i * 17 + shoulderIdx) * 2];
+    const sy = pose.skeleton[(i * 17 + shoulderIdx) * 2 + 1];
+    const dx = wx - sx, dy = wy - sy;
+    const th = Math.max(1e-6, torsoHeight(pose, i));
+    e[i] = Math.hypot(dx, dy) / th;
+  }
+  return e;
 }
 
 function movingAvg(arr, w) {
@@ -385,222 +365,183 @@ function movingAvg(arr, w) {
   return out;
 }
 
-function findSteps(vel, cfg, ankleIdx) {
-  const events = [];
-  const N = vel.length;
-  const high = cfg.highVelThreshold;
-  const low  = cfg.lowVelThreshold;
-  const need = Math.max(1, Math.round(cfg.plantFramesRequired));
-  let i = 1;
-  while (i < N) {
-    if (vel[i] > high) {
-      const runStart = i;
-      while (i < N && vel[i] > high) i++;
-      const runEnd = i;
-      let peak = runStart, pv = vel[runStart];
-      for (let k = runStart; k < runEnd; k++) {
-        if (vel[k] > pv) { pv = vel[k]; peak = k; }
-      }
-      let plant = -1;
-      // Need `need` consecutive frames below `low` (starting at j).
-      for (let j = peak; j <= N - need; j++) {
-        let ok = true;
-        for (let q = 0; q < need; q++) {
-          if (vel[j + q] >= low) { ok = false; break; }
-        }
-        if (ok) { plant = j; break; }
-      }
-      if (plant >= 0) events.push({ ankle: ankleIdx, peak, plant, peakVel: pv });
-    } else {
-      i++;
-    }
+function median(arr) {
+  if (!arr.length) return 0;
+  const sorted = Array.from(arr).sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return (sorted.length & 1) ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function activePunchAt(signals, frame, cfg) {
+  if (!signals?.punches?.length) return null;
+  const margin = Math.round(cfg.labelMarginMs * signals.fps / 1000);
+  let best = null;
+  let bestDist = Infinity;
+  for (const p of signals.punches) {
+    const lo = p.search_start - margin;
+    const hi = p.search_end + margin;
+    if (frame < lo || frame > hi) continue;
+    const center = p.land_frame ?? Math.round((p.start_frame + p.end_frame) / 2);
+    const d = Math.abs(frame - center);
+    if (d < bestDist) { best = p; bestDist = d; }
   }
-  return events;
+  return best;
 }
 
-// ── Per-frame helpers ──────────────────────────────────────────────────────
-
-function bucketColor(v, cfg) {
-  if (v > cfg.highVelThreshold) return COLORS.stepping;
-  if (v < cfg.lowVelThreshold)  return COLORS.planted;
-  return COLORS.transit;
-}
-
-function describeFootState(v, cfg) {
-  if (v > cfg.highVelThreshold) return "stepping";
-  if (v < cfg.lowVelThreshold)  return "planted";
-  return "transitioning";
-}
-
-function describeContext(signals, frame, cfg) {
-  // What's happening relative to step events at this frame?
-  const margin = Math.max(1, Math.round(cfg.labelMarginMs * signals.fps / 1000));
-  for (const e of signals.events) {
-    if (Math.abs(frame - e.peak) <= 1)
-      return `at PEAK (${e.ankle === J.L_ANKLE ? "L" : "R"}, vel ${e.peakVel.toFixed(3)})`;
-    if (Math.abs(frame - e.plant) <= 1)
-      return `at PLANT (${e.ankle === J.L_ANKLE ? "L" : "R"}, dwell ${(e.plant - e.peak)} frames)`;
-    if (frame >= e.peak - margin && frame <= e.plant + margin) {
-      const off = e.plant - frame;
-      const ms = (off * 1000 / signals.fps).toFixed(0);
-      return `inside step window (plant ${off >= 0 ? "in +" : ""}${ms} ms, ${e.ankle === J.L_ANKLE ? "L" : "R"})`;
-    }
-  }
-  return "no step nearby";
+function sourceText(signals) {
+  if (signals.source === "labels") return `${signals.fps.toFixed(1)} fps · smoothing ≈ ${signals.smoothFrames}f · using GT labels`;
+  if (signals.source === "stgcn")  return `${signals.fps.toFixed(1)} fps · smoothing ≈ ${signals.smoothFrames}f · using ST-GCN punches`;
+  return `${signals.fps.toFixed(1)} fps · smoothing ≈ ${signals.smoothFrames}f · no punches loaded — load GT or ST-GCN to detect steps`;
 }
 
 // ── Drawing ────────────────────────────────────────────────────────────────
 
-function drawAnkle(ctx, pose, frame, jointIdx, label, vel, events, marginFrames, fps, scale, cfg) {
+function drawGapSegment(ctx, pose, frame, signals, cfg, scale) {
+  const lc = pose.conf[frame * 17 + J.L_ANKLE];
+  const rc = pose.conf[frame * 17 + J.R_ANKLE];
+  if (lc < 0.05 || rc < 0.05) return;
+  const lx = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2];
+  const ly = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2 + 1];
+  const rx = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2];
+  const ry = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2 + 1];
+  const aboveBaseline = (signals.gap[frame] - signals.baseline) >= cfg.minStepExtension;
+  ctx.save();
+  ctx.strokeStyle = aboveBaseline ? COLORS.ankleStepping : COLORS.gapLine;
+  ctx.lineWidth = (aboveBaseline ? 3 : 2) * scale;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(rx, ry);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAnkleLabel(ctx, pose, frame, jointIdx, label, signals, scale) {
   const c = pose.conf[frame * 17 + jointIdx];
   if (c < 0.05) return;
   const x = pose.skeleton[(frame * 17 + jointIdx) * 2];
   const y = pose.skeleton[(frame * 17 + jointIdx) * 2 + 1];
-  const v = vel[frame] || 0;
-  const ringColor = bucketColor(v, cfg);
-
-  // Are we inside a detected step's full peak→plant span?
-  let activeSpan = null;
-  let nearActive = null;
-  for (const e of events) {
-    if (frame >= e.peak && frame <= e.plant) { activeSpan = e; break; }
-    if (frame >= e.peak - marginFrames && frame <= e.plant + marginFrames) {
-      nearActive = e;
-    }
-  }
-
   ctx.save();
-  // Thick "step in progress" outer ring that lights up for every frame
-  // between peak and plant — the unambiguous "I detected a step here" signal.
-  if (activeSpan) {
-    const accent = jointIdx === J.L_ANKLE ? "#7ec8ff" : "#ff8a5c";
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 4 * scale;
-    ctx.shadowColor = accent;
-    ctx.shadowBlur = 8 * scale;
-    ctx.beginPath();
-    ctx.arc(x, y, 16 * scale, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-  }
-  // Inner velocity-bucket ring — same as before.
-  ctx.strokeStyle = ringColor;
-  ctx.lineWidth = 2.2 * scale;
+  ctx.fillStyle = COLORS.ankle;
   ctx.beginPath();
-  ctx.arc(x, y, 10 * scale, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // Live velocity number to the right of the ankle.
+  ctx.arc(x, y, 5 * scale, 0, Math.PI * 2);
+  ctx.fill();
   const fontPx = Math.round(11 * scale);
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
-  const txt = `${label} ${v.toFixed(3)}`;
-  const txtW = ctx.measureText(txt).width;
-  const tx = x + 18 * scale;
+  const txt = `${label} gap=${signals.gap[frame]?.toFixed(3) ?? "?"}`;
+  const tw = ctx.measureText(txt).width;
+  const tx = x + 10 * scale;
   const ty = y + 4 * scale;
-  ctx.fillStyle = "rgba(0,0,0,0.65)";
-  ctx.fillRect(tx - 2, ty - fontPx, txtW + 6, fontPx + 4);
-  ctx.fillStyle = ringColor;
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(tx - 2, ty - fontPx, tw + 6, fontPx + 4);
+  ctx.fillStyle = COLORS.gapLine;
   ctx.fillText(txt, tx + 2, ty);
   ctx.restore();
-
-  // PEAK / PLANT markers (only at exactly those frames, hard-edged so the
-  // user can tell them apart from the progress ring).
-  const ev = activeSpan || nearActive;
-  if (!ev) return;
-  if (frame === ev.peak) {
-    drawEventMarker(ctx, x, y, "PEAK", offsetText(ev.peak, frame, fps),
-      COLORS.peakAccent, -22, scale);
-  }
-  if (frame === ev.plant) {
-    drawEventMarker(ctx, x, y, "PLANT", offsetText(ev.plant, frame, fps),
-      COLORS.plantAccent, +32, scale);
-  }
 }
 
-function drawEventMarker(ctx, ankleX, ankleY, label, offset, color, dy, scale) {
+function drawTopBanner(ctx, p, signals, cfg, scale) {
+  const title = p.step_found
+    ? `STEP DETECTED · ${p.hand}·${p.side}`
+    : `NO STEP (peak +${p.gap_above_baseline.toFixed(2)})`;
+  const color = !p.step_found ? "#f5b945"
+              : (p.is_out_of_sync ? "#e85a5a" : "#5fd97a");
+  const sub = p.step_found
+    ? `plant f${p.plant_frame} · gap above baseline +${p.gap_above_baseline.toFixed(2)} · sync gap ${p.gap_ms != null ? (p.gap_ms >= 0 ? "+" : "") + p.gap_ms.toFixed(0) + " ms" : "—"}`
+    : `gap inside window peaked at +${p.gap_above_baseline.toFixed(2)}, threshold ${cfg.minStepExtension.toFixed(2)}`;
   ctx.save();
-  const fontPx = Math.round(11 * scale);
-  ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
-  const text = `${label} ${offset}`;
-  const w = ctx.measureText(text).width;
-  const pad = 4 * scale;
-  const x = ankleX - w / 2 - pad;
-  const y = ankleY + dy * scale;
+  const padX = 12 * scale, padY = 10 * scale;
+  const titleSize = Math.round(15 * scale);
+  const subSize = Math.round(11 * scale);
+  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
+  const tw = ctx.measureText(title).width;
+  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
+  const sw = ctx.measureText(sub).width;
+  const w = Math.max(tw, sw) + padX * 2;
+  const h = titleSize + subSize + padY * 2 + 4 * scale;
+  const x = ctx.canvas.width - w - 12 * scale;
+  const y = 12 * scale;
   ctx.fillStyle = "rgba(0,0,0,0.78)";
   if (typeof ctx.roundRect === "function") {
     ctx.beginPath();
-    ctx.roundRect(x, y - fontPx, w + pad * 2, fontPx + 4, 4 * scale);
+    ctx.roundRect(x, y, w, h, 8 * scale);
     ctx.fill();
   } else {
-    ctx.fillRect(x, y - fontPx, w + pad * 2, fontPx + 4);
+    ctx.fillRect(x, y, w, h);
   }
   ctx.fillStyle = color;
-  ctx.fillText(text, x + pad, y);
+  ctx.fillRect(x, y, 4 * scale, h);
+  ctx.fillStyle = "#fff";
+  ctx.font = `bold ${titleSize}px ui-monospace, "SF Mono", monospace`;
+  ctx.textBaseline = "top";
+  ctx.fillText(title, x + padX, y + padY);
+  ctx.fillStyle = "#e6e9ef";
+  ctx.font = `${subSize}px ui-monospace, "SF Mono", monospace`;
+  ctx.fillText(sub, x + padX, y + padY + titleSize + 4 * scale);
   ctx.restore();
 }
 
-function offsetText(target, current, fps) {
-  if (target == null) return "?";
-  const delta = (target - current) * 1000 / fps;
-  if (Math.abs(delta) < 1000 / fps / 2) return "now";
-  if (delta > 0) return `in +${delta.toFixed(0)} ms`;
-  return `${(-delta).toFixed(0)} ms ago`;
-}
-
-function drawVelTrace(canvas, signals, frame, cfg) {
+function drawGapTrace(canvas, signals, frame, cfg) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  const N = signals.velL.length;
+  const N = signals.gap.length;
   const stride = Math.max(1, Math.floor(N / W));
-  let yMax = Math.max(cfg.highVelThreshold * 2, 0.02);
+
+  let yMin = signals.baseline - 0.05;
+  let yMax = signals.baseline + cfg.minStepExtension * 2;
   for (let f = 0; f < N; f += stride) {
-    if (signals.velL[f] > yMax) yMax = signals.velL[f];
-    if (signals.velR[f] > yMax) yMax = signals.velR[f];
+    if (signals.gap[f] < yMin) yMin = signals.gap[f];
+    if (signals.gap[f] > yMax) yMax = signals.gap[f];
   }
-  const ymap = v => H - (v / yMax) * (H - 8) - 6;
+  yMin = Math.max(0, yMin - 0.02);
+  yMax = yMax + 0.02;
+  const ymap = v => H - ((v - yMin) / (yMax - yMin)) * (H - 8) - 4;
   const xmap = f => (f / Math.max(1, N - 1)) * (W - 2) + 1;
 
-  // Step spans — translucent full-height bands across [peak, plant].
-  // L (blue) and R (orange) are tinted differently so overlapping bands stay
-  // legible; the current-frame line is rendered on top.
-  for (const e of signals.events) {
-    const x1 = xmap(e.peak);
-    const x2 = Math.max(x1 + 2, xmap(e.plant));
-    ctx.fillStyle = (e.ankle === J.L_ANKLE)
-      ? "rgba(126,200,255,0.18)"
-      : "rgba(255,138,92,0.18)";
+  // Search-window bands.
+  for (const p of signals.punches) {
+    const x1 = xmap(p.search_start);
+    const x2 = Math.max(x1 + 2, xmap(p.search_end));
+    ctx.fillStyle = !p.step_found ? "rgba(245,185,69,0.10)"
+      : (p.is_out_of_sync ? "rgba(232,90,90,0.20)" : "rgba(95,217,122,0.18)");
     ctx.fillRect(x1, 0, x2 - x1, H);
   }
 
-  // Threshold lines.
-  ctx.strokeStyle = "rgba(255,255,255,0.28)";
-  ctx.setLineDash([3, 3]);
-  ctx.lineWidth = 1;
-  const yh = ymap(cfg.highVelThreshold), yl = ymap(cfg.lowVelThreshold);
-  ctx.beginPath(); ctx.moveTo(0, yh); ctx.lineTo(W, yh); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0, yl); ctx.lineTo(W, yl); ctx.stroke();
+  // Baseline + threshold lines.
+  ctx.strokeStyle = COLORS.baseline;
+  ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+  const yb = ymap(signals.baseline);
+  ctx.beginPath(); ctx.moveTo(0, yb); ctx.lineTo(W, yb); ctx.stroke();
+  const yt = ymap(signals.baseline + cfg.minStepExtension);
+  ctx.beginPath(); ctx.moveTo(0, yt); ctx.lineTo(W, yt); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.fillStyle = "rgba(255,255,255,0.65)";
   ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText(`step_high ${cfg.highVelThreshold.toFixed(3)}`, 4, yh - 2);
-  ctx.fillText(`step_low ${cfg.lowVelThreshold.toFixed(3)}`, 4, yl + 10);
+  ctx.fillText(`baseline ${signals.baseline.toFixed(3)}`, 4, yb - 2);
+  ctx.fillText(`+ min_step ${cfg.minStepExtension.toFixed(2)}`, 4, yt - 2);
 
-  drawLine(ctx, signals.velL, stride, xmap, ymap, "#7ec8ff");   // L = blue
-  drawLine(ctx, signals.velR, stride, xmap, ymap, "#ff8a5c");   // R = orange
+  drawLine(ctx, signals.gap, stride, xmap, ymap, COLORS.gapLine);
 
-  // Peak + plant markers along the top edge so each span has clear bookends.
-  for (const e of signals.events) {
-    const color = (e.ankle === J.L_ANKLE) ? "#7ec8ff" : "#ff8a5c";
-    ctx.fillStyle = color;
-    const px = xmap(e.peak);
-    const pl = xmap(e.plant);
-    ctx.fillRect(px - 1, 0, 3, 6);   // peak — top
-    ctx.fillRect(pl - 1, H - 6, 3, 6); // plant — bottom
+  // Plant + LAND ticks per punch.
+  for (const p of signals.punches) {
+    if (p.step_found) {
+      const x = xmap(p.plant_frame);
+      ctx.strokeStyle = p.is_out_of_sync ? COLORS.plantBad : COLORS.plantGood;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    if (p.land_frame != null) {
+      const x = xmap(p.land_frame);
+      ctx.strokeStyle = COLORS.landMark;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
-  // Current frame line.
+  // Current frame.
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.lineWidth = 1;
   const x = xmap(frame);
@@ -609,7 +550,7 @@ function drawVelTrace(canvas, signals, frame, cfg) {
 
 function drawLine(ctx, arr, stride, xmap, ymap, color) {
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.2;
+  ctx.lineWidth = 1.3;
   ctx.beginPath();
   for (let f = 0; f < arr.length; f += stride) {
     const px = xmap(f), py = ymap(arr[f]);
@@ -620,14 +561,13 @@ function drawLine(ctx, arr, stride, xmap, ymap, color) {
 
 // ── Tiny utilities ─────────────────────────────────────────────────────────
 
-function setText(id, value, color) {
+function setText(id, value) {
   const el = host.querySelector("#" + id);
   if (!el) return;
   el.innerHTML = value;
-  if (color) el.style.color = color;
 }
 
-function seekHack(state, f) {
+function seekHack(_state, f) {
   const ev = new Event("input");
   const slider = document.getElementById("scrubber");
   if (!slider) return;
