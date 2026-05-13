@@ -51,27 +51,31 @@ export const OverviewRule = {
     renderSourceLine(state);
   },
 
-  // Top-left punch label, mimicking the labeler's HUD.
+  // Top-left punch label, mimicking the labeler's HUD. Stacks one block per
+  // active punch when multiple windows overlap (fast combos).
   draw(ctx, state) {
-    const ap = activePunch(state, state.frame);
-    if (!ap) return;
+    const aps = activePunches(state, state.frame);
+    if (aps.length === 0) return;
     const s = state.renderScale || 1;
-    drawPunchHud(ctx, ap, state, s);
+    drawPunchHudStack(ctx, aps, state, s);
   },
 };
 
-// Returns the punch (label or ST-GCN detection) that contains `frame` within
-// its [start_frame, end_frame] window, or null. Labels win over punches when
-// both contain the frame.
-function activePunch(state, frame) {
+// Returns every punch (label or ST-GCN detection) whose [start_frame,
+// end_frame] window contains `frame`. Labels win over punches when both
+// exist — we never mix sources in the same stack to avoid double-labelling.
+// Ordered by start_frame so the earliest-starting punch is on top.
+function activePunches(state, frame) {
   const src = pickSource(state);
-  if (!src) return null;
+  if (!src) return [];
+  const hits = [];
   for (const d of src.detections) {
     if (frame >= d.start_frame && frame <= d.end_frame) {
-      return { ...d, _source: src.kind };
+      hits.push({ ...d, _source: src.kind });
     }
   }
-  return null;
+  hits.sort((a, b) => a.start_frame - b.start_frame);
+  return hits;
 }
 
 function pickSource(state) {
@@ -116,12 +120,25 @@ function renderSourceLine(state) {
   }
 }
 
-// Top-left HUD: big punch label like the labeler tool. Renders only inside a
-// detection's window — falls back to invisible the rest of the time so it
-// doesn't compete with other lenses' overlays.
-function drawPunchHud(ctx, ap, state, scale) {
+// Top-left HUD: big punch labels like the labeler tool. Stacks one block per
+// active punch vertically when multiple windows overlap (fast combos / paired
+// hand events). Only drawn when at least one detection's window contains the
+// current frame.
+function drawPunchHudStack(ctx, aps, state, scale) {
   const margin = 12 * scale;
-  // Two stacked lines: big label + small meta (hand / source / labeler).
+  const gap    = 6 * scale;     // gap between stacked blocks
+  let cursorY  = margin;
+  for (const ap of aps) {
+    const h = drawPunchHudBlock(ctx, ap, margin, cursorY, scale);
+    cursorY += h + gap;
+  }
+}
+
+// Draws a single block at (x, y) and returns its height so the stacker can
+// place the next one below it.
+function drawPunchHudBlock(ctx, ap, x, y, scale) {
+  const padX = 12 * scale;
+  const padY = 8 * scale;
   const bigSize = Math.round(20 * scale);
   const smallSize = Math.round(11 * scale);
 
@@ -134,45 +151,52 @@ function drawPunchHud(ctx, ap, state, scale) {
   const tagLine = `${sourceTag}${labelerTag}`;
 
   ctx.save();
+  // Measure widths to size the rounded background.
   ctx.font = `bold ${bigSize}px ui-monospace, "SF Mono", monospace`;
   const lw = ctx.measureText(labelText).width;
   ctx.font = `${smallSize}px ui-monospace, "SF Mono", monospace`;
-  const mw = ctx.measureText(metaLine).width;
+  const mw = metaLine ? ctx.measureText(metaLine).width : 0;
   const tw = ctx.measureText(tagLine).width;
-  const boxW = Math.max(lw, mw, tw) + margin * 2;
-  const boxH = bigSize + smallSize * 2 + margin * 1.4;
+  const innerW = Math.max(lw, mw, tw);
+  const lineGap = 2 * scale;
+  const innerH = bigSize + (metaLine ? smallSize + lineGap : 0) + smallSize + lineGap;
+  const boxW = innerW + padX * 2;
+  const boxH = innerH + padY * 2;
 
-  // Background pill — use roundRect when available, plain rect otherwise.
+  // Background pill — roundRect when available, plain rect otherwise.
   ctx.fillStyle = "rgba(0,0,0,0.72)";
   if (typeof ctx.roundRect === "function") {
     ctx.beginPath();
-    ctx.roundRect(margin, margin, boxW, boxH, 8 * scale);
+    ctx.roundRect(x, y, boxW, boxH, 8 * scale);
     ctx.fill();
   } else {
-    ctx.fillRect(margin, margin, boxW, boxH);
+    ctx.fillRect(x, y, boxW, boxH);
   }
   // Left accent bar — green for GT, amber for ST-GCN.
   ctx.fillStyle = ap._source === "labels" ? "#5fd97a" : "#f5b945";
-  ctx.fillRect(margin, margin, 4 * scale, boxH);
+  ctx.fillRect(x, y, 4 * scale, boxH);
 
   // Big label.
+  let cursorY = y + padY;
   ctx.fillStyle = "#fff";
   ctx.font = `bold ${bigSize}px ui-monospace, "SF Mono", monospace`;
   ctx.textBaseline = "top";
-  ctx.fillText(labelText, margin + margin, margin + margin * 0.4);
+  ctx.fillText(labelText, x + padX, cursorY);
+  cursorY += bigSize + lineGap;
 
   // Meta line.
   if (metaLine) {
     ctx.fillStyle = "#e6e9ef";
     ctx.font = `${smallSize}px ui-monospace, "SF Mono", monospace`;
-    ctx.fillText(metaLine, margin + margin, margin + margin * 0.4 + bigSize + 2);
+    ctx.fillText(metaLine, x + padX, cursorY);
+    cursorY += smallSize + lineGap;
   }
 
   // Source tag.
   ctx.fillStyle = "#8a93a3";
   ctx.font = `${smallSize}px ui-monospace, "SF Mono", monospace`;
-  ctx.fillText(tagLine, margin + margin,
-    margin + margin * 0.4 + bigSize + smallSize + 4);
+  ctx.fillText(tagLine, x + padX, cursorY);
 
   ctx.restore();
+  return boxH;
 }
