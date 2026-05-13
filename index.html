@@ -13,7 +13,30 @@
   </header>
 
   <section id="picker-card" class="card">
-    <details id="cache-section" open>
+    <details id="drive-section" open>
+      <summary><span class="section-label">Drive folder</span> <span id="drive-status" class="muted small">— not connected</span></summary>
+      <div class="folder-pick">
+        <p class="muted small" style="margin:0 0 6px">
+          One-time grant, then videos + caches + punches load straight from
+          your Drive-for-Desktop synced folder on every reload — no more
+          per-session file picking. Permission is read-only and lives in
+          your browser only.
+        </p>
+        <div class="drive-row">
+          <button type="button" id="drive-connect">Connect Drive folder</button>
+          <button type="button" id="drive-disconnect" class="muted small" hidden>Disconnect</button>
+        </div>
+      </div>
+      <p class="hint">
+        Point at the folder that contains your videos + cache subfolders
+        (e.g. <code>My Drive/boxing_ai/</code>). Sub-directories are walked
+        recursively so yolo_pose_cache and apple_vision_pose_cache both get
+        picked up. Chrome and Edge only — Safari/Firefox use the manual
+        picker below.
+      </p>
+    </details>
+
+    <details id="cache-section">
       <summary><span class="section-label">Cache folder</span> <span id="cache-status" class="muted small">— pick once per session</span></summary>
       <label class="folder-pick">
         <span class="muted">Viewer auto-matches videos against this folder. Pick again to add another folder; the index merges.</span>
@@ -21,19 +44,18 @@
         <button type="button" id="cache-clear" class="muted small" hidden>Clear index</button>
       </label>
       <p class="hint">
-        Pick <code>boxing_ai/yolo_pose_cache/</code>, then pick again for
-        <code>boxing_ai/apple_vision_pose_cache/</code> — works identically
-        on Mac and Windows, no need to point at the massive parent folder.
-        When both engines exist for a round, the engine-compare lens lights
-        up. Files stay on your machine — the page uses the browser File API
-        and never uploads anywhere.
+        Use this when you don't want a persistent Drive-folder grant.
+        Pick <code>yolo_pose_cache/</code>, then pick again for
+        <code>apple_vision_pose_cache/</code>; index merges across picks.
       </p>
     </details>
 
     <div class="picker-row">
       <label>
-        <span>Video <span class="muted">(re-pick to load another round)</span></span>
-        <input type="file" id="video-file" accept="video/*">
+        <span>Video <span class="muted">(from Drive folder)</span></span>
+        <select id="video-pick" disabled>
+          <option value="">— connect a Drive folder to populate —</option>
+        </select>
       </label>
       <label>
         <span>Round <span class="muted">(only if multiple match)</span></span>
@@ -45,6 +67,10 @@
 
     <details class="manual-fallback">
       <summary>Manual file pick (no folder)</summary>
+      <label>
+        <span>Video <span class="muted">(re-pick to load another round)</span></span>
+        <input type="file" id="video-file" accept="video/*">
+      </label>
       <label>
         <span>Pose cache <code>.npy</code> + <code>_meta.json</code></span>
         <input type="file" id="pose-file" accept=".npy,.json,application/json" multiple>

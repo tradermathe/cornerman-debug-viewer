@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.2";
+const BUILD = "2026-05-13.3";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -16,14 +16,20 @@ import { loadPose } from "./pose-loader.js";
 import { loadPunches } from "./punches-loader.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
+import * as drive from "./drive-folder.js";
 
 const els = {
   videoFile:    document.getElementById("video-file"),
+  videoPick:    document.getElementById("video-pick"),
   poseFile:     document.getElementById("pose-file"),
   cacheFolder:  document.getElementById("cache-folder"),
   cacheClear:   document.getElementById("cache-clear"),
   cacheStatus:  document.getElementById("cache-status"),
   cacheSection: document.getElementById("cache-section"),
+  driveConnect: document.getElementById("drive-connect"),
+  driveDisconnect: document.getElementById("drive-disconnect"),
+  driveStatus:  document.getElementById("drive-status"),
+  driveSection: document.getElementById("drive-section"),
   roundSel:     document.getElementById("round-select"),
   loadStatus:   document.getElementById("load-status"),
   pickerCard:   document.getElementById("picker-card"),
@@ -46,10 +52,19 @@ const els = {
   thumbLabel:  document.getElementById("thumb-label"),
 };
 
-// Cache index built from the folder picker:
-//   Map<videoBasename, Map<roundN, { yolo?: {npy,meta}, vision?: {npy,meta} }>>
+// Cache index built from the folder picker (or the Drive folder walker):
+//   Map<videoBasename, Map<roundN, { yolo?: {npy,meta,punches?}, vision?: ... }>>
+// Slot values are EITHER File objects (manual picker) OR
+// FileSystemFileHandle objects (Drive folder). loadFromIndex calls
+// drive.toFile() on values when it's actually time to load.
 // Survives across video picks within one page session.
 let cacheIndex = null;
+
+// Drive-folder state: a separate index of video filename -> FileSystemFileHandle
+// built by the Drive folder walker. Populated when a Drive folder is
+// connected; consulted to populate the video dropdown.
+let driveVideos = null;
+let driveHandle = null;
 
 // Monotonically increasing token. Bumped on every load attempt so an in-flight
 // load can detect that a newer pick has superseded it and bail out before
@@ -74,6 +89,191 @@ els.cacheClear.addEventListener("click", onCacheClear);
 els.videoFile.addEventListener("change", onVideoPick);
 els.roundSel.addEventListener("change", onRoundPick);
 els.poseFile.addEventListener("change", onManualPose);
+if (els.driveConnect)    els.driveConnect.addEventListener("click", onDriveConnect);
+if (els.driveDisconnect) els.driveDisconnect.addEventListener("click", onDriveDisconnect);
+if (els.videoPick)       els.videoPick.addEventListener("change", onDriveVideoPick);
+
+// On boot, hide the Drive section entirely if the API isn't there (Safari /
+// Firefox today). Otherwise try to silently restore the last folder handle.
+initDriveSection();
+async function initDriveSection() {
+  if (!els.driveSection) return;
+  if (!drive.isSupported()) {
+    els.driveSection.hidden = true;
+    return;
+  }
+  const restored = await drive.tryRestore();
+  if (!restored) {
+    setDriveStatus("idle");
+    return;
+  }
+  driveHandle = restored.handle;
+  if (restored.permission === "granted") {
+    await refreshDriveFolder();
+  } else {
+    setDriveStatus("needs-permission", restored.handle.name);
+  }
+}
+
+function setDriveStatus(state, name) {
+  if (!els.driveStatus) return;
+  switch (state) {
+    case "idle":
+      els.driveStatus.textContent = "— not connected";
+      if (els.driveConnect)    els.driveConnect.textContent = "Connect Drive folder";
+      if (els.driveDisconnect) els.driveDisconnect.hidden = true;
+      break;
+    case "needs-permission":
+      els.driveStatus.innerHTML = `— need permission for <code>${name || "folder"}</code>`;
+      if (els.driveConnect)    els.driveConnect.textContent = "Reconnect";
+      if (els.driveDisconnect) els.driveDisconnect.hidden = false;
+      break;
+    case "scanning":
+      els.driveStatus.innerHTML = `— scanning <code>${name || ""}</code>…`;
+      if (els.driveDisconnect) els.driveDisconnect.hidden = false;
+      break;
+    case "connected": {
+      const nRounds = countRounds(cacheIndex);
+      const nVideos = driveVideos?.size || 0;
+      els.driveStatus.innerHTML =
+        `— connected to <code>${name || "folder"}</code> · ${nVideos} videos · ${nRounds} round caches`;
+      if (els.driveConnect)    els.driveConnect.textContent = "Pick a different folder";
+      if (els.driveDisconnect) els.driveDisconnect.hidden = false;
+      break;
+    }
+    case "denied":
+      els.driveStatus.innerHTML = `— permission denied for <code>${name || "folder"}</code>`;
+      if (els.driveConnect)    els.driveConnect.textContent = "Reconnect";
+      if (els.driveDisconnect) els.driveDisconnect.hidden = false;
+      break;
+  }
+}
+
+function countRounds(idx) {
+  let n = 0;
+  for (const rounds of idx?.values() || []) n += rounds.size;
+  return n;
+}
+
+async function onDriveConnect() {
+  // Two distinct flows: (1) we already have a handle but need permission, and
+  // (2) the user wants to pick a (different) folder. Either way ends with a
+  // valid handle + read permission, then a re-scan.
+  try {
+    if (driveHandle) {
+      const perm = await drive.requestPermission(driveHandle);
+      if (perm === "granted") {
+        await refreshDriveFolder();
+        return;
+      }
+      // Fall through to pick a new folder if denied.
+    }
+    const handle = await drive.pickFolder();
+    driveHandle = handle;
+    await refreshDriveFolder();
+  } catch (err) {
+    if (err?.name === "AbortError") return;     // user cancelled picker
+    console.error("Drive folder connect failed:", err);
+    els.loadStatus.textContent = `Drive folder: ${err.message}`;
+  }
+}
+
+async function onDriveDisconnect() {
+  driveHandle = null;
+  driveVideos = null;
+  // Clear only Drive-sourced entries — the manual cache picker may have added
+  // its own entries we don't want to drop. For now we don't distinguish, so
+  // clearing the whole index is the safe behaviour; pick again to rebuild.
+  cacheIndex = null;
+  await drive.forget();
+  populateDriveVideoSelect();
+  populateRoundSelect(null);
+  refreshCacheStatus();
+  setDriveStatus("idle");
+}
+
+async function refreshDriveFolder() {
+  if (!driveHandle) return;
+  setDriveStatus("scanning", driveHandle.name);
+  try {
+    const { videos, cacheIndex: idx } = await drive.walk(driveHandle);
+    driveVideos = videos;
+    // Merge Drive-sourced entries on top of anything from the manual picker —
+    // Drive wins (more likely fresh).
+    if (!cacheIndex) cacheIndex = new Map();
+    for (const [base, rounds] of idx) {
+      if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
+      const merged = cacheIndex.get(base);
+      for (const [round, slot] of rounds) merged.set(round, slot);
+    }
+    populateDriveVideoSelect();
+    refreshCacheStatus();
+    setDriveStatus("connected", driveHandle.name);
+  } catch (err) {
+    console.error("Drive folder walk failed:", err);
+    setDriveStatus("denied", driveHandle.name);
+    els.loadStatus.textContent = `Drive folder walk failed: ${err.message}`;
+  }
+}
+
+function populateDriveVideoSelect() {
+  if (!els.videoPick) return;
+  const sel = els.videoPick;
+  sel.innerHTML = "";
+  if (!driveVideos || driveVideos.size === 0) {
+    sel.innerHTML = `<option value="">— connect a Drive folder to populate —</option>`;
+    sel.disabled = true;
+    return;
+  }
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = `— pick a video from ${driveHandle?.name || "Drive folder"} —`;
+  sel.appendChild(placeholder);
+  // Sort: videos that have at least one matching cache float to the top.
+  const items = [...driveVideos.entries()].map(([name, h]) => {
+    const base = videoBasename(name);
+    const matched = !!cacheIndex?.get(base)?.size;
+    return { name, h, matched };
+  });
+  items.sort((a, b) => {
+    if (a.matched !== b.matched) return a.matched ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = it.name;
+    o.textContent = it.matched ? it.name : `${it.name} (no cache)`;
+    sel.appendChild(o);
+  }
+  sel.disabled = false;
+}
+
+async function onDriveVideoPick() {
+  const name = els.videoPick.value;
+  if (!name) return;
+  const handle = driveVideos?.get(name);
+  if (!handle) return;
+  // Materialize the video file from its handle and feed the same code path
+  // the manual <input type=file> uses.
+  let file;
+  try { file = await handle.getFile(); }
+  catch (err) {
+    els.loadStatus.textContent = `Couldn't open ${name}: ${err.message}`;
+    return;
+  }
+  // Stuff the same File-like into the videoFile input via a DataTransfer so
+  // the existing onVideoPick path runs unchanged.
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    els.videoFile.files = dt.files;
+  } catch {
+    /* DataTransfer assignment isn't strictly required — onVideoPick reads
+       from els.videoFile.files, and if assignment fails we still have the
+       file in scope. Fall through to direct pose load below. */
+  }
+  onVideoPick();
+}
 
 // Folder picker: index every `<base>_<engine>_r<N>.npy` and matching
 // `<base>_<engine>_r<N>_meta.json`. `engine` is `yolo` or `vision`. Each
@@ -274,25 +474,27 @@ function loadFromIndex(videoFile, slot) {
     .then(async () => {
       if (token !== currentLoadToken) return;
       const size = { width: els.video.videoWidth, height: els.video.videoHeight };
-      const posePrimary = await loadPose([primary.npy, primary.meta], size);
+      // Each slot value may be a File OR a FileSystemFileHandle (Drive folder).
+      // drive.toFile() returns a File from either.
+      const primaryNpy  = await drive.toFile(primary.npy);
+      const primaryMeta = await drive.toFile(primary.meta);
+      const posePrimary = await loadPose([primaryNpy, primaryMeta], size);
       if (token !== currentLoadToken) return;
       let poseSecondary = null;
       if (secondary) {
-        poseSecondary = await loadPose([secondary.npy, secondary.meta], size);
+        const secNpy  = await drive.toFile(secondary.npy);
+        const secMeta = await drive.toFile(secondary.meta);
+        poseSecondary = await loadPose([secNpy, secMeta], size);
         if (token !== currentLoadToken) return;
-        // Stamp engine name so the lens can label them correctly even if the
-        // file source said "yolo_pose" for both (loader currently hard-codes
-        // engine name).
         poseSecondary.engine = "apple_vision_2d";
       }
       posePrimary.engine = slot.yolo ? "yolo_pose" : "apple_vision_2d";
       // Optional sibling: ST-GCN punch detections for the primary engine.
-      // Loaded best-effort — a missing or malformed file just means lenses
-      // fall back to whatever heuristic they had before.
       let punches = null;
       if (primary.punches) {
         try {
-          punches = await loadPunches(primary.punches);
+          const punchFile = await drive.toFile(primary.punches);
+          punches = await loadPunches(punchFile);
         } catch (err) {
           console.warn("punches load failed:", err.message);
         }
