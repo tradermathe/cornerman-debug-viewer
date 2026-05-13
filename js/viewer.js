@@ -6,13 +6,14 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.1";
+const BUILD = "2026-05-13.2";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
 }
 
 import { loadPose } from "./pose-loader.js";
+import { loadPunches } from "./punches-loader.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 
@@ -88,11 +89,20 @@ function onCacheFolder(e) {
   if (!cacheIndex) cacheIndex = new Map();
   for (const f of files) {
     if (f.name.endsWith(".bak.npy")) continue;
-    const m = f.name.match(/^(.+?)_(yolo|vision)_r(\d+)(_meta)?\.(npy|json)$/);
+    // Three sibling patterns we recognize per round + engine:
+    //   <base>_<engine>_r<N>.npy           — pose data
+    //   <base>_<engine>_r<N>_meta.json     — pose metadata
+    //   <base>_<engine>_r<N>_punches.json  — ST-GCN detections (optional;
+    //                                        produced by dump_punches.py)
+    const m = f.name.match(
+      /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches)?\.(npy|json)$/
+    );
     if (!m) continue;
-    const [, base, engine, roundStr, isMeta, ext] = m;
+    const [, base, engine, roundStr, suffix, ext] = m;
     const round = parseInt(roundStr);
-    if (ext === "json" && !isMeta) continue;  // some random json next door
+    // Stray json files without a known suffix are skipped — keeps the index
+    // from filling with debug dumps / labeler exports etc.
+    if (ext === "json" && !suffix) continue;
 
     if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
     const rounds = cacheIndex.get(base);
@@ -100,13 +110,13 @@ function onCacheFolder(e) {
     const roundSlot = rounds.get(round);
     if (!roundSlot[engine]) roundSlot[engine] = {};
     const engineSlot = roundSlot[engine];
-    if (ext === "npy")  engineSlot.npy = f;
-    if (ext === "json") engineSlot.meta = f;
+    if (ext === "npy")                     engineSlot.npy = f;
+    else if (suffix === "_meta")           engineSlot.meta = f;
+    else if (suffix === "_punches")        engineSlot.punches = f;
   }
 
-  // Drop incomplete pairs (need both .npy + .json per engine) so we never
-  // offer something we can't actually load. A round is kept if at least one
-  // engine has a complete pair.
+  // Drop incomplete pose pairs (need .npy + _meta.json per engine). Punches
+  // are optional — their absence is fine, we just fall back to the heuristic.
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
       for (const eng of ["yolo", "vision"]) {
@@ -276,7 +286,19 @@ function loadFromIndex(videoFile, slot) {
         poseSecondary.engine = "apple_vision_2d";
       }
       posePrimary.engine = slot.yolo ? "yolo_pose" : "apple_vision_2d";
-      start(posePrimary, poseSecondary);
+      // Optional sibling: ST-GCN punch detections for the primary engine.
+      // Loaded best-effort — a missing or malformed file just means lenses
+      // fall back to whatever heuristic they had before.
+      let punches = null;
+      if (primary.punches) {
+        try {
+          punches = await loadPunches(primary.punches);
+        } catch (err) {
+          console.warn("punches load failed:", err.message);
+        }
+      }
+      if (token !== currentLoadToken) return;
+      start(posePrimary, poseSecondary, punches);
     })
     .catch(err => {
       if (token !== currentLoadToken) return;
@@ -286,21 +308,35 @@ function loadFromIndex(videoFile, slot) {
 }
 
 function loadFromFiles(videoFile, poseFiles) {
-  // Manual file picker — single engine only.
-  const names = Array.from(poseFiles).map(f => f.name).join(" + ");
+  // Manual file picker — single engine only. Pose loader takes the .npy and
+  // the _meta.json; a third file ending in _punches.json is consumed here as
+  // an optional ST-GCN-detection source for the step+punch-sync lens.
+  const all = Array.from(poseFiles);
+  const punchFile = all.find(f => /_punches\.json$/i.test(f.name));
+  const poseOnly = all.filter(f => f !== punchFile);
+  const names = all.map(f => f.name).join(" + ");
   els.loadStatus.textContent = `Loading ${videoFile.name} + ${names}…`;
   const token = ++currentLoadToken;
   loadVideo(videoFile)
-    .then(() => {
+    .then(async () => {
       if (token !== currentLoadToken) return null;
-      return loadPose(poseFiles, {
+      const pose = await loadPose(poseOnly, {
         width: els.video.videoWidth,
         height: els.video.videoHeight,
       });
+      let punches = null;
+      if (punchFile) {
+        try {
+          punches = await loadPunches(punchFile);
+        } catch (err) {
+          console.warn("punches load failed:", err.message);
+        }
+      }
+      return { pose, punches };
     })
-    .then(p => {
-      if (p == null || token !== currentLoadToken) return;
-      start(p, null);
+    .then(loaded => {
+      if (loaded == null || token !== currentLoadToken) return;
+      start(loaded.pose, null, loaded.punches);
     })
     .catch(err => {
       if (token !== currentLoadToken) return;
@@ -346,9 +382,10 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null) {
+function start(pose, poseSecondary = null, punches = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
+  state.punches = punches;               // optional ST-GCN detections
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;
