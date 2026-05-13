@@ -72,20 +72,25 @@ export const EngineCompareRule = {
 
   draw(ctx, state) {
     const s = state.renderScale || 1;
+    // Color-code by actual engine name rather than primary/secondary
+    // order — primary used to always be YOLO, but the viewer now prefers
+    // Vision when both exist, so we'd otherwise paint Vision in YOLO's
+    // colors. YOLO always = orange/yellow; Vision always = cyan/green,
+    // regardless of which one happens to be primary this load.
+    const stylesFor = pose => (pose.engine === "yolo_pose")
+      ? { boneColor: Y_BONE, jointColor: Y_WRIST, wristColor: Y_WRIST }
+      : { boneColor: V_BONE, jointColor: V_WRIST, wristColor: V_WRIST };
+
     drawEngineSkeleton(ctx, state.pose, state.frame, {
-      boneColor: Y_BONE, boneWidth: 2 * s,
-      jointColor: Y_WRIST, jointRadius: 4 * s,
-      wristColor: Y_WRIST, wristRadius: 9 * s,
-      strokeWidth: 2 * s,
+      ...stylesFor(state.pose),
+      boneWidth: 2 * s, jointRadius: 4 * s, wristRadius: 9 * s, strokeWidth: 2 * s,
     });
     if (state.poseSecondary) {
       const sf = secondaryFrame(state);
       if (sf != null) {
         drawEngineSkeleton(ctx, state.poseSecondary, sf, {
-          boneColor: V_BONE, boneWidth: 2 * s,
-          jointColor: V_WRIST, jointRadius: 4 * s,
-          wristColor: V_WRIST, wristRadius: 9 * s,
-          strokeWidth: 2 * s,
+          ...stylesFor(state.poseSecondary),
+          boneWidth: 2 * s, jointRadius: 4 * s, wristRadius: 9 * s, strokeWidth: 2 * s,
         });
       }
     }
@@ -96,6 +101,12 @@ export const EngineCompareRule = {
     const a = state.pose;
     const b = state.poseSecondary;
     const sf = b ? secondaryFrame(state) : null;
+    // Engine-aware labels. Primary used to always be YOLO; now Primary is
+    // Vision when both engines are present, so we resolve the conf
+    // letters/colors from each pose's engine tag.
+    const tagFor = pose => pose.engine === "yolo_pose"
+      ? { letter: "Y", color: Y_WRIST }
+      : { letter: "V", color: V_WRIST };
     const setJointDiff = (id, j) => {
       const confId = `${id}-conf`;
       if (!b) { setText(id, "—"); setText(confId, "—"); return; }
@@ -106,9 +117,11 @@ export const EngineCompareRule = {
       const bx = b.skeleton[(sf * 17 + j) * 2];
       const by = b.skeleton[(sf * 17 + j) * 2 + 1];
       const bc = b.conf[sf * 17 + j];
+      const aTag = tagFor(a);
+      const bTag = tagFor(b);
       setHTML(confId,
-        `<span style="color:${Y_WRIST}">Y ${ac.toFixed(2)}</span> · ` +
-        `<span style="color:${V_WRIST}">V ${bc.toFixed(2)}</span>`);
+        `<span style="color:${aTag.color}">${aTag.letter} ${ac.toFixed(2)}</span> · ` +
+        `<span style="color:${bTag.color}">${bTag.letter} ${bc.toFixed(2)}</span>`);
       if (ac < 0.05 || bc < 0.05) {
         setText(id, "low conf");
         return;
@@ -234,8 +247,10 @@ function drawWristTrace(canvas, a, b, jointIdx, frame) {
     }
     ctx.stroke();
   };
-  drawSeries(a, Y_WRIST);
-  drawSeries(b, V_WRIST);
+  // Engine-aware colors — primary may be Vision now, so pick by engine tag.
+  const colorFor = pose => pose.engine === "yolo_pose" ? Y_WRIST : V_WRIST;
+  drawSeries(a, colorFor(a));
+  drawSeries(b, colorFor(b));
 
   ctx.strokeStyle = "rgba(255,255,255,0.7)";
   ctx.lineWidth = 1;

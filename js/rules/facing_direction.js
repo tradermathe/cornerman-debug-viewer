@@ -127,12 +127,15 @@ function template() {
   return `
     <h2>Facing direction</h2>
     <p class="hint"><b>This tracks the body, not the face.</b> Magnitude
-      comes from hip and shoulder line lengths (the wider one each
-      frame); sign comes from face-joint confidence asymmetry (which
-      ear/eye is visible). Body and face usually rotate together but
-      can diverge — a boxer can keep their face square to the target
-      while rotating their hips. For gating rotation-based rules,
-      body angle is what matters.</p>
+      combines two signals — line-length (hip + shoulder, wider one
+      each frame, per-round-relative) AND face-joint confidence
+      asymmetry (anchored to anatomy, not the round). We take the max:
+      the line signal works on rounds where the boxer rotates through
+      a range, the face signal covers the case where the boxer stays
+      bladed throughout (so the line never sees a "square" reference).
+      Sign is always from face asymmetry — tells us which side is
+      toward the camera. Best results on Apple Vision data (clean
+      conf=0 for non-detected joints); muddier on YOLO.</p>
     <p class="hint">0° = body facing the camera, ±90° = body sideways.
       Rotation-based rules (hip rotation, shoulder rotation) hit
       projection dead zones near 0° and near ±90° and should abstain
@@ -285,16 +288,36 @@ function computeAll(state, cfg) {
   const magnitudeDeg = new Float32Array(N);
   const signDeg = new Float32Array(N);
 
+  // For each frame, we compute TWO magnitude estimates and take the max:
+  //   1. line-based  — arccos(line / observed_max). Works well when the
+  //      boxer rotates through a range during the round (we see the
+  //      "square" anchor). Fails on a round where the boxer is bladed
+  //      throughout because the observed-max is itself narrow.
+  //   2. face-based  — abs(face_conf_asymmetry) × 90°. Fires whenever
+  //      one ear/eye is visible and the other isn't. Saturates near 90°
+  //      when one side is completely missing, regardless of what the
+  //      line says. Independent of per-round line range, so it covers
+  //      the "all-bladed round" failure mode of the line signal.
   for (let f = 0; f < N; f++) {
     hipRatio[f]      = hipMax > 0 ? Math.min(1, hipLine[f] / hipMax) : 0;
     shoulderRatio[f] = shoMax > 0 ? Math.min(1, shoLine[f] / shoMax) : 0;
-    // Use whichever line is wider — it's the less-occluded one this
-    // frame. arccos returns [0, π/2] for ratio in [0, 1].
     const ratio = Math.max(hipRatio[f], shoulderRatio[f]);
-    magnitudeDeg[f] = Math.acos(Math.min(1, Math.max(0, ratio))) * 180 / Math.PI;
-    // Sign: from face-joint asymmetry. Positive asym = L side more
-    // visible = boxer rotated such that their left flank is toward
-    // camera.
+    const lineMag = Math.acos(Math.min(1, Math.max(0, ratio))) * 180 / Math.PI;
+
+    // Face-based magnitude. Only trustable when we have *some* face
+    // confidence to work with — if all four joints are near zero (e.g.
+    // boxer facing away, head out of frame), don't let it speak.
+    const maxFaceConf = Math.max(
+      pose.conf[f * 17 + J.L_EAR],
+      pose.conf[f * 17 + J.R_EAR],
+      pose.conf[f * 17 + J.L_EYE],
+      pose.conf[f * 17 + J.R_EYE],
+    );
+    const faceMag = maxFaceConf > 0.30
+      ? Math.min(1, Math.abs(faceAsymRaw[f])) * 90
+      : 0;
+
+    magnitudeDeg[f] = Math.max(lineMag, faceMag);
     signDeg[f] = faceAsymRaw[f];
   }
 

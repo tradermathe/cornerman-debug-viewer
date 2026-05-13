@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.15";
+const BUILD = "2026-05-13.16";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -459,14 +459,16 @@ function onManualPose() {
 }
 
 function loadFromIndex(videoFile, slot) {
-  // `slot` may have `yolo` and/or `vision`. Primary pose is YOLO when
-  // present (matches the rules engine), Vision is loaded as a sibling
-  // for the compare lens. If only one engine is present, that one is
-  // primary and there's no comparison.
-  const primary = slot.yolo || slot.vision;
-  const secondary = (slot.yolo && slot.vision) ? slot.vision : null;
+  // `slot` may have `yolo` and/or `vision`. Primary pose is APPLE VISION
+  // when present — it's what the production iOS app runs on, and its
+  // clean `conf = 0` for non-detected joints is what the facing-direction
+  // lens (and any rule that consults face-confidence asymmetry) needs.
+  // YOLO is loaded as the secondary so the engine-compare lens still has
+  // both. If only one engine exists, that one is primary.
+  const primary = slot.vision || slot.yolo;
+  const secondary = (slot.vision && slot.yolo) ? slot.yolo : null;
   const status =
-    `Loading ${videoFile.name}${secondary ? " (yolo + vision)" : ""}…`;
+    `Loading ${videoFile.name}${secondary ? " (vision + yolo)" : ""}…`;
   els.loadStatus.textContent = status;
 
   const token = ++currentLoadToken;
@@ -480,15 +482,23 @@ function loadFromIndex(videoFile, slot) {
       const primaryMeta = await drive.toFile(primary.meta);
       const posePrimary = await loadPose([primaryNpy, primaryMeta], size);
       if (token !== currentLoadToken) return;
+      // Engine tags reflect which slot each pose came from. Primary is
+      // Vision when both engines are present (see the slot-pick above),
+      // so when there's both we know primary = vision and secondary = yolo;
+      // otherwise primary is whichever single engine exists for this round.
+      const primaryEngine = (slot.vision && primary === slot.vision)
+        ? "apple_vision_2d"
+        : "yolo_pose";
+      posePrimary.engine = primaryEngine;
       let poseSecondary = null;
       if (secondary) {
         const secNpy  = await drive.toFile(secondary.npy);
         const secMeta = await drive.toFile(secondary.meta);
         poseSecondary = await loadPose([secNpy, secMeta], size);
         if (token !== currentLoadToken) return;
-        poseSecondary.engine = "apple_vision_2d";
+        poseSecondary.engine =
+          primaryEngine === "apple_vision_2d" ? "yolo_pose" : "apple_vision_2d";
       }
-      posePrimary.engine = slot.yolo ? "yolo_pose" : "apple_vision_2d";
       // Optional sibling: ST-GCN punch detections for the primary engine.
       let punches = null;
       if (primary.punches) {
