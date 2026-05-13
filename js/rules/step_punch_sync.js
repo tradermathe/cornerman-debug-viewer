@@ -111,38 +111,48 @@ export const StepPunchSyncRule = {
       seekHack(state, state.frame);
     });
 
-    // "Refresh from Sheet" — only meaningful when we have a labels binding.
+    // "Refresh from Sheet" — bypasses the in-session cache so newly added
+    // rows in the labeler show up immediately.
     const refreshBtn = host.querySelector("#sps-refresh");
     if (refreshBtn) {
       refreshBtn.addEventListener("click", async () => {
-        if (!state.labels?.source_video) {
-          refreshBtn.textContent = "no labels file to refresh";
+        const basename = state.labels?.source_video
+          ? null  // we have a confirmed match — reuse the cache_basename path below
+          : null;
+        // We always re-derive the basename from the pose source filename, so
+        // refresh works even when the initial auto-match failed.
+        const cacheBasename = state.pose?.source
+          ? state.pose.source.replace(/\.npy$/i, "").replace(/_(yolo|vision)_r\d+$/i, "")
+          : null;
+        if (!cacheBasename) {
+          refreshBtn.textContent = "no cache loaded";
           return;
         }
         refreshBtn.disabled = true;
         const prev = refreshBtn.textContent;
         refreshBtn.textContent = "fetching…";
         const live = await fetchLiveLabels({
-          sourceVideo: state.labels.source_video,
-          cacheStartSec: state.labels.cache_start_sec || 0,
+          cacheBasename,
+          cacheStartSec: state.pose.start_sec || 0,
           fps: state.pose.fps,
           nFrames: state.pose.n_frames,
+          force: true,
         });
         refreshBtn.disabled = false;
         if (live.error) {
+          state.labels = { error: live.error, cacheBasename, detections: [] };
+          signals = computeAll(state, cfg);
+          renderTables(state);
+          seekHack(state, state.frame);
           refreshBtn.textContent = `failed: ${live.error}`;
           setTimeout(() => { refreshBtn.textContent = prev; }, 3000);
           return;
         }
-        state.labels = {
-          ...state.labels,
-          ...live,
-          detections: live.detections,
-        };
+        state.labels = live;
         signals = computeAll(state, cfg);
         renderTables(state);
         seekHack(state, state.frame);
-        refreshBtn.textContent = `↻ refreshed (${live.detections.length} punches)`;
+        refreshBtn.textContent = `↻ ${live.detections.length} labels`;
         setTimeout(() => { refreshBtn.textContent = prev; }, 2500);
       });
     }
@@ -334,26 +344,29 @@ function renderTables(state) {
 
   // Source pill: tell the user where punches came from.
   const pill = host.querySelector("#sps-source-pill");
-  const refreshBtn = host.querySelector("#sps-refresh");
+  const labelErr = state.labels?.error;
   if (signals.source === "labels") {
-    const liveTag = state.labels?.source === "labels_sheet_live"
-      ? ` · <span class="good">live</span> @ ${new Date(state.labels.fetched_at).toLocaleTimeString()}`
-      : ` · offline (sidecar)`;
+    const time = new Date(state.labels.fetched_at).toLocaleTimeString();
+    const cached = state.labels.from_cache ? " (cached)" : "";
+    const conf = state.labels.match_confidence || "?";
     pill.innerHTML =
-      `<span class="role-lead">Ground truth</span> · ${signals.punches.length} labels` +
-      `${liveTag} · video <code>${state.labels?.source_video || "?"}</code>`;
-    if (refreshBtn) refreshBtn.hidden = false;
+      `<span class="role-lead">Ground truth</span> · ${signals.punches.length} labels · ` +
+      `live @ ${time}${cached} · auto-matched (${conf}) → ` +
+      `<code>${state.labels.source_video}</code>`;
   } else if (signals.source === "stgcn") {
+    const errLine = labelErr
+      ? `<br><span class="muted">Labels: <span class="bad">${labelErr}</span> — using ST-GCN.</span>`
+      : "";
     pill.innerHTML =
       `<span class="role-rear">ST-GCN punches</span> · ${signals.punches.length} detected · ` +
-      `from <code>${state.punches?.source || "punches.json"}</code> · ` +
-      `(drop a <code>*_labels.json</code> for ground truth)`;
-    if (refreshBtn) refreshBtn.hidden = true;
+      `from <code>${state.punches?.source || "punches.json"}</code>` + errLine;
   } else {
+    const errLine = labelErr
+      ? `<br><span class="muted">Labels: <span class="bad">${labelErr}</span>.</span>`
+      : "";
     pill.innerHTML =
       `<span class="role-rear">Heuristic punches</span> · ${signals.punches.length} wrist-peak candidates · ` +
-      `drop a <code>*_labels.json</code> or <code>*_punches.json</code> next to the cache for real detections.`;
-    if (refreshBtn) refreshBtn.hidden = true;
+      `drop a <code>*_punches.json</code> next to the cache for ST-GCN.` + errLine;
   }
   host.querySelector("#sps-extmin-wrap").style.display =
     signals.source === "heuristic" ? "" : "none";

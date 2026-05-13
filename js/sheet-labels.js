@@ -1,23 +1,25 @@
 // Live ground-truth label fetcher.
 //
 // The labeler writes punches to a public Google Sheet ("Combined Data"
-// tab). Both the xlsx export and the gviz CSV endpoint are reachable
-// without auth — we use the CSV endpoint here because it streams faster
-// and parses in a few lines of JS, no third-party library needed.
+// tab). The gviz CSV endpoint is reachable without auth, so we can pull
+// labels live in the browser — no `dump_labels.py` rerun, no sidecar JSON.
 //
-// Flow:
-//   1. The cache has a sibling `<stem>_labels.json` (produced by
-//      `dump_labels.py` in cornerman-backend) which records which
-//      `source_video` the cache was clipped from and the
-//      `cache_start_sec` offset.
-//   2. On every cache load, the viewer triggers fetchLiveLabels() with
-//      those fields — we hit the live Sheet, filter to the source video,
-//      apply the offset, and return a fresh detections array. New rows
-//      added in the labeler since the last dump_labels.py run show up
-//      immediately.
-//   3. The `_labels.json` doubles as an offline cache: if the network
-//      fails the viewer just uses the detections that were serialized
-//      into it at dump time.
+// Flow (option A — auto-match):
+//   1. The viewer loads a pose cache. The cache filename gives us a
+//      basename (e.g. `30 MIN SHADOWBOXING…_h264` from
+//      `30 MIN SHADOWBOXING…_h264_vision_r0.npz`).
+//   2. We fetch the Sheet CSV once per session (cached in memory), then
+//      look for a unique `video_name` whose stem matches the cache
+//      basename (case-insensitive, substring either direction).
+//   3. If exactly one source matches we filter to its rows; if none, we
+//      report it and the lens falls back to ST-GCN punches / heuristic.
+//   4. Times are mapped to cache-relative frames using
+//      `state.pose.start_sec` (read from the cache's `_meta.json`) and
+//      `state.pose.fps`.
+//
+// Adding a new label in the labeler → click Refresh from Sheet in the
+// step+punch-sync lens; the in-session cache is bypassed and the live
+// rows are re-pulled.
 
 const PUBLIC_SHEET_ID = "1CewEaweCBw9F-qSvNapiQMNj4wnidHqLA-I19whrly0";
 const COMBINED_SHEET = "Combined Data";
@@ -26,25 +28,36 @@ const NON_PUNCH = new Set([
   "round_start", "round_end", "rest_start", "rest_end",
 ]);
 
-// Parse 'mm:ss.mmm' or plain seconds into a number of seconds. Returns null
-// on garbage so the caller can skip the row.
+// In-session cache of the parsed CSV. The Sheet's ~10k rows are ~1.5 MB
+// over the wire — fetching once per session and reusing across cache
+// picks keeps the viewer snappy. `force=true` bypasses for the Refresh
+// button.
+let cachedRows = null;
+let cachedFetchedAt = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+export function clearCache() {
+  cachedRows = null;
+  cachedFetchedAt = 0;
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
 export function parseTimestamp(s) {
   if (s == null) return null;
   let t = String(s).trim().replace(/^["']|["']$/g, "").replace(",", ".");
   if (!t) return null;
   if (t.includes(":")) {
-    const parts = t.split(":");
-    const nums = parts.map(p => Number(p));
-    if (nums.some(n => Number.isNaN(n))) return null;
-    if (nums.length === 2) return nums[0] * 60 + nums[1];
-    if (nums.length === 3) return nums[0] * 3600 + nums[1] * 60 + nums[2];
+    const parts = t.split(":").map(Number);
+    if (parts.some(n => Number.isNaN(n))) return null;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
     return null;
   }
   const n = Number(t);
   return Number.isFinite(n) ? n : null;
 }
 
-// jab is always lead, cross is always rear; hooks/uppercuts carry their hand.
 export function handForLabel(label) {
   const l = String(label || "").trim().toLowerCase();
   if (l.startsWith("jab"))   return "lead";
@@ -54,10 +67,6 @@ export function handForLabel(label) {
   return null;
 }
 
-// Parse a CSV string into an array of row objects keyed by header.
-// Quoted fields supported (the gviz CSV always quotes every cell so newlines
-// inside a field don't break the row delimiter, but we still implement a
-// real parser instead of split(',') just to be safe).
 export function parseCsv(text) {
   const rows = [];
   let cur = [], field = "", inQuotes = false;
@@ -65,15 +74,15 @@ export function parseCsv(text) {
     const c = text[i];
     if (inQuotes) {
       if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }   // escaped ""
+        if (text[i + 1] === '"') { field += '"'; i++; }
         else { inQuotes = false; }
       } else { field += c; }
     } else {
-      if (c === '"') { inQuotes = true; }
+      if (c === '"')      inQuotes = true;
       else if (c === ",") { cur.push(field); field = ""; }
       else if (c === "\n") { cur.push(field); rows.push(cur); cur = []; field = ""; }
       else if (c === "\r") { /* skip */ }
-      else { field += c; }
+      else field += c;
     }
   }
   if (field.length || cur.length) { cur.push(field); rows.push(cur); }
@@ -84,32 +93,103 @@ export function parseCsv(text) {
     .map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ""])));
 }
 
-// Returns true if a sheet row's video_file/video_name matches the cache's
-// recorded source video. Source can be a filename, a Drive URL, or a Drive
-// file ID — we try all reasonable matches.
-function matchesSource(row, sourceVideo) {
-  if (!sourceVideo) return false;
-  const hint = String(sourceVideo).trim().toLowerCase();
-  const name = String(row.video_name || "").trim().toLowerCase();
-  const file = String(row.video_file || "").trim().toLowerCase();
-  if (!hint) return false;
-  if (name === hint || file === hint) return true;
-  // Drive ID embedded somewhere.
-  const m = hint.match(/[a-z0-9_-]{20,}/i);
-  if (m && file.includes(m[0])) return true;
-  // Loose substring on filename — useful when the user passes a partial
-  // filename like 'shadowbox' from the cache basename.
-  if (name.includes(hint)) return true;
-  return false;
+// Pull rows, cached.
+export async function fetchRows({ force = false } = {}) {
+  if (!force && cachedRows && Date.now() - cachedFetchedAt < CACHE_TTL_MS) {
+    return { rows: cachedRows, fetchedAt: cachedFetchedAt, fromCache: true };
+  }
+  const url =
+    `https://docs.google.com/spreadsheets/d/${PUBLIC_SHEET_ID}` +
+    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(COMBINED_SHEET)}`;
+  const resp = await fetch(url, { cache: "no-store" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const csvText = await resp.text();
+  cachedRows = parseCsv(csvText);
+  cachedFetchedAt = Date.now();
+  return { rows: cachedRows, fetchedAt: cachedFetchedAt, fromCache: false };
 }
 
-// Re-shape sheet rows into the same detection schema the rule lenses expect.
-// All times are converted to cache-local frame indices using `cacheStartSec`
-// + `fps`. Out-of-range rows are dropped.
+// Normalize a filename / basename for fuzzy matching: drop extension,
+// lowercase, collapse non-alphanum to single spaces, trim.
+function normalize(s) {
+  return String(s)
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/, "")     // drop one extension
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+// Find the source video in the Sheet that best matches a cache basename.
+// Returns { name, confidence: 'exact' | 'substr' | 'tokens', n_rows } or null.
+// Strategy:
+//   1. Exact (normalized) match — strongest.
+//   2. One direction substring (cache normalized contains video normalized,
+//      or vice versa).
+//   3. Tokens: every alphanum token of the shorter side appears as a token
+//      in the longer side. Catches `name_r0` vs `name`, `name_h264` vs
+//      `name`, etc.
+// If multiple candidates tie, pick the one with the most label rows (i.e.
+// the most specific source video).
+export function findSourceByBasename(rows, cacheBasename) {
+  if (!cacheBasename) return null;
+  // Strip the cache-shape suffix `_<engine>_r<N>` so the basename we match
+  // against is just the source name, e.g.
+  //   `30 MIN SHADOWBOXING…_h264_vision_r0` → `30 MIN SHADOWBOXING…_h264`
+  const cb = cacheBasename.replace(/_(yolo|vision)_r\d+$/i, "");
+  const cbN = normalize(cb);
+  if (!cbN) return null;
+
+  // Tally counts per video for picking among ties.
+  const counts = new Map();
+  for (const r of rows) {
+    const v = r.video_name;
+    if (!v) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  const names = [...counts.keys()];
+
+  const cbTokens = new Set(cbN.split(" ").filter(Boolean));
+  let exact = null;
+  const substrHits = [];
+  const tokenHits = [];
+
+  for (const n of names) {
+    const nN = normalize(n);
+    if (!nN) continue;
+    if (nN === cbN) { exact = n; break; }
+    if (cbN.includes(nN) || nN.includes(cbN)) {
+      substrHits.push({ name: n, score: Math.min(nN.length, cbN.length) });
+      continue;
+    }
+    const nTokens = nN.split(" ").filter(Boolean);
+    const shorter = nTokens.length < cbTokens.size ? nTokens : [...cbTokens];
+    const longer  = nTokens.length < cbTokens.size ? new Set(cbTokens) : new Set(nTokens);
+    if (shorter.length && shorter.every(t => longer.has(t))) {
+      tokenHits.push({ name: n, score: shorter.length });
+    }
+  }
+
+  const pickByCount = arr => {
+    arr.sort((a, b) => (counts.get(b.name) || 0) - (counts.get(a.name) || 0));
+    return arr[0]?.name || null;
+  };
+
+  if (exact)             return { name: exact,                 confidence: "exact",  n_rows: counts.get(exact) };
+  if (substrHits.length) {
+    const w = pickByCount(substrHits);
+    return { name: w, confidence: "substr", n_rows: counts.get(w) };
+  }
+  if (tokenHits.length) {
+    const w = pickByCount(tokenHits);
+    return { name: w, confidence: "tokens", n_rows: counts.get(w) };
+  }
+  return null;
+}
+
+// Reshape filtered Sheet rows into the detection schema rule lenses expect.
 export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames }) {
   const detections = [];
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
+  for (const r of rows) {
     const label = String(r.label || "").trim().toLowerCase();
     if (!label || NON_PUNCH.has(label)) continue;
     const sStart = parseTimestamp(r.start_sec);
@@ -143,31 +223,40 @@ export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames }) {
   return detections;
 }
 
-// Fetch the live "Combined Data" sheet as CSV and return all rows for a
-// single source video, mapped to cache-local detection records.
-export async function fetchLiveLabels({ sourceVideo, cacheStartSec, fps, nFrames }) {
-  if (!sourceVideo) {
-    return { source: "labels_sheet_live", detections: [], error: "no source_video" };
-  }
-  const url =
-    `https://docs.google.com/spreadsheets/d/${PUBLIC_SHEET_ID}` +
-    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(COMBINED_SHEET)}`;
-  let csvText;
+// Top-level convenience: given a cache basename + cache offset + fps + frame
+// count, fetch (cached) the Sheet, auto-match a source, and return a
+// detections array. The lens code is one call away from live labels.
+export async function fetchLiveLabels({
+  cacheBasename, cacheStartSec = 0, fps, nFrames, force = false,
+}) {
+  let fetched;
   try {
-    const resp = await fetch(url, { cache: "no-store" });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    csvText = await resp.text();
+    fetched = await fetchRows({ force });
   } catch (err) {
-    return { source: "labels_sheet_live", detections: [], error: err.message };
+    return { error: err.message };
   }
-  const rows = parseCsv(csvText).filter(r => matchesSource(r, sourceVideo));
-  const detections = rowsToDetections(rows, { cacheStartSec, fps, nFrames });
+  const match = findSourceByBasename(fetched.rows, cacheBasename);
+  if (!match) {
+    return {
+      error: "no source-video auto-match in the Sheet for this cache",
+      cacheBasename,
+      fetched_at: fetched.fetchedAt,
+      from_cache: fetched.fromCache,
+    };
+  }
+  const videoRows = fetched.rows.filter(r => r.video_name === match.name);
+  const detections = rowsToDetections(videoRows, { cacheStartSec, fps, nFrames });
   return {
     source: "labels_sheet_live",
     schema_version: 1,
+    source_video: match.name,
+    match_confidence: match.confidence,
+    n_rows_for_video: match.n_rows,
+    cache_start_sec: cacheStartSec,
     fps,
-    fetched_at: new Date().toISOString(),
-    total_rows_matched: rows.length,
+    fetched_at: fetched.fetchedAt,
+    from_cache: fetched.fromCache,
+    total_punches: detections.length,
     detections,
   };
 }

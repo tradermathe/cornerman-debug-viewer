@@ -88,20 +88,31 @@ function renderSourceLine(state) {
   const el = host?.querySelector("#ov-source");
   if (!el) return;
   const src = pickSource(state);
+  // Surface label-fetch errors even when no labels are picked, so the user
+  // knows WHY the lens isn't using GT.
+  const labelErr = state.labels?.error;
   if (!src) {
-    el.innerHTML = `<span class="muted">No punches loaded — drop a <code>*_labels.json</code> or <code>*_punches.json</code> next to the cache.</span>`;
+    const errHtml = labelErr
+      ? `<span class="muted">Labels: <span class="bad">${labelErr}</span> for <code>${state.labels.cacheBasename || "?"}</code>.</span><br>`
+      : "";
+    el.innerHTML = errHtml +
+      `<span class="muted">No punches loaded — drop a <code>*_punches.json</code> next to the cache for ST-GCN detections.</span>`;
     return;
   }
   if (src.kind === "labels") {
-    const live = src.meta?.source === "labels_sheet_live"
-      ? ` · <span class="good">live</span> @ ${new Date(src.meta.fetched_at).toLocaleTimeString()}`
-      : ` · offline (sidecar)`;
+    const time = new Date(src.meta.fetched_at).toLocaleTimeString();
+    const cached = src.meta.from_cache ? " (cached)" : "";
+    const conf = src.meta.match_confidence || "?";
     el.innerHTML =
-      `<span class="role-lead">Ground truth</span> · ${src.detections.length} labels` +
-      `${live} · video <code>${src.meta?.source_video || "?"}</code>`;
+      `<span class="role-lead">Ground truth</span> · ${src.detections.length} labels · ` +
+      `live @ ${time}${cached} · ` +
+      `auto-matched (${conf}) → <code>${src.meta.source_video}</code>`;
   } else {
+    const errLine = labelErr
+      ? `<br><span class="muted">Labels: <span class="bad">${labelErr}</span> — using ST-GCN.</span>`
+      : "";
     el.innerHTML =
-      `<span class="role-rear">ST-GCN punches</span> · ${src.detections.length} detected`;
+      `<span class="role-rear">ST-GCN punches</span> · ${src.detections.length} detected` + errLine;
   }
 }
 
