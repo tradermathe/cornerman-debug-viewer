@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.10";
+const BUILD = "2026-05-13.11";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;

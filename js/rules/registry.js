@@ -16,6 +16,7 @@ import { ForearmProjectionRule } from "./forearm_projection.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
 import { StepDetectorRule } from "./step_detector.js";
+import { HipRotationRule } from "./hip_rotation.js";
 
 export const RULES = [
   OverviewRule,
@@ -24,4 +25,5 @@ export const RULES = [
   EngineCompareRule,
   StepPunchSyncRule,
   StepDetectorRule,
+  HipRotationRule,
 ];

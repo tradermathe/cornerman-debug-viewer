@@ -23,6 +23,14 @@
 
 const PUBLIC_SHEET_ID = "1CewEaweCBw9F-qSvNapiQMNj4wnidHqLA-I19whrly0";
 const COMBINED_SHEET = "Combined Data";
+const FORM_LABELS_SHEET = "Combined Form Labels";
+// Form-rule fields we surface on each detection so per-rule lenses can
+// score their predictions against the coach's verdict.
+const FORM_LABEL_KEYS = [
+  "rule_hand_extended", "rule_hand_low", "rule_hand_ushape",
+  "rule_hip_rotation", "rule_rear_heel_lift", "rule_resting_hand",
+  "rule_extension", "rule_punch_height",
+];
 
 const NON_PUNCH = new Set([
   "round_start", "round_end", "rest_start", "rest_end",
@@ -34,11 +42,13 @@ const NON_PUNCH = new Set([
 // button.
 let cachedRows = null;
 let cachedFetchedAt = 0;
+let cachedFormByUuid = null;     // { punch_uuid -> {rule_*: 'pass'|'fail'|'unclear'|''} }
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export function clearCache() {
   cachedRows = null;
   cachedFetchedAt = 0;
+  cachedFormByUuid = null;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -93,20 +103,49 @@ export function parseCsv(text) {
     .map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ""])));
 }
 
-// Pull rows, cached.
+// Pull rows from both label sheets, cached. We fetch them in parallel
+// because every cache load wants both anyway: Combined Data gives us the
+// per-punch timing + video, Combined Form Labels gives us the per-rule
+// pass/fail verdicts that lenses score themselves against.
 export async function fetchRows({ force = false } = {}) {
   if (!force && cachedRows && Date.now() - cachedFetchedAt < CACHE_TTL_MS) {
-    return { rows: cachedRows, fetchedAt: cachedFetchedAt, fromCache: true };
+    return {
+      rows: cachedRows, formByUuid: cachedFormByUuid,
+      fetchedAt: cachedFetchedAt, fromCache: true,
+    };
   }
-  const url =
+  const sheetUrl = (name) =>
     `https://docs.google.com/spreadsheets/d/${PUBLIC_SHEET_ID}` +
-    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(COMBINED_SHEET)}`;
-  const resp = await fetch(url, { cache: "no-store" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const csvText = await resp.text();
-  cachedRows = parseCsv(csvText);
+    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(name)}`;
+
+  const [combinedResp, formResp] = await Promise.all([
+    fetch(sheetUrl(COMBINED_SHEET),    { cache: "no-store" }),
+    fetch(sheetUrl(FORM_LABELS_SHEET), { cache: "no-store" }),
+  ]);
+  if (!combinedResp.ok) throw new Error(`HTTP ${combinedResp.status} on ${COMBINED_SHEET}`);
+  if (!formResp.ok)     throw new Error(`HTTP ${formResp.status} on ${FORM_LABELS_SHEET}`);
+
+  cachedRows = parseCsv(await combinedResp.text());
+
+  // Build the punch_uuid → form-verdicts map for fast join.
+  const formRows = parseCsv(await formResp.text());
+  cachedFormByUuid = new Map();
+  for (const r of formRows) {
+    const uuid = (r.punch_uuid || "").trim();
+    if (!uuid) continue;
+    const verdicts = {};
+    for (const k of FORM_LABEL_KEYS) {
+      const v = (r[k] || "").trim().toLowerCase();
+      if (v) verdicts[k] = v;
+    }
+    if (Object.keys(verdicts).length) cachedFormByUuid.set(uuid, verdicts);
+  }
+
   cachedFetchedAt = Date.now();
-  return { rows: cachedRows, fetchedAt: cachedFetchedAt, fromCache: false };
+  return {
+    rows: cachedRows, formByUuid: cachedFormByUuid,
+    fetchedAt: cachedFetchedAt, fromCache: false,
+  };
 }
 
 // Normalize a filename / basename for fuzzy matching: drop extension,
@@ -187,7 +226,9 @@ export function findSourceByBasename(rows, cacheBasename) {
 }
 
 // Reshape filtered Sheet rows into the detection schema rule lenses expect.
-export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames }) {
+// `formByUuid` (optional) is the map from fetchRows() — if present, every
+// detection gets its rule_* verdict columns attached.
+export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames, formByUuid = null }) {
   const detections = [];
   for (const r of rows) {
     const label = String(r.label || "").trim().toLowerCase();
@@ -202,7 +243,8 @@ export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames }) {
     const sf = Math.max(0, Math.round(localStart * fps));
     const ef = Math.min(nFrames - 1, Math.round(localEnd * fps));
     if (ef - sf < 1) continue;
-    detections.push({
+    const punch_uuid = (r.punch_uuid || "").trim() || null;
+    const det = {
       idx: detections.length,
       timestamp: (localStart + localEnd) / 2,
       start_time: localStart,
@@ -214,10 +256,15 @@ export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames }) {
       category: null,
       n_frames: ef - sf + 1,
       stance: String(r.stance || "").trim().toLowerCase() || null,
-      punch_uuid: r.punch_uuid || null,
+      punch_uuid,
       labeler: r.labeler || null,
       reviewed: r.reviewed || null,
-    });
+    };
+    if (formByUuid && punch_uuid && formByUuid.has(punch_uuid)) {
+      const verdicts = formByUuid.get(punch_uuid);
+      for (const [k, v] of Object.entries(verdicts)) det[k] = v;
+    }
+    detections.push(det);
   }
   detections.sort((a, b) => a.start_frame - b.start_frame);
   return detections;
@@ -245,7 +292,9 @@ export async function fetchLiveLabels({
     };
   }
   const videoRows = fetched.rows.filter(r => r.video_name === match.name);
-  const detections = rowsToDetections(videoRows, { cacheStartSec, fps, nFrames });
+  const detections = rowsToDetections(videoRows, {
+    cacheStartSec, fps, nFrames, formByUuid: fetched.formByUuid,
+  });
   return {
     source: "labels_sheet_live",
     schema_version: 1,
