@@ -136,9 +136,10 @@ function template() {
     <p class="hint">0° = body facing the camera, ±90° = body sideways.
       Rotation-based rules (hip rotation, shoulder rotation) hit
       projection dead zones near 0° and near ±90° and should abstain
-      there. The magnitude is anchored to the boxer's own observed
-      range in this round: at their most-square frame it reads 0°,
-      at their most-bladed it reads 90°.</p>
+      there. <b>Known limit:</b> fully sideways usually reads as 70–80°
+      rather than 90° — the 2D estimator never lets the hip line truly
+      collapse to zero, so <code>arccos(line/max)</code> tops out short
+      of π/2. Treat 70–80° as "effectively sideways."</p>
 
     <h3>Now</h3>
     <div class="metric-grid">
@@ -266,38 +267,31 @@ function computeAll(state, cfg) {
     shoLine[f] = Math.hypot(lsx - rsx, lsy - rsy) / th;
   }
 
-  // Per-round 95th-percentile (most-square seen) AND 5th-percentile
-  // (most-bladed seen) for each line. Rescaling to the OBSERVED range
-  // matters: the skeleton estimator never lets the hip line go to truly
-  // zero even when the boxer is fully sideways (occluded joints still
-  // get a non-zero 2D best-guess), so without rescaling we'd top out at
-  // arccos(~0.3) ≈ 72° instead of 90°. Using the observed min as the
-  // floor anchors the "sideways = 90°" point at whatever the boxer's
-  // most-bladed frame actually projected to.
+  // Per-round 95th-percentile (the most-square frame the boxer hit
+  // this round) for each line — used as the "facing camera" anchor.
+  // We DON'T rescale against an observed min. That sounds tempting
+  // (saturate at 90° at sideways), but breaks on all-front footage:
+  // when min ≈ max, tiny noise gets amplified into garbage angles.
+  // Trade-off: with this raw arccos, fully-sideways tops out around
+  // 70-80° because 2D pose estimators never let the hip line truly
+  // collapse — the occluded hip still gets a non-zero best-guess
+  // position. We accept that and just remember: 70-80° here is
+  // actually fully sideways.
   const hipMax = percentile(hipLine, 0.95);
-  const hipMin = percentile(hipLine, 0.05);
   const shoMax = percentile(shoLine, 0.95);
-  const shoMin = percentile(shoLine, 0.05);
-  const hipRange = Math.max(1e-6, hipMax - hipMin);
-  const shoRange = Math.max(1e-6, shoMax - shoMin);
 
   const hipRatio = new Float32Array(N);
   const shoulderRatio = new Float32Array(N);
   const magnitudeDeg = new Float32Array(N);
   const signDeg = new Float32Array(N);
-  const facingRaw = new Float32Array(N);
 
   for (let f = 0; f < N; f++) {
-    // Rescaled ratios: 1.0 at observed-max (most-square), 0.0 at
-    // observed-min (most-bladed). Clamped to [0, 1] to absorb noise
-    // outside the percentile band.
-    hipRatio[f]      = Math.min(1, Math.max(0, (hipLine[f] - hipMin) / hipRange));
-    shoulderRatio[f] = Math.min(1, Math.max(0, (shoLine[f] - shoMin) / shoRange));
+    hipRatio[f]      = hipMax > 0 ? Math.min(1, hipLine[f] / hipMax) : 0;
+    shoulderRatio[f] = shoMax > 0 ? Math.min(1, shoLine[f] / shoMax) : 0;
     // Use whichever line is wider — it's the less-occluded one this
-    // frame. Magnitude saturates at 90° by construction at the boxer's
-    // observed extremes.
+    // frame. arccos returns [0, π/2] for ratio in [0, 1].
     const ratio = Math.max(hipRatio[f], shoulderRatio[f]);
-    magnitudeDeg[f] = Math.acos(ratio) * 180 / Math.PI;
+    magnitudeDeg[f] = Math.acos(Math.min(1, Math.max(0, ratio))) * 180 / Math.PI;
     // Sign: from face-joint asymmetry. Positive asym = L side more
     // visible = boxer rotated such that their left flank is toward
     // camera.
@@ -311,18 +305,10 @@ function computeAll(state, cfg) {
   for (let f = 0; f < N; f++) {
     const m = smoothed[f];
     const sRaw = smoothedSign[f];
-    // Sign is meaningful only when face joints have something to say.
     const signMag = Math.abs(sRaw);
     let sign = 0;
-    if (signMag > 0.20) sign = Math.sign(sRaw);
-    else if (signMag > 0.05) {
-      // Soft sign: keep sign but allow magnitude to be reduced (we
-      // multiply by signMag*5 capped at 1) so the angle damps when the
-      // face signal is weak.
-      sign = Math.sign(sRaw);
-    }
+    if (signMag > 0.05) sign = Math.sign(sRaw);
     facingAngle[f] = sign * m;
-    facingRaw[f]   = m;          // unsigned for the chart
   }
 
   return {
@@ -330,7 +316,7 @@ function computeAll(state, cfg) {
     hipRatio, shoulderRatio,
     magnitudeDeg: smoothed,
     signDeg: smoothedSign,
-    facingAngle, facingRaw,
+    facingAngle,
     hipMax, shoMax,
   };
 }
