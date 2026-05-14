@@ -25,8 +25,14 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // Same pattern that viewer.js's <input> picker uses — kept in sync so a
 // Drive-folder walk indexes exactly the same files a manual folder pick would.
 // (GT labels are pulled live from the Sheet at load time; no sidecar.)
+//
+// Three engine tags now: `yolo` and `vision` are the COCO-17 2D engines;
+// `vision3d` is the experimental Apple Vision 3D engine producing
+// (N, 17, 4) body-frame metres + an optional `_cam.npy` sidecar with the
+// per-frame cameraOriginMatrix. The 3D files share the same `_r{N}` and
+// `_meta.json` conventions so the slot machinery below is reused as-is.
 const CACHE_FILE_RE =
-  /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches)?\.(npy|json)$/;
+  /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam)?\.(npy|json)$/;
 
 // ── IndexedDB plumbing (tiny manual wrapper to avoid pulling in idb-keyval) ──
 
@@ -162,6 +168,10 @@ export async function walk(rootHandle) {
       const [, base, engine, roundStr, suffix, ext] = m;
       const round = parseInt(roundStr);
       if (ext === "json" && !suffix) continue;
+      // The 3D loader expects `npy` (data) and `_cam.npy` (camera matrices)
+      // to live in the same engine slot. The cam .npy isn't required —
+      // viewer is happy without it — but if present, stash it as `cam`.
+      // `_punches` only applies to 2D engines.
 
       if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
       const rounds = cacheIndex.get(base);
@@ -169,22 +179,24 @@ export async function walk(rootHandle) {
       const slot = rounds.get(round);
       if (!slot[engine]) slot[engine] = {};
       const engineSlot = slot[engine];
-      if (ext === "npy")              engineSlot.npy = entry;
-      else if (suffix === "_meta")    engineSlot.meta = entry;
-      else if (suffix === "_punches") engineSlot.punches = entry;
+      if (ext === "npy" && suffix === "_cam")   engineSlot.cam = entry;
+      else if (ext === "npy")                   engineSlot.npy = entry;
+      else if (suffix === "_meta")              engineSlot.meta = entry;
+      else if (suffix === "_punches")           engineSlot.punches = entry;
     }
   }
 
   await visit(rootHandle);
 
   // Same completeness filter the manual picker applies: drop engines that
-  // don't have both .npy + _meta.json; drop rounds that lost both engines.
+  // don't have both .npy + _meta.json; drop rounds that lost ALL engines.
+  // The 3D engine is treated the same way — it needs its own .npy + meta.
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision"]) {
+      for (const eng of ["yolo", "vision", "vision3d"]) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
-      if (!slot.yolo && !slot.vision) rounds.delete(round);
+      if (!slot.yolo && !slot.vision && !slot.vision3d) rounds.delete(round);
     }
     if (rounds.size === 0) cacheIndex.delete(base);
   }

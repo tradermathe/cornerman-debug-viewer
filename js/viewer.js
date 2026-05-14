@@ -6,13 +6,14 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-13.16";
+const BUILD = "2026-05-14.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
 }
 
 import { loadPose } from "./pose-loader.js";
+import { loadPose3D } from "./pose-3d-loader.js";
 import { loadPunches } from "./punches-loader.js";
 import { fetchLiveLabels } from "./sheet-labels.js";
 import { drawSkeleton } from "./skeleton.js";
@@ -296,8 +297,12 @@ function onCacheFolder(e) {
     //   <base>_<engine>_r<N>_punches.json  — ST-GCN detections (optional;
     //                                        produced by dump_punches.py)
     // GT labels are pulled live from the Sheet at load time — no sidecar.
+    // `vision3d` is the experimental Apple 3D engine; pairs an `.npy`
+    // with an optional `_cam.npy` sidecar (per-frame cameraOriginMatrix)
+    // alongside the usual `_meta.json`. `_punches` only applies to 2D
+    // engines and is ignored for vision3d.
     const m = f.name.match(
-      /^(.+?)_(yolo|vision)_r(\d+)(_meta|_punches)?\.(npy|json)$/
+      /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, engine, roundStr, suffix, ext] = m;
@@ -310,19 +315,20 @@ function onCacheFolder(e) {
     const roundSlot = rounds.get(round);
     if (!roundSlot[engine]) roundSlot[engine] = {};
     const engineSlot = roundSlot[engine];
-    if (ext === "npy")                     engineSlot.npy = f;
-    else if (suffix === "_meta")           engineSlot.meta = f;
-    else if (suffix === "_punches")        engineSlot.punches = f;
+    if (ext === "npy" && suffix === "_cam") engineSlot.cam = f;
+    else if (ext === "npy")                 engineSlot.npy = f;
+    else if (suffix === "_meta")            engineSlot.meta = f;
+    else if (suffix === "_punches")         engineSlot.punches = f;
   }
 
   // Drop incomplete pose pairs (need .npy + _meta.json per engine). Punches
-  // are optional — their absence is fine, we just fall back to the heuristic.
+  // and cam-matrix sidecars are optional — their absence is fine.
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision"]) {
+      for (const eng of ["yolo", "vision", "vision3d"]) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
-      if (!slot.yolo && !slot.vision) rounds.delete(round);
+      if (!slot.yolo && !slot.vision && !slot.vision3d) rounds.delete(round);
     }
     if (rounds.size === 0) cacheIndex.delete(base);
   }
@@ -347,18 +353,20 @@ function onCacheClear() {
 
 function refreshCacheStatus() {
   const nVideos = cacheIndex?.size || 0;
-  let nRounds = 0, nYolo = 0, nVision = 0;
+  let nRounds = 0, nYolo = 0, nVision = 0, nVision3D = 0;
   for (const rounds of cacheIndex?.values() || []) {
     for (const slot of rounds.values()) {
       nRounds++;
-      if (slot.yolo)   nYolo++;
-      if (slot.vision) nVision++;
+      if (slot.yolo)     nYolo++;
+      if (slot.vision)   nVision++;
+      if (slot.vision3d) nVision3D++;
     }
   }
   if (nRounds) {
     const parts = [];
-    if (nYolo)   parts.push(`${nYolo} YOLO`);
-    if (nVision) parts.push(`${nVision} Apple Vision`);
+    if (nYolo)     parts.push(`${nYolo} YOLO`);
+    if (nVision)   parts.push(`${nVision} Apple Vision`);
+    if (nVision3D) parts.push(`${nVision3D} Vision 3D`);
     els.cacheStatus.textContent =
       `— ${nRounds} rounds across ${nVideos} videos (${parts.join(" + ")})`;
     if (els.cacheSection) els.cacheSection.open = false;
@@ -412,6 +420,7 @@ function loadVideoOnly(videoFile, errMessage) {
       if (token !== currentLoadToken) return;
       state.pose = null;
       state.poseSecondary = null;
+      state.pose3d = null;
       state.n_frames = 0;
       state.frame = 0;
       els.scrubber.max = 0;
@@ -509,8 +518,25 @@ function loadFromIndex(videoFile, slot) {
           console.warn("punches load failed:", err.message);
         }
       }
+      // Optional: Apple Vision 3D cache lives in slot.vision3d. Loaded
+      // entirely independently of the 2D engines — different layout
+      // (17-joint Apple-native), different coordinate space (body-frame
+      // metres). The Vision 3D lens consumes it; 2D rules ignore it.
+      let pose3d = null;
+      if (slot.vision3d) {
+        try {
+          const v3 = slot.vision3d;
+          pose3d = await loadPose3D({
+            npy:  await drive.toFile(v3.npy),
+            meta: await drive.toFile(v3.meta),
+            cam:  v3.cam ? await drive.toFile(v3.cam) : null,
+          });
+        } catch (err) {
+          console.warn("3D pose load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches);
+      start(posePrimary, poseSecondary, punches, pose3d);
 
       // Live GT labels: derive a basename from the cache filename, then hit
       // the Sheet. Best-effort — failure just leaves state.labels null so
@@ -646,10 +672,11 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null, punches = null) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.punches = punches;               // optional ST-GCN detections
+  state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;

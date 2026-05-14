@@ -30,9 +30,9 @@
       <p class="hint">
         Point at the folder that contains your videos + cache subfolders
         (e.g. <code>My Drive/boxing_ai/</code>). Sub-directories are walked
-        recursively so yolo_pose_cache and apple_vision_pose_cache both get
-        picked up. Chrome and Edge only — Safari/Firefox use the manual
-        picker below.
+        recursively so yolo_pose_cache, apple_vision_pose_cache (2D and 3D
+        <code>_vision3d_</code> caches alongside) all get picked up. Chrome
+        and Edge only — Safari/Firefox use the manual picker below.
       </p>
     </details>
 
@@ -47,6 +47,8 @@
         Use this when you don't want a persistent Drive-folder grant.
         Pick <code>yolo_pose_cache/</code>, then pick again for
         <code>apple_vision_pose_cache/</code>; index merges across picks.
+        The 2D and 3D Apple Vision caches share the same folder — both
+        get indexed.
       </p>
     </details>
 
