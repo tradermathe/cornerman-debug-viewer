@@ -26,6 +26,10 @@ export const EngineCompareRule = {
   id: "engine_compare",
   label: "Engine compare (YOLO vs Vision)",
 
+  // Needs both 2D engines to be useful — used by the viewer's lens-aware
+  // filter to hide videos/rounds that only have one of them.
+  requires(slot) { return !!slot?.yolo && !!slot?.vision; },
+
   // Suppress the base skeleton renderer — we draw both ourselves.
   skeletonStyle() {
     return { boneColor: "rgba(0,0,0,0)", jointRadius: 0, minConf: Infinity };

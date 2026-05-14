@@ -3,21 +3,26 @@
 // NATIVE 17-joint order (NOT COCO-17 — see skeleton-3d.js for the order).
 // Coordinates are body-frame metres (root-anchored).
 //
-// Optional sibling: `<base>_vision3d_r{N}_cam.npy` of shape (N, 4, 4) — the
-// cameraOriginMatrix per frame (row-major). Used to orient the 3D view to
-// match the source camera so a side-by-side video↔3D comparison reads
-// directly.
+// Optional siblings:
+//   `<base>_vision3d_r{N}_cam.npy`  — (N, 4, 4) cameraOriginMatrix per frame
+//   `<base>_vision3d_r{N}_proj.npy` — (N, 17, 2) image-space projection
+//                                     via Apple's pointInImage(); normalised
+//                                     0..1 with TOP-LEFT origin (same as 2D
+//                                     pipeline), so the viewer can overlay
+//                                     the 3D-derived skeleton directly on
+//                                     the source video.
 //
 // Output shape consumed by the viewer:
 //   { xyz:  Float32Array(N*17*3),   // (frame, joint, xyz) row-major, metres
 //     conf: Float32Array(N*17),     // (frame, joint), observation-level
 //                                   //   replicated per joint — see scaffold
-//     camMatrices: Float32Array(N*16) | null,  // (frame, 4, 4) row-major
+//     proj: Float32Array(N*17*2) | null,        // image-space, normalised
+//     camMatrices: Float32Array(N*16) | null,   // (frame, 4, 4) row-major
 //     fps, n_frames, engine: "apple_vision_3d", source }
 
 const N_JOINTS_3D = 17;
 
-export async function loadPose3D({ npy, meta, cam }) {
+export async function loadPose3D({ npy, meta, cam, proj }) {
   if (!npy || !meta) {
     throw new Error("3D loader needs the .npy and the _meta.json together.");
   }
@@ -77,8 +82,30 @@ export async function loadPose3D({ npy, meta, cam }) {
     }
   }
 
+  // Optional 2D image-space projection — flat Float32Array of length N*17*2.
+  // Same coord convention as the 2D cache (normalised 0..1, top-left origin)
+  // so the viewer can scale by videoWidth/videoHeight and draw directly.
+  let projection = null;
+  if (proj) {
+    const parsed = parseNpy(await proj.arrayBuffer());
+    if (parsed.shape.length !== 3 ||
+        parsed.shape[0] !== n_frames ||
+        parsed.shape[1] !== N_JOINTS_3D ||
+        parsed.shape[2] !== 2) {
+      console.warn(
+        `_proj.npy has shape (${parsed.shape.join(", ")}); ` +
+        `expected (${n_frames}, ${N_JOINTS_3D}, 2) — ignoring.`
+      );
+    } else if (parsed.dtype !== "<f4") {
+      console.warn(`_proj.npy has dtype '${parsed.dtype}'; expected '<f4' — ignoring.`);
+    } else {
+      projection = parsed.data;
+    }
+  }
+
   return {
     xyz, conf, camMatrices,
+    projection,
     fps, n_frames,
     start_sec, round_start_sec, pre_buffer_sec,
     engine: "apple_vision_3d",

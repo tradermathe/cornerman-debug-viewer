@@ -91,8 +91,15 @@ export function project(view, x, y, z) {
 }
 
 // Build a view object that the caller can reuse across a draw.
+//
+// `perspectiveStrength` defaults to 0 (orthographic). Reason: Apple's 3D model
+// already under-extends limbs (rigid parametric skeleton + regression-toward-
+// mean prior), so adding perspective foreshortening on top would further
+// compress forward-extended arms — making the "dulled" effect worse than it
+// already is. Orthographic gives an honest view of the metres-in-body-frame
+// data; bump to e.g. 0.3 if you want a more "camera-like" feel.
 export function makeView({ width, height, yawRad = 0, pitchRad = 0,
-                          zoom = null, perspectiveStrength = 0.5 }) {
+                          zoom = null, perspectiveStrength = 0 }) {
   return {
     width, height,
     cx: width / 2,

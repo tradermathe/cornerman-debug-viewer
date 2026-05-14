@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-14.1";
+const BUILD = "2026-05-14.2";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -221,6 +221,9 @@ async function refreshDriveFolder() {
 function populateDriveVideoSelect() {
   if (!els.videoPick) return;
   const sel = els.videoPick;
+  // Preserve current selection across re-population (e.g. when the lens
+  // changes) so the user doesn't lose the video they're inspecting.
+  const previousValue = sel.value;
   sel.innerHTML = "";
   if (!driveVideos || driveVideos.size === 0) {
     sel.innerHTML = `<option value="">— connect a Drive folder to populate —</option>`;
@@ -231,23 +234,60 @@ function populateDriveVideoSelect() {
   placeholder.value = "";
   placeholder.textContent = `— pick a video from ${driveHandle?.name || "Drive folder"} —`;
   sel.appendChild(placeholder);
-  // Sort: videos that have at least one matching cache float to the top.
+  // Lens-aware filter: only show videos whose cached rounds satisfy the
+  // active lens's requires(). Two states per video:
+  //   matched = lens-compatible cache exists for at least one round
+  //   anyCache = some cache exists, but not for this lens (kept visible
+  //              with a "(no <lens> cache)" tag so the user can see the
+  //              video isn't forgotten — they just need a different lens)
   const items = [...driveVideos.entries()].map(([name, h]) => {
     const base = videoBasename(name);
-    const matched = !!cacheIndex?.get(base)?.size;
-    return { name, h, matched };
+    const rounds = cacheIndex?.get(base);
+    const anyCache = !!rounds?.size;
+    const matched = videoMatchesActiveLens(base);
+    return { name, h, matched, anyCache };
   });
+  // Sort: lens-matched first, then any-cache, then nothing.
   items.sort((a, b) => {
     if (a.matched !== b.matched) return a.matched ? -1 : 1;
+    if (a.anyCache !== b.anyCache) return a.anyCache ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+  const lensLabel = state.rule?.label || "this lens";
   for (const it of items) {
     const o = document.createElement("option");
     o.value = it.name;
-    o.textContent = it.matched ? it.name : `${it.name} (no cache)`;
+    o.textContent = it.matched
+      ? it.name
+      : (it.anyCache ? `${it.name} (no ${lensLabel} cache)` : `${it.name} (no cache)`);
+    if (!it.matched) o.disabled = true;   // can't be selected, but visible
     sel.appendChild(o);
   }
+  // Restore previous selection if it's still selectable, else clear.
+  if (previousValue && [...sel.options].some(o => o.value === previousValue && !o.disabled)) {
+    sel.value = previousValue;
+  }
   sel.disabled = false;
+}
+
+// True if a round-slot satisfies the active lens's requirements.
+// Default predicate (when a rule doesn't declare `requires`): at least one
+// 2D engine present. This keeps every existing 2D rule working without a
+// per-rule code change.
+function slotMatchesActiveLens(slot) {
+  const req = state.rule?.requires;
+  if (!req) return !!(slot?.yolo || slot?.vision);
+  try { return !!req(slot); }
+  catch { return false; }
+}
+
+function videoMatchesActiveLens(base) {
+  const rounds = cacheIndex?.get(base);
+  if (!rounds) return false;
+  for (const slot of rounds.values()) {
+    if (slotMatchesActiveLens(slot)) return true;
+  }
+  return false;
 }
 
 async function onDriveVideoPick() {
@@ -298,11 +338,11 @@ function onCacheFolder(e) {
     //                                        produced by dump_punches.py)
     // GT labels are pulled live from the Sheet at load time — no sidecar.
     // `vision3d` is the experimental Apple 3D engine; pairs an `.npy`
-    // with an optional `_cam.npy` sidecar (per-frame cameraOriginMatrix)
-    // alongside the usual `_meta.json`. `_punches` only applies to 2D
-    // engines and is ignored for vision3d.
+    // with optional `_cam.npy` (per-frame cameraOriginMatrix) and `_proj.npy`
+    // (image-space projection via pointInImage) sidecars alongside the usual
+    // `_meta.json`. `_punches` only applies to 2D engines.
     const m = f.name.match(
-      /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam)?\.(npy|json)$/
+      /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, engine, roundStr, suffix, ext] = m;
@@ -315,10 +355,11 @@ function onCacheFolder(e) {
     const roundSlot = rounds.get(round);
     if (!roundSlot[engine]) roundSlot[engine] = {};
     const engineSlot = roundSlot[engine];
-    if (ext === "npy" && suffix === "_cam") engineSlot.cam = f;
-    else if (ext === "npy")                 engineSlot.npy = f;
-    else if (suffix === "_meta")            engineSlot.meta = f;
-    else if (suffix === "_punches")         engineSlot.punches = f;
+    if (ext === "npy" && suffix === "_cam")        engineSlot.cam = f;
+    else if (ext === "npy" && suffix === "_proj")  engineSlot.proj = f;
+    else if (ext === "npy")                        engineSlot.npy = f;
+    else if (suffix === "_meta")                   engineSlot.meta = f;
+    else if (suffix === "_punches")                engineSlot.punches = f;
   }
 
   // Drop incomplete pose pairs (need .npy + _meta.json per engine). Punches
@@ -529,7 +570,8 @@ function loadFromIndex(videoFile, slot) {
           pose3d = await loadPose3D({
             npy:  await drive.toFile(v3.npy),
             meta: await drive.toFile(v3.meta),
-            cam:  v3.cam ? await drive.toFile(v3.cam) : null,
+            cam:  v3.cam  ? await drive.toFile(v3.cam)  : null,
+            proj: v3.proj ? await drive.toFile(v3.proj) : null,
           });
         } catch (err) {
           console.warn("3D pose load failed:", err.message);
@@ -608,14 +650,22 @@ function populateRoundSelect(rounds) {
     els.roundSel.disabled = true;
     return;
   }
+  // Lens-aware: rounds without a cache for the active lens are still listed
+  // (so the user can see r0/r1/r2/… all exist) but disabled so they can't
+  // be picked when the lens won't render anything for them.
   const sorted = [...rounds.keys()].sort((a, b) => a - b);
+  let enabledCount = 0;
   for (const r of sorted) {
     const o = document.createElement("option");
     o.value = String(r);
-    o.textContent = `r${r}`;
+    const slot = rounds.get(r);
+    const ok = slotMatchesActiveLens(slot);
+    if (!ok) o.disabled = true;
+    o.textContent = ok ? `r${r}` : `r${r} (no cache for lens)`;
     els.roundSel.appendChild(o);
+    if (ok) enabledCount++;
   }
-  els.roundSel.disabled = sorted.length < 2;
+  els.roundSel.disabled = enabledCount < 2;
 }
 
 // Strip extension; the cache files were named after the source video so
@@ -765,8 +815,21 @@ function setRule(id) {
   state.rule = rule;
   els.ruleHost.innerHTML = "";
   rule.mount(els.ruleHost, state);
+  // Lens may change which videos/rounds are valid — refresh the dropdowns
+  // so they reflect the new lens's requirements. We do NOT auto-swap the
+  // currently-loaded video; the lens's own mount() shows an empty/hint
+  // state if the loaded clip can't be rendered.
+  populateDriveVideoSelect();
+  const v = els.videoFile.files[0];
+  if (v) populateRoundSelect(cacheIndex?.get(videoBasename(v.name)));
   redraw();
 }
+
+// Expose the viewer's redraw to lenses that need to repaint the main canvas
+// in response to their own controls (e.g. the Vision 3D lens's "Overlay on
+// video" toggle). The lens calls window.__viewerRedraw() — small hack vs.
+// inventing a richer rule API.
+window.__viewerRedraw = () => redraw();
 
 // ── Frame navigation ────────────────────────────────────────────────────────
 els.prevFrame.addEventListener("click", () => seekToFrame(state.frame - 1));

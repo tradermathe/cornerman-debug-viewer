@@ -32,7 +32,7 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // per-frame cameraOriginMatrix. The 3D files share the same `_r{N}` and
 // `_meta.json` conventions so the slot machinery below is reused as-is.
 const CACHE_FILE_RE =
-  /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam)?\.(npy|json)$/;
+  /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
 
 // ── IndexedDB plumbing (tiny manual wrapper to avoid pulling in idb-keyval) ──
 
@@ -179,10 +179,11 @@ export async function walk(rootHandle) {
       const slot = rounds.get(round);
       if (!slot[engine]) slot[engine] = {};
       const engineSlot = slot[engine];
-      if (ext === "npy" && suffix === "_cam")   engineSlot.cam = entry;
-      else if (ext === "npy")                   engineSlot.npy = entry;
-      else if (suffix === "_meta")              engineSlot.meta = entry;
-      else if (suffix === "_punches")           engineSlot.punches = entry;
+      if (ext === "npy" && suffix === "_cam")        engineSlot.cam = entry;
+      else if (ext === "npy" && suffix === "_proj")  engineSlot.proj = entry;
+      else if (ext === "npy")                        engineSlot.npy = entry;
+      else if (suffix === "_meta")                   engineSlot.meta = entry;
+      else if (suffix === "_punches")                engineSlot.punches = entry;
     }
   }
 
