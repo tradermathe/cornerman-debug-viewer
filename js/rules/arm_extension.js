@@ -552,6 +552,13 @@ function drawVerdictHud(ctx, punch, scale, pose) {
 
 function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   const joints = JOINTS_FOR_SIDE[side];
+  // Skip when the per-frame ratio couldn't be computed for this arm — that
+  // means shoulder or elbow conf was below the gate (or the wrist was), so
+  // any positions we'd plot are unreliable. Without this gate, the lens
+  // happily painted bones/arc at whatever stale coords the pose model
+  // returned, which looked like a lagging skeleton on rounds with poor
+  // pose tracking.
+  if (!Number.isFinite(ratio)) return;
   const sx = pose.skeleton[(frame * 17 + joints.shoulder) * 2];
   const sy = pose.skeleton[(frame * 17 + joints.shoulder) * 2 + 1];
   const ex = pose.skeleton[(frame * 17 + joints.elbow) * 2];
@@ -560,9 +567,7 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   if (!w) return;
   if (!Number.isFinite(sx) || !Number.isFinite(ex)) return;
 
-  const color = !Number.isFinite(ratio) ? COLORS.unclear
-              : ratio >= cfg.threshold ? COLORS.pass
-              : COLORS.fail;
+  const color = ratio >= cfg.threshold ? COLORS.pass : COLORS.fail;
 
   ctx.save();
   ctx.lineWidth = 4 * scale;
