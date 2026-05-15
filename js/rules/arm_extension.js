@@ -143,6 +143,11 @@ export const ArmExtensionRule = {
     // Draw both arms with their current ratio overlay.
     drawArmRatio(ctx, state.pose, f, "L", signals.ratioL[f], cfg, s);
     drawArmRatio(ctx, state.pose, f, "R", signals.ratioR[f], cfg, s);
+
+    // HUD — when the playhead is inside a labelled punch window, show the
+    // GT verdict + our prediction so you can eyeball agreement on-video.
+    const active = activePunchAt(signals.punches, f);
+    if (active) drawVerdictHud(ctx, active, s, state.pose);
   },
 
   update(state) {
@@ -337,44 +342,70 @@ function renderTemplate(sig, cfg) {
   `;
 }
 
+function pill(value, kind) {
+  // kind: "gt" | "pred" — same color vocabulary as the canvas HUD
+  if (value !== "pass" && value !== "fail" && value !== "unclear") {
+    return `<span class="ae-pill ae-pill-empty" title="no label">—</span>`;
+  }
+  const col = value === "pass" ? COLORS.pass
+            : value === "fail" ? COLORS.fail
+            : COLORS.unclear;
+  return `<span class="ae-pill" style="background:${col}1f;color:${col};border:1px solid ${col}66">${value}</span>`;
+}
+
 function renderPunchTable() {
+  const hasAnyLabel = signals.punches.some(p => p.label);
   const tbody = signals.punches.length
     ? signals.punches.map(p => {
         const peakStr = Number.isFinite(p.peak) ? p.peak.toFixed(3) : "—";
-        const predCol = p.predicted === "pass" ? COLORS.pass
-                      : p.predicted === "fail" ? COLORS.fail
-                      : COLORS.unclear;
-        let verdict;
-        if (p.label && Number.isFinite(p.peak)) {
-          const agrees = p.label === p.predicted;
-          const sym = agrees ? "✓" : "✗";
-          const col = agrees ? COLORS.agree : COLORS.disagree;
-          verdict = `<span style="color:${col}">label=${p.label} · pred=${p.predicted} ${sym}</span>`;
-        } else {
-          verdict = `<span style="color:${predCol}">pred=${p.predicted}</span>`;
+        const tsStr   = Number.isFinite(p.t_abs) ? p.t_abs.toFixed(2) : "—";
+        const cov     = Number.isFinite(p.glove_coverage)
+                          ? `${Math.round(100 * p.glove_coverage)}%` : "—";
+        const gtCell   = pill(p.label, "gt");
+        const predCell = pill(p.predicted, "pred");
+        // Agreement marker — only meaningful when GT exists
+        let match = "";
+        if (p.label && p.predicted !== "unclear") {
+          match = p.label === p.predicted
+            ? `<span style="color:${COLORS.agree}">✓</span>`
+            : `<span style="color:${COLORS.disagree}">✗</span>`;
         }
-        const tsStr = Number.isFinite(p.t_abs) ? p.t_abs.toFixed(2) : "—";
-        const cov = Number.isFinite(p.glove_coverage)
-          ? `${Math.round(100 * p.glove_coverage)}% glove` : "—";
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
           <td>${p.hand}</td>
           <td>${p.side}</td>
-          <td>${peakStr}</td>
-          <td>${verdict}</td>
+          <td style="font-variant-numeric:tabular-nums">${peakStr}</td>
+          <td>${gtCell}</td>
+          <td>${predCell}</td>
+          <td style="text-align:center">${match}</td>
           <td class="muted small">${cov}</td>
         </tr>`;
       }).join("")
-    : `<tr><td colspan="7" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="9" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
+    const gtNote = hasAnyLabel
+      ? ""
+      : `<p class="hint muted" style="margin:0 0 8px 0">No <code>rule_extension</code> GT verdicts attached to this round (Sheet labels missing or no match).</p>`;
     tableHost.innerHTML = `
+      ${gtNote}
+      <style>
+        .ae-pill {
+          display:inline-block; padding:1px 8px; border-radius:10px;
+          font-size:12px; font-weight:600; letter-spacing:0.02em;
+          font-family: inherit;
+        }
+        .ae-pill-empty {
+          background:transparent; color:var(--muted, #888);
+          border:1px dashed currentColor;
+        }
+      </style>
       <table class="rule-table">
         <thead><tr>
           <th>t</th><th>type</th><th>hand</th><th>side</th>
-          <th>peak r</th><th>verdict</th><th>source</th>
+          <th>peak r</th><th>GT</th><th>pred</th><th></th><th>glove</th>
         </tr></thead>
         <tbody>${tbody}</tbody>
       </table>`;
@@ -420,6 +451,81 @@ function renderAggregate() {
 }
 
 // ─── draw ──────────────────────────────────────────────────────────────────
+
+function activePunchAt(punches, frame) {
+  for (const p of punches) {
+    if (frame >= p.start_frame && frame <= p.end_frame) return p;
+  }
+  return null;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
+
+function drawVerdictHud(ctx, punch, scale, pose) {
+  const colorFor = v => v === "pass" ? COLORS.pass
+                       : v === "fail" ? COLORS.fail
+                       : COLORS.unclear;
+  const labelTxt = punch.label ? `GT:   ${punch.label}` : "GT:   —";
+  const predTxt  = `pred: ${punch.predicted}`;
+  const peakTxt  = Number.isFinite(punch.peak)
+    ? `peak r ${punch.peak.toFixed(3)}` : null;
+  const hand     = `${punch.hand} ${punch.punch_type}`;
+  const agreeSym = punch.label && punch.predicted !== "unclear"
+    ? (punch.label === punch.predicted ? "  ✓" : "  ✗") : "";
+
+  const labelCol = punch.label ? colorFor(punch.label) : "rgba(255,255,255,0.55)";
+  const predCol  = colorFor(punch.predicted);
+  const agreeCol = punch.label === punch.predicted ? COLORS.pass : COLORS.fail;
+
+  const fontPx = 15 * scale;
+  const lineH  = 22 * scale;
+  const padX   = 14 * scale;
+  const padY   = 10 * scale;
+  const x0 = 24 * scale, y0 = 24 * scale;
+
+  ctx.save();
+  ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
+  const lines = [hand, labelTxt + agreeSym, predTxt];
+  if (peakTxt) lines.push(peakTxt);
+  const w = Math.max(...lines.map(t => ctx.measureText(t).width)) + 2 * padX;
+  const h = padY * 2 + lineH * lines.length;
+
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  roundRect(ctx, x0, y0, w, h, 10 * scale);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1 * scale;
+  ctx.stroke();
+
+  let y = y0 + padY + fontPx;
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.fillText(hand, x0 + padX, y);
+  y += lineH;
+  ctx.fillStyle = labelCol;
+  ctx.fillText(labelTxt, x0 + padX, y);
+  if (agreeSym) {
+    ctx.fillStyle = agreeCol;
+    ctx.fillText(agreeSym, x0 + padX + ctx.measureText(labelTxt).width, y);
+  }
+  y += lineH;
+  ctx.fillStyle = predCol;
+  ctx.fillText(predTxt, x0 + padX, y);
+  if (peakTxt) {
+    y += lineH;
+    ctx.font = `${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.fillText(peakTxt, x0 + padX, y);
+  }
+  ctx.restore();
+}
 
 function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   const joints = JOINTS_FOR_SIDE[side];
