@@ -158,6 +158,8 @@ export const ArmExtensionRule = {
     const f = state.frame;
     setMetric("ae-l-ratio", signals.ratioL[f], cfg);
     setMetric("ae-r-ratio", signals.ratioR[f], cfg);
+    setText("ae-l-bend", formatBend(signals.bendL[f]));
+    setText("ae-r-bend", formatBend(signals.bendR[f]));
     setText("ae-l-source", signals.sourceL[f] || "—");
     setText("ae-r-source", signals.sourceR[f] || "—");
   },
@@ -174,8 +176,8 @@ function computeAll(state, cfg) {
   // (which uses absolute source time).
   const startSec = pose.start_sec || 0;
 
-  const { ratio: ratioL, source: sourceL } = perFrameRatio(pose, "L", cfg);
-  const { ratio: ratioR, source: sourceR } = perFrameRatio(pose, "R", cfg);
+  const { ratio: ratioL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg);
+  const { ratio: ratioR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg);
 
   // Labelled punches — filtered to straights, with optional rule_extension
   // verdict for agreement scoring.
@@ -190,6 +192,7 @@ function computeAll(state, cfg) {
       ? d.stance : "orthodox";
     const side = SIDE_FOR[d.hand]?.[stance] || "L";
     const ratioArr = side === "L" ? ratioL : ratioR;
+    const bendArr  = side === "L" ? bendL : bendR;
     const srcArr   = side === "L" ? sourceL : sourceR;
 
     let peak = -Infinity, peakFrame = sf, gloveFrames = 0, validFrames = 0;
@@ -220,28 +223,31 @@ function computeAll(state, cfg) {
       end_frame: ef,
       land_frame: peakValid ? peakFrame : sf,
       peak: peakValid ? peak : NaN,
+      peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       predicted,
       label,
     };
   });
 
-  return { ratioL, ratioR, sourceL, sourceR, punches, fps };
+  return { ratioL, ratioR, bendL, bendR, sourceL, sourceR, punches, fps };
 }
 
 function perFrameRatio(pose, side, cfg) {
   const N = pose.n_frames;
   const joints = JOINTS_FOR_SIDE[side];
   const ratio  = new Float32Array(N);
+  const bendDeg = new Float32Array(N);
   const source = new Array(N);
+  const RAD_TO_DEG = 180 / Math.PI;
   for (let f = 0; f < N; f++) {
     const w = wristXY(pose, f, joints, cfg);
-    if (!w) { ratio[f] = NaN; source[f] = null; continue; }
+    if (!w) { ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue; }
 
     const sc = pose.conf[f * 17 + joints.shoulder];
     const ec = pose.conf[f * 17 + joints.elbow];
     if (sc < cfg.minPoseConf || ec < cfg.minPoseConf) {
-      ratio[f] = NaN; source[f] = null; continue;
+      ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
     }
     const sx = pose.skeleton[(f * 17 + joints.shoulder) * 2];
     const sy = pose.skeleton[(f * 17 + joints.shoulder) * 2 + 1];
@@ -252,13 +258,21 @@ function perFrameRatio(pose, side, cfg) {
     const fa = Math.hypot(ex - w.x, ey - w.y);        // elbow→wrist
     const sw = Math.hypot(sx - w.x, sy - w.y);        // shoulder→wrist
     const path = ue + fa;
-    if (path < 1e-3) { ratio[f] = NaN; source[f] = null; continue; }
+    if (path < 1e-3 || ue < 1e-3 || fa < 1e-3) {
+      ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
+    }
     // Bounded [0,1]. Clamp tiny float overshoots that can happen when the
     // wrist is collinear with shoulder–elbow.
     ratio[f] = Math.min(1, sw / path);
+
+    // Exact elbow angle from law of cosines — handles uneven upper-arm /
+    // forearm lengths (the sin(θ/2) approximation in ratio_to_bend_deg
+    // assumes equal segments). Bend = 180° − elbow_angle.
+    const cosElbow = Math.max(-1, Math.min(1, (ue*ue + fa*fa - sw*sw) / (2*ue*fa)));
+    bendDeg[f] = 180 - Math.acos(cosElbow) * RAD_TO_DEG;
     source[f] = w.source;
   }
-  return { ratio, source };
+  return { ratio, bendDeg, source };
 }
 
 function wristXY(pose, frame, joints, cfg) {
@@ -312,12 +326,12 @@ function renderTemplate(sig, cfg) {
       <div class="metric">
         <div class="metric-label">L arm</div>
         <div class="metric-val" id="ae-l-ratio">—</div>
-        <div class="metric-sub" id="ae-l-source">—</div>
+        <div class="metric-sub"><span id="ae-l-bend">—</span> · <span id="ae-l-source">—</span></div>
       </div>
       <div class="metric">
         <div class="metric-label">R arm</div>
         <div class="metric-val" id="ae-r-ratio">—</div>
-        <div class="metric-sub" id="ae-r-source">—</div>
+        <div class="metric-sub"><span id="ae-r-bend">—</span> · <span id="ae-r-source">—</span></div>
       </div>
     </div>
 
@@ -370,19 +384,22 @@ function renderPunchTable() {
             ? `<span style="color:${COLORS.agree}">✓</span>`
             : `<span style="color:${COLORS.disagree}">✗</span>`;
         }
+        const bendStr = Number.isFinite(p.peak_bend_deg)
+          ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
           <td>${p.hand}</td>
           <td>${p.side}</td>
           <td style="font-variant-numeric:tabular-nums">${peakStr}</td>
+          <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
           <td>${gtCell}</td>
           <td>${predCell}</td>
           <td style="text-align:center">${match}</td>
           <td class="muted small">${cov}</td>
         </tr>`;
       }).join("")
-    : `<tr><td colspan="9" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="10" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
@@ -405,7 +422,7 @@ function renderPunchTable() {
       <table class="rule-table">
         <thead><tr>
           <th>t</th><th>type</th><th>hand</th><th>side</th>
-          <th>peak r</th><th>GT</th><th>pred</th><th></th><th>glove</th>
+          <th>peak r</th><th>bend</th><th>GT</th><th>pred</th><th></th><th>glove</th>
         </tr></thead>
         <tbody>${tbody}</tbody>
       </table>`;
@@ -476,7 +493,9 @@ function drawVerdictHud(ctx, punch, scale, pose) {
   const labelTxt = punch.label ? `GT:   ${punch.label}` : "GT:   —";
   const predTxt  = `pred: ${punch.predicted}`;
   const peakTxt  = Number.isFinite(punch.peak)
-    ? `peak r ${punch.peak.toFixed(3)}` : null;
+    ? `peak r ${punch.peak.toFixed(3)}` + (Number.isFinite(punch.peak_bend_deg)
+        ? `  ·  bend ${punch.peak_bend_deg.toFixed(1)}°` : "")
+    : null;
   const hand     = `${punch.hand} ${punch.punch_type}`;
   const agreeSym = punch.label && punch.predicted !== "unclear"
     ? (punch.label === punch.predicted ? "  ✓" : "  ✗") : "";
@@ -593,6 +612,11 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
 function setText(id, value) {
   const el = host?.querySelector("#" + id);
   if (el) el.textContent = value;
+}
+
+function formatBend(deg) {
+  if (!Number.isFinite(deg)) return "—";
+  return `${deg.toFixed(1)}° bend`;
 }
 
 function setMetric(id, ratio, cfg) {
