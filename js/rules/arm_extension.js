@@ -310,6 +310,10 @@ function renderTemplate(sig, cfg) {
         &nbsp;arm bones (sh→el→wr) when ratio ≥ threshold</li>
       <li><span style="display:inline-block;width:24px;height:3px;background:${COLORS.fail};vertical-align:middle"></span>
         &nbsp;arm bones when ratio &lt; threshold</li>
+      <li><span style="display:inline-block;width:10px;height:10px;background:${COLORS.pass};border-radius:50%;vertical-align:middle"></span>
+        &nbsp;<b>shoulder</b> + <b>elbow</b> markers — the three corners that drive the ratio</li>
+      <li><span style="display:inline-block;width:16px;height:16px;border:2px solid ${COLORS.pass};border-top-left-radius:16px;border-top-right-radius:0;border-bottom-left-radius:0;border-bottom-right-radius:0;border-bottom:none;border-right:none;vertical-align:middle"></span>
+        &nbsp;arc at the elbow shows the <b>interior angle</b>; the number next to it is the <b>bend</b> in °</li>
       <li><span style="display:inline-block;width:24px;height:1px;background:${COLORS.ratioGuide};border-top:1px dashed ${COLORS.ratioGuide};vertical-align:middle"></span>
         &nbsp;dashed shoulder→wrist guide (the "if fully extended" line)</li>
       <li><span style="display:inline-block;width:12px;height:12px;background:rgba(0,0,0,0.55);border:2px solid ${COLORS.gloveArm};vertical-align:middle"></span>
@@ -578,6 +582,70 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   ctx.lineTo(w.x, w.y);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // Mark the three corners we measure against — shoulder and elbow get
+  // solid dots so the user can see exactly which joints feed the ratio /
+  // bend computation. The wrist gets its own glove-or-pose marker below.
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.lineWidth = 1.5 * scale;
+  const cornerR = 5 * scale;
+  for (const [cx, cy] of [[sx, sy], [ex, ey]]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, cornerR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // Angle arc at the elbow — visualises the interior angle (elbow_angle).
+  // bend = 180° − elbow_angle, so when the arc is a near-flat sweep, the
+  // arm is straight; when it's a quarter-circle, the elbow is at 90°.
+  // Drawn from the elbow→shoulder ray to the elbow→wrist ray, going
+  // whichever direction is shorter (the interior).
+  if (Number.isFinite(ratio)) {
+    const aSh = Math.atan2(sy - ey, sx - ex);
+    const aWr = Math.atan2(w.y - ey, w.x - ex);
+    let diff = aWr - aSh;
+    while (diff >  Math.PI) diff -= 2 * Math.PI;
+    while (diff < -Math.PI) diff += 2 * Math.PI;
+    const arcR = 28 * scale;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5 * scale;
+    ctx.beginPath();
+    if (diff >= 0) ctx.arc(ex, ey, arcR, aSh, aSh + diff, false);
+    else            ctx.arc(ex, ey, arcR, aSh, aSh + diff, true);
+    ctx.stroke();
+
+    // Bend label inside the arc on the bisector — exact angle from
+    // law of cosines, computed the same way the per-frame array uses.
+    const ue = Math.hypot(sx - ex, sy - ey);
+    const fa = Math.hypot(ex - w.x, ey - w.y);
+    const sw2 = Math.hypot(sx - w.x, sy - w.y);
+    let bendDeg = NaN;
+    if (ue > 1e-3 && fa > 1e-3) {
+      const cosElbow = Math.max(-1, Math.min(1,
+        (ue*ue + fa*fa - sw2*sw2) / (2*ue*fa)));
+      bendDeg = 180 - Math.acos(cosElbow) * (180 / Math.PI);
+    }
+    if (Number.isFinite(bendDeg)) {
+      const bisector = aSh + diff / 2;
+      const lx = ex + Math.cos(bisector) * (arcR + 18 * scale);
+      const ly = ey + Math.sin(bisector) * (arcR + 18 * scale);
+      ctx.font = `${12 * scale}px ui-monospace, monospace`;
+      const txt = `${bendDeg.toFixed(0)}°`;
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(lx - tw/2 - 4*scale, ly - 8*scale, tw + 8*scale, 16*scale);
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(txt, lx, ly);
+      ctx.textAlign = "start";
+      ctx.textBaseline = "alphabetic";
+    }
+    ctx.restore();
+  }
 
   // Wrist marker — square if glove, ring if pose. Same shape vocabulary as
   // the wrist_swap lens.
