@@ -28,6 +28,12 @@ const DEFAULTS = {
   threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
   reachThreshold:   0.70,     // and peak reach ≥ this (in-plane extension)
   reachEnabled:     true,     // turn the reach gate on/off
+  // Facing-camera exclusion. When both eyes AND both ears clear this
+  // confidence at the punch's peak frame, the boxer is squared up to the
+  // camera and the punch travels into the camera axis — untrustworthy
+  // for any 2D depth-sensitive geometry. Predict "skip" in that case.
+  frontalExclude:        true,
+  frontalFaceConfMin:    0.20,
   minGloveConf:     0.20,
   minPoseConf:      0.20,
   // Anatomical shoulder correction. COCO labels the shoulder kp at the
@@ -186,12 +192,7 @@ export const ArmExtensionRule = {
         if (reachRow) reachRow.style.opacity = cfg.reachEnabled ? 1 : 0.5;
         // Only the prediction depends on the gate — no need to rerun
         // perFrameRatio. Re-score punches against the current settings.
-        for (const p of signals.punches) {
-          if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; continue; }
-          if (p.peak < cfg.threshold) p.predicted = "fail";
-          else if (cfg.reachEnabled && Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) p.predicted = "skip";
-          else p.predicted = "pass";
-        }
+        for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
         state.requestDraw?.();
@@ -202,18 +203,55 @@ export const ArmExtensionRule = {
         cfg.reachThreshold = Number(reachSlider.value);
         reachOut.textContent = cfg.reachThreshold.toFixed(2);
         if (!cfg.reachEnabled) return;
-        for (const p of signals.punches) {
-          if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; continue; }
-          if (p.peak < cfg.threshold) p.predicted = "fail";
-          else if (Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) p.predicted = "skip";
-          else p.predicted = "pass";
-        }
+        for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
         state.requestDraw?.();
       });
     }
     updateArmStatus();
+
+    // Facing-camera exclusion — recompute the toggle's effect locally;
+    // the conf slider needs a full recompute because frontal_at_peak
+    // depends on the threshold at score time.
+    const updateFrontalStatus = () => {
+      const el = host.querySelector("#ae-frontal-status");
+      if (!el) return;
+      if (!cfg.frontalExclude) { el.textContent = "Disabled — predictions ignore facing direction."; return; }
+      const N = signals.punches.length;
+      const frontal = signals.punches.filter(p => p.frontal_at_peak).length;
+      el.textContent = `${frontal}/${N} labelled punches caught by the facing-camera gate (predicted "skip").`;
+    };
+    const frontalToggle = host.querySelector("#ae-frontal-toggle");
+    const frontalSlider = host.querySelector("#ae-frontal-conf");
+    const frontalOut    = host.querySelector("#ae-frontal-conf-out");
+    const frontalRow    = host.querySelector("#ae-frontal-slider-row");
+    if (frontalToggle) {
+      frontalToggle.addEventListener("change", () => {
+        cfg.frontalExclude = frontalToggle.checked;
+        if (frontalSlider) frontalSlider.disabled = !cfg.frontalExclude;
+        if (frontalRow)    frontalRow.style.opacity = cfg.frontalExclude ? 1 : 0.5;
+        // Toggle alone doesn't change frontal_at_peak — just re-score.
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
+        updateFrontalStatus();
+        state.requestDraw?.();
+      });
+    }
+    if (frontalSlider) {
+      frontalSlider.addEventListener("input", () => {
+        cfg.frontalFaceConfMin = Number(frontalSlider.value);
+        frontalOut.textContent = cfg.frontalFaceConfMin.toFixed(2);
+        // Slider changes the threshold → frontal_at_peak needs recompute.
+        signals = computeAll(state, cfg);
+        renderPunchTable();
+        renderAggregate();
+        updateFrontalStatus();
+        state.requestDraw?.();
+      });
+    }
+    updateFrontalStatus();
     const updateCorrStatus = () => {
       const el = host.querySelector("#ae-corr-status");
       if (!el) return;
@@ -362,6 +400,20 @@ function computeAll(state, cfg) {
     // high. Robust to label boundaries that include retraction frames.
     const peakTravel = (peakReachWin > -Infinity && minReachWin < Infinity)
       ? (peakReachWin - minReachWin) : NaN;
+    // Facing-camera detection at the peak frame: both eyes + both ears
+    // above the conf threshold = boxer is roughly square to the camera,
+    // so the punch (especially straights) travels along the depth axis
+    // and 2D geometry can't reliably score it.
+    let frontalAtPeak = false;
+    if (peakValid) {
+      const c = cfg.frontalFaceConfMin;
+      frontalAtPeak =
+        pose.conf[peakFrame * 17 + J.L_EYE] >= c &&
+        pose.conf[peakFrame * 17 + J.R_EYE] >= c &&
+        pose.conf[peakFrame * 17 + J.L_EAR] >= c &&
+        pose.conf[peakFrame * 17 + J.R_EAR] >= c;
+    }
+
     // Conjunction predictor:
     //   - "pass" only when geometry says straight AND wrist reached out
     //   - "skip" when straight in 2D but reach is short = depth-foreshortened
@@ -371,6 +423,11 @@ function computeAll(state, cfg) {
     let predicted;
     if (!peakValid) {
       predicted = "unclear";
+    } else if (cfg.frontalExclude && frontalAtPeak) {
+      // Boxer was facing camera at peak — depth-sensitive geometry can't
+      // be trusted. Skip BEFORE looking at r/reach so the user sees a
+      // dedicated reason for the exclusion (the row will get a face icon).
+      predicted = "skip";
     } else if (peak < cfg.threshold) {
       predicted = "fail";
     } else if (cfg.reachEnabled && Number.isFinite(peakReach)
@@ -414,6 +471,7 @@ function computeAll(state, cfg) {
       peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
       peak_reach: peakValid ? peakReach : NaN,
       peak_travel: peakValid ? peakTravel : NaN,
+      frontal_at_peak: frontalAtPeak,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       peak_sh_conf: shConf,
       peak_el_conf: elConf,
@@ -647,6 +705,28 @@ function renderTemplate(sig, cfg) {
       <span class="muted small">peak ratio r — geometric straightness</span>
     </div>
 
+    <h3>Facing-camera exclusion</h3>
+    <p class="hint">
+      When all four face keypoints (both eyes + both ears) clear the
+      confidence threshold at the punch's <em>peak</em> frame, the boxer
+      is squared to the camera and the punch travels along the depth
+      axis. 2D geometry can't score it, so the prediction is forced to
+      <b>skip</b> regardless of <code>r</code> and <code>reach</code>.
+      (One ear hides behind the head as soon as the boxer rotates past
+      ~45°, so this catches the front-facing case cleanly.)
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <input type="checkbox" id="ae-frontal-toggle" ${cfg.frontalExclude ? 'checked' : ''} />
+      <span>Exclude facing-camera punches</span>
+    </label>
+    <div class="slider-row" style="opacity:${cfg.frontalExclude ? 1 : 0.5}" id="ae-frontal-slider-row">
+      <input type="range" id="ae-frontal-conf" min="0.05" max="0.95" step="0.05"
+        value="${cfg.frontalFaceConfMin}" ${cfg.frontalExclude ? '' : 'disabled'} />
+      <output id="ae-frontal-conf-out">${cfg.frontalFaceConfMin.toFixed(2)}</output>
+      <span class="muted small">conf threshold for all four face keypoints</span>
+    </div>
+    <p class="hint muted small" id="ae-frontal-status" style="margin:4px 0 0 0">—</p>
+
     <h3>Reach gate (depth)</h3>
     <p class="hint">
       Foreshortening: when a punch travels into/out of the camera, the
@@ -752,7 +832,9 @@ function renderPunchTable() {
   const tbody = signals.punches.length
     ? signals.punches.map(p => {
         const tsStr   = Number.isFinite(p.t_abs) ? p.t_abs.toFixed(2) : "—";
-        const predCell = pill(p.predicted, "pred");
+        const frontalIcon = (cfg.frontalExclude && p.frontal_at_peak)
+          ? ' <span title="boxer was facing camera at peak frame">👁</span>' : '';
+        const predCell = pill(p.predicted, "pred") + frontalIcon;
         // Agreement marker against GT — only meaningful when GT exists
         let match = "";
         if (p.label && p.predicted !== "unclear") {
@@ -864,6 +946,18 @@ function renderAggregate() {
 }
 
 // ─── draw ──────────────────────────────────────────────────────────────────
+
+function rescorePunch(p, cfg) {
+  // Mirrors the conjunction in computeAll. Used by UI handlers that
+  // change config bits which don't require a per-frame recompute.
+  if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; return; }
+  if (cfg.frontalExclude && p.frontal_at_peak) { p.predicted = "skip"; return; }
+  if (p.peak < cfg.threshold) { p.predicted = "fail"; return; }
+  if (cfg.reachEnabled && Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) {
+    p.predicted = "skip"; return;
+  }
+  p.predicted = "pass";
+}
 
 function activePunchAt(punches, frame) {
   for (const p of punches) {
