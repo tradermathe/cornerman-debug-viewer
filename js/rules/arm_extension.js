@@ -25,9 +25,11 @@ import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
 
 const DEFAULTS = {
-  threshold:     0.95,        // pass if peak ratio ≥ this
-  minGloveConf:  0.20,
-  minPoseConf:   0.20,
+  threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
+  reachThreshold:   0.70,     // and peak reach ≥ this (in-plane extension)
+  reachEnabled:     true,     // turn the reach gate on/off
+  minGloveConf:     0.20,
+  minPoseConf:      0.20,
   // Anatomical shoulder correction. COCO labels the shoulder kp at the
   // acromion (top of the shoulder); the glenohumeral joint center is a
   // bit below it. Shifting the shoulder anchor by α × (hip_mid −
@@ -133,6 +135,7 @@ export const ArmExtensionRule = {
       renderAggregate();
       updateCorrStatus();
       updateGateStatus();
+      try { updateArmStatus(); } catch {}
       state.requestDraw?.();
     };
 
@@ -163,6 +166,54 @@ export const ArmExtensionRule = {
     };
     wireGate("ae-pose-gate",  "ae-pose-gate-out",  "minPoseConf");
     wireGate("ae-glove-gate", "ae-glove-gate-out", "minGloveConf");
+
+    // Reach toggle + threshold slider
+    const updateArmStatus = () => {
+      const el = host.querySelector("#ae-arm-status");
+      if (!el) return;
+      const aL = signals.armLengthL, aR = signals.armLengthR;
+      const fmt = v => v ? `${v.toFixed(0)} px` : "—";
+      el.textContent = `Arm length (round-median sh→el + el→wr): L ${fmt(aL)} · R ${fmt(aR)}`;
+    };
+    const reachToggle = host.querySelector("#ae-reach-toggle");
+    const reachSlider = host.querySelector("#ae-reach-threshold");
+    const reachOut    = host.querySelector("#ae-reach-threshold-out");
+    const reachRow    = host.querySelector("#ae-reach-slider-row");
+    if (reachToggle) {
+      reachToggle.addEventListener("change", () => {
+        cfg.reachEnabled = reachToggle.checked;
+        if (reachSlider) reachSlider.disabled = !cfg.reachEnabled;
+        if (reachRow) reachRow.style.opacity = cfg.reachEnabled ? 1 : 0.5;
+        // Only the prediction depends on the gate — no need to rerun
+        // perFrameRatio. Re-score punches against the current settings.
+        for (const p of signals.punches) {
+          if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; continue; }
+          if (p.peak < cfg.threshold) p.predicted = "fail";
+          else if (cfg.reachEnabled && Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) p.predicted = "skip";
+          else p.predicted = "pass";
+        }
+        renderPunchTable();
+        renderAggregate();
+        state.requestDraw?.();
+      });
+    }
+    if (reachSlider) {
+      reachSlider.addEventListener("input", () => {
+        cfg.reachThreshold = Number(reachSlider.value);
+        reachOut.textContent = cfg.reachThreshold.toFixed(2);
+        if (!cfg.reachEnabled) return;
+        for (const p of signals.punches) {
+          if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; continue; }
+          if (p.peak < cfg.threshold) p.predicted = "fail";
+          else if (Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) p.predicted = "skip";
+          else p.predicted = "pass";
+        }
+        renderPunchTable();
+        renderAggregate();
+        state.requestDraw?.();
+      });
+    }
+    updateArmStatus();
     const updateCorrStatus = () => {
       const el = host.querySelector("#ae-corr-status");
       if (!el) return;
@@ -237,6 +288,8 @@ export const ArmExtensionRule = {
     setMetric("ae-r-ratio", signals.ratioR[f], cfg);
     setText("ae-l-bend", formatBend(signals.bendL[f]));
     setText("ae-r-bend", formatBend(signals.bendR[f]));
+    setReach("ae-l-reach", signals.reachL[f], cfg);
+    setReach("ae-r-reach", signals.reachR[f], cfg);
     setText("ae-l-source", signals.sourceL[f] || "—");
     setText("ae-r-source", signals.sourceR[f] || "—");
   },
@@ -258,8 +311,11 @@ function computeAll(state, cfg) {
   // hip motion during a punch doesn't move the corrected shoulder around.
   const bodyAxis = cfg.shoulderCorrect ? bodyAxisOffset(pose, cfg) : null;
 
-  const { ratio: ratioL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis);
-  const { ratio: ratioR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis);
+  const armLengthL = armLengthFor(pose, "L", cfg, bodyAxis);
+  const armLengthR = armLengthFor(pose, "R", cfg, bodyAxis);
+
+  const { ratio: ratioL, reach: reachL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis, armLengthL);
+  const { ratio: ratioR, reach: reachR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis, armLengthR);
 
   // Labelled punches — filtered to straights, with optional rule_extension
   // verdict for agreement scoring.
@@ -274,6 +330,7 @@ function computeAll(state, cfg) {
       ? d.stance : "orthodox";
     const side = SIDE_FOR[d.hand]?.[stance] || "L";
     const ratioArr = side === "L" ? ratioL : ratioR;
+    const reachArr = side === "L" ? reachL : reachR;
     const bendArr  = side === "L" ? bendL : bendR;
     const srcArr   = side === "L" ? sourceL : sourceR;
 
@@ -286,9 +343,24 @@ function computeAll(state, cfg) {
       if (r > peak) { peak = r; peakFrame = f; }
     }
     const peakValid = Number.isFinite(peak);
-    const predicted = peakValid
-      ? (peak >= cfg.threshold ? "pass" : "fail")
-      : "unclear";
+    const peakReach = peakValid ? reachArr[peakFrame] : NaN;
+    // Conjunction predictor:
+    //   - "pass" only when geometry says straight AND wrist reached out
+    //   - "skip" when straight in 2D but reach is short = depth-foreshortened
+    //     (the punch travelled into/out of the camera, untrustworthy)
+    //   - "fail" when geometry says bent (regardless of reach)
+    //   - "unclear" when we can't compute anything
+    let predicted;
+    if (!peakValid) {
+      predicted = "unclear";
+    } else if (peak < cfg.threshold) {
+      predicted = "fail";
+    } else if (cfg.reachEnabled && Number.isFinite(peakReach)
+               && peakReach < cfg.reachThreshold) {
+      predicted = "skip";
+    } else {
+      predicted = "pass";
+    }
 
     const label = d.rule_extension === "pass" || d.rule_extension === "fail"
       ? d.rule_extension : null;
@@ -322,6 +394,7 @@ function computeAll(state, cfg) {
       land_frame: peakValid ? peakFrame : sf,
       peak: peakValid ? peak : NaN,
       peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
+      peak_reach: peakValid ? peakReach : NaN,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       peak_sh_conf: shConf,
       peak_el_conf: elConf,
@@ -332,7 +405,11 @@ function computeAll(state, cfg) {
     };
   });
 
-  return { ratioL, ratioR, bendL, bendR, sourceL, sourceR, punches, fps, bodyAxis };
+  return {
+    ratioL, ratioR, reachL, reachR, bendL, bendR,
+    sourceL, sourceR, punches, fps, bodyAxis,
+    armLengthL, armLengthR,
+  };
 }
 
 function bodyAxisOffset(pose, cfg) {
@@ -387,21 +464,22 @@ function shoulderXY(pose, frame, joints, cfg, bodyAxis) {
   };
 }
 
-function perFrameRatio(pose, side, cfg, bodyAxis) {
+function perFrameRatio(pose, side, cfg, bodyAxis, armLength) {
   const N = pose.n_frames;
   const joints = JOINTS_FOR_SIDE[side];
   const ratio  = new Float32Array(N);
+  const reach  = new Float32Array(N);
   const bendDeg = new Float32Array(N);
   const source = new Array(N);
   const RAD_TO_DEG = 180 / Math.PI;
   for (let f = 0; f < N; f++) {
     const w = wristXY(pose, f, joints, cfg);
-    if (!w) { ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue; }
+    if (!w) { ratio[f] = NaN; reach[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue; }
 
     const sc = pose.conf[f * 17 + joints.shoulder];
     const ec = pose.conf[f * 17 + joints.elbow];
     if (sc < cfg.minPoseConf || ec < cfg.minPoseConf) {
-      ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
+      ratio[f] = NaN; reach[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
     }
     const sh = shoulderXY(pose, f, joints, cfg, bodyAxis);
     const sx = sh.x, sy = sh.y;
@@ -413,11 +491,15 @@ function perFrameRatio(pose, side, cfg, bodyAxis) {
     const sw = Math.hypot(sx - w.x, sy - w.y);        // shoulder→wrist
     const path = ue + fa;
     if (path < 1e-3 || ue < 1e-3 || fa < 1e-3) {
-      ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
+      ratio[f] = NaN; reach[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
     }
     // Bounded [0,1]. Clamp tiny float overshoots that can happen when the
     // wrist is collinear with shoulder–elbow.
     ratio[f] = Math.min(1, sw / path);
+    // Reach: |shoulder→wrist| / arm_length. 1.0 = wrist as far from shoulder
+    // as the round's full arm reach. Low values on apparently-straight
+    // arms indicate depth foreshortening (punch into/out of the camera).
+    reach[f] = (armLength && armLength > 0) ? (sw / armLength) : NaN;
 
     // Exact elbow angle from law of cosines — handles uneven upper-arm /
     // forearm lengths (the sin(θ/2) approximation in ratio_to_bend_deg
@@ -426,7 +508,42 @@ function perFrameRatio(pose, side, cfg, bodyAxis) {
     bendDeg[f] = 180 - Math.acos(cosElbow) * RAD_TO_DEG;
     source[f] = w.source;
   }
-  return { ratio, bendDeg, source };
+  return { ratio, reach, bendDeg, source };
+}
+
+function armLengthFor(pose, side, cfg, bodyAxis) {
+  // Round-stable estimate of the boxer's full arm length, in pixels.
+  // We measure each segment independently — both segments don't have to
+  // be high-conf in the same frame, which would discard a lot.
+  const N = pose.n_frames;
+  const joints = JOINTS_FOR_SIDE[side];
+  const ueArr = [], faArr = [];
+  for (let f = 0; f < N; f++) {
+    const sc = pose.conf[f * 17 + joints.shoulder];
+    const ec = pose.conf[f * 17 + joints.elbow];
+    if (sc >= cfg.minPoseConf && ec >= cfg.minPoseConf) {
+      const sh = shoulderXY(pose, f, joints, cfg, bodyAxis);
+      const ex = pose.skeleton[(f * 17 + joints.elbow) * 2];
+      const ey = pose.skeleton[(f * 17 + joints.elbow) * 2 + 1];
+      const ue = Math.hypot(sh.x - ex, sh.y - ey);
+      if (Number.isFinite(ue)) ueArr.push(ue);
+    }
+    if (ec >= cfg.minPoseConf) {
+      const w = wristXY(pose, f, joints, cfg);
+      if (w) {
+        const ex = pose.skeleton[(f * 17 + joints.elbow) * 2];
+        const ey = pose.skeleton[(f * 17 + joints.elbow) * 2 + 1];
+        const fa = Math.hypot(ex - w.x, ey - w.y);
+        if (Number.isFinite(fa)) faArr.push(fa);
+      }
+    }
+  }
+  if (ueArr.length < 10 || faArr.length < 10) return null;
+  const median = arr => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  return median(ueArr) + median(faArr);
 }
 
 function wristXY(pose, frame, joints, cfg) {
@@ -487,21 +604,50 @@ function renderTemplate(sig, cfg) {
       <div class="metric">
         <div class="metric-label">L arm</div>
         <div class="metric-val" id="ae-l-ratio">—</div>
-        <div class="metric-sub"><span id="ae-l-bend">—</span> · <span id="ae-l-source">—</span></div>
+        <div class="metric-sub">
+          <span id="ae-l-bend">—</span> ·
+          reach <span id="ae-l-reach">—</span> ·
+          <span id="ae-l-source">—</span>
+        </div>
       </div>
       <div class="metric">
         <div class="metric-label">R arm</div>
         <div class="metric-val" id="ae-r-ratio">—</div>
-        <div class="metric-sub"><span id="ae-r-bend">—</span> · <span id="ae-r-source">—</span></div>
+        <div class="metric-sub">
+          <span id="ae-r-bend">—</span> ·
+          reach <span id="ae-r-reach">—</span> ·
+          <span id="ae-r-source">—</span>
+        </div>
       </div>
     </div>
 
-    <h3>Pass threshold</h3>
+    <h3>Pass threshold (shape)</h3>
     <div class="slider-row">
       <input type="range" id="ae-threshold" min="0.70" max="1.00" step="0.01" value="${cfg.threshold}" />
       <output id="ae-threshold-out">${cfg.threshold.toFixed(2)}</output>
-      <span class="muted small">peak ratio per punch must reach this to pass</span>
+      <span class="muted small">peak ratio r — geometric straightness</span>
     </div>
+
+    <h3>Reach gate (depth)</h3>
+    <p class="hint">
+      Foreshortening: when a punch travels into/out of the camera, the
+      shoulder/elbow/wrist project onto roughly the same image-plane line,
+      so <code>r</code> reads near 1.0 even on a bent arm.
+      Reach = <code>|shoulder→wrist| / arm_length</code> measures how far
+      the wrist actually got from the shoulder in 2D, normalised by the
+      boxer's full arm reach. Low reach + high <code>r</code> = depth-
+      foreshortened punch → predicted <b>skip</b> instead of pass/fail.
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <input type="checkbox" id="ae-reach-toggle" ${cfg.reachEnabled ? 'checked' : ''} />
+      <span>Enable reach gate</span>
+    </label>
+    <div class="slider-row" style="opacity:${cfg.reachEnabled ? 1 : 0.5}" id="ae-reach-slider-row">
+      <input type="range" id="ae-reach-threshold" min="0.30" max="1.00" step="0.01" value="${cfg.reachThreshold}" ${cfg.reachEnabled ? '' : 'disabled'} />
+      <output id="ae-reach-threshold-out">${cfg.reachThreshold.toFixed(2)}</output>
+      <span class="muted small">peak reach below this → depth-skipped</span>
+    </div>
+    <p class="hint muted small" id="ae-arm-status" style="margin:4px 0 0 0">—</p>
 
     <h3>Confidence gates</h3>
     <p class="hint">
@@ -559,12 +705,14 @@ function renderTemplate(sig, cfg) {
 
 function pill(value, kind) {
   // kind: "gt" | "pred" — same color vocabulary as the canvas HUD
-  if (value !== "pass" && value !== "fail" && value !== "unclear") {
+  if (value !== "pass" && value !== "fail" && value !== "unclear" && value !== "skip") {
     return `<span class="ae-pill ae-pill-empty" title="no label">—</span>`;
   }
-  const col = value === "pass" ? COLORS.pass
-            : value === "fail" ? COLORS.fail
-            : COLORS.unclear;
+  let col;
+  if (value === "pass")      col = COLORS.pass;
+  else if (value === "fail") col = COLORS.fail;
+  else if (value === "skip") col = "#7ec8ff"; // blue-ish for depth-skipped
+  else                       col = COLORS.unclear;
   return `<span class="ae-pill" style="background:${col}1f;color:${col};border:1px solid ${col}66">${value}</span>`;
 }
 
@@ -595,18 +743,30 @@ function renderPunchTable() {
         }
         const bendStr = Number.isFinite(p.peak_bend_deg)
           ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
+        // Reach cell — colored by pass/fail against the reach threshold,
+        // but only when the gate is on. Greyed when disabled.
+        let reachCell;
+        if (!Number.isFinite(p.peak_reach)) {
+          reachCell = `<td class="muted">—</td>`;
+        } else {
+          const col = !cfg.reachEnabled ? "var(--muted, #888)"
+                    : (p.peak_reach >= cfg.reachThreshold) ? COLORS.pass
+                    : COLORS.fail;
+          reachCell = `<td style="color:${col};font-variant-numeric:tabular-nums">${p.peak_reach.toFixed(2)}</td>`;
+        }
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
           <td>${predCell}</td>
           <td style="text-align:center">${match}</td>
           <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
+          ${reachCell}
           ${confCell(p.peak_sh_conf)}
           ${confCell(p.peak_el_conf)}
           ${confCell(p.peak_wr_conf)}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="8" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="9" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
@@ -630,6 +790,7 @@ function renderPunchTable() {
         <thead><tr>
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
           <th>bend</th>
+          <th title="peak reach = |sh→wr| / arm_length at peak frame">reach</th>
           <th title="shoulder confidence at peak frame">sh</th>
           <th title="elbow confidence at peak frame">el</th>
           <th title="wrist confidence at peak frame — glove if used, pose if fallback">wr</th>
@@ -956,5 +1117,14 @@ function setMetric(id, ratio, cfg) {
   }
   el.textContent = ratio.toFixed(3);
   el.style.color = ratio >= cfg.threshold ? COLORS.pass : COLORS.fail;
+}
+
+function setReach(id, reach, cfg) {
+  const el = host?.querySelector("#" + id);
+  if (!el) return;
+  if (!Number.isFinite(reach)) { el.textContent = "—"; el.style.color = ""; return; }
+  el.textContent = reach.toFixed(2);
+  if (!cfg.reachEnabled) { el.style.color = "var(--muted, #888)"; return; }
+  el.style.color = reach >= cfg.reachThreshold ? COLORS.pass : COLORS.fail;
 }
 
