@@ -466,6 +466,9 @@ function renderTemplate(sig, cfg) {
         &nbsp;arm bones when ratio &lt; threshold</li>
       <li><span style="display:inline-block;width:10px;height:10px;background:${COLORS.pass};border-radius:50%;vertical-align:middle"></span>
         &nbsp;<b>shoulder</b> + <b>elbow</b> markers — the three corners that drive the ratio</li>
+      <li><span style="display:inline-block;width:18px;height:18px;background:${COLORS.pass};border:2px solid white;border-radius:50%;vertical-align:middle;position:relative">
+        <span style="position:absolute;left:5px;top:5px;width:6px;height:6px;background:rgba(0,0,0,0.55);border-radius:50%"></span></span>
+        &nbsp;<b>corrected shoulder</b> (target marker) — only shown when anatomical correction is on; smaller hollow ring shows the raw acromion, dashed line shows the shift</li>
       <li><span style="display:inline-block;width:16px;height:16px;border:2px solid ${COLORS.pass};border-top-left-radius:16px;border-top-right-radius:0;border-bottom-left-radius:0;border-bottom-right-radius:0;border-bottom:none;border-right:none;vertical-align:middle"></span>
         &nbsp;arc at the elbow shows the <b>interior angle</b>; the number next to it is the <b>bend</b> in °</li>
       <li><span style="display:inline-block;width:24px;height:1px;background:${COLORS.ratioGuide};border-top:1px dashed ${COLORS.ratioGuide};vertical-align:middle"></span>
@@ -794,38 +797,63 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale, bodyAxis) {
   // Mark the three corners we measure against — shoulder and elbow get
   // solid dots so the user can see exactly which joints feed the ratio /
   // bend computation. The wrist gets its own glove-or-pose marker below.
-  // When the anatomical shoulder correction is on, also draw a hollow
-  // "ghost" marker at the raw acromion kp so the user can see where the
-  // correction moved the anchor.
   ctx.fillStyle = color;
   ctx.strokeStyle = "rgba(0,0,0,0.55)";
   ctx.lineWidth = 1.5 * scale;
   const cornerR = 5 * scale;
-  for (const [cx, cy] of [[sx, sy], [ex, ey]]) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, cornerR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  }
-  if (cfg.shoulderCorrect && bodyAxis && (sh.raw_x !== sx || sh.raw_y !== sy)) {
-    // Dashed line from raw acromion → corrected joint center, then a
-    // hollow ring at the raw position. Subtle so it doesn't compete with
-    // the active arm bones.
+  // Elbow dot — always rendered the same way
+  ctx.beginPath();
+  ctx.arc(ex, ey, cornerR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // Shoulder dot — when the anatomical correction is active and actually
+  // shifted the anchor, paint a much more prominent marker at the
+  // CORRECTED position (the joint center we now believe in) and a
+  // smaller "ghost" hollow ring at the raw acromion, connected by a
+  // dashed correction vector. Without correction (or when α=0), keep the
+  // single small dot at the acromion.
+  const corrActive = cfg.shoulderCorrect && bodyAxis
+                     && (sh.raw_x !== sx || sh.raw_y !== sy);
+  if (corrActive) {
+    // Dashed correction vector raw → corrected (arrow-ish — just a line
+    // is enough; the relative dot weights tell direction).
     ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
-    ctx.lineWidth = 1 * scale;
-    ctx.setLineDash([3 * scale, 3 * scale]);
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
+    ctx.lineWidth = 1.5 * scale;
+    ctx.setLineDash([4 * scale, 3 * scale]);
     ctx.beginPath();
     ctx.moveTo(sh.raw_x, sh.raw_y);
     ctx.lineTo(sx, sy);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.strokeStyle = "rgba(255,255,255,0.7)";
-    ctx.lineWidth = 1.5 * scale;
+    // Raw acromion — small hollow white ring + small "raw" tick label
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = 2 * scale;
     ctx.beginPath();
-    ctx.arc(sh.raw_x, sh.raw_y, cornerR, 0, Math.PI * 2);
+    ctx.arc(sh.raw_x, sh.raw_y, 5 * scale, 0, Math.PI * 2);
     ctx.stroke();
+    // Corrected joint center — big dot, white outer ring for contrast.
+    // This is the "where we now think the shoulder is" indicator.
+    const bigR = 10 * scale;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2.5 * scale;
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.beginPath();
+    ctx.arc(sx, sy, bigR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Inner darker dot so the marker reads as a target reticle
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.beginPath();
+    ctx.arc(sx, sy, bigR * 0.35, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
+  } else {
+    // No correction → single small dot at the raw shoulder position.
+    ctx.beginPath();
+    ctx.arc(sx, sy, cornerR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
   }
 
   // Angle arc at the elbow — visualises the interior angle (elbow_angle).
