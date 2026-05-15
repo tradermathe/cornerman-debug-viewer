@@ -132,8 +132,37 @@ export const ArmExtensionRule = {
       renderPunchTable();
       renderAggregate();
       updateCorrStatus();
+      updateGateStatus();
       state.requestDraw?.();
     };
+
+    // Confidence-gate status — how many frames pass the current gates
+    const updateGateStatus = () => {
+      const el = host.querySelector("#ae-gate-status");
+      if (!el) return;
+      const N = signals.ratioL.length;
+      let lOk = 0, rOk = 0;
+      for (let f = 0; f < N; f++) {
+        if (Number.isFinite(signals.ratioL[f])) lOk++;
+        if (Number.isFinite(signals.ratioR[f])) rOk++;
+      }
+      const pct = (n) => `${(100 * n / Math.max(N, 1)).toFixed(0)}%`;
+      el.textContent = `Valid frames: L ${pct(lOk)} (${lOk}/${N}) · R ${pct(rOk)} (${rOk}/${N})`;
+    };
+
+    // Pose / glove confidence-gate sliders
+    const wireGate = (sliderId, outId, cfgKey) => {
+      const s = host.querySelector("#" + sliderId);
+      const o = host.querySelector("#" + outId);
+      if (!s) return;
+      s.addEventListener("input", () => {
+        cfg[cfgKey] = Number(s.value);
+        o.textContent = cfg[cfgKey].toFixed(2);
+        recomputeAndRefresh();
+      });
+    };
+    wireGate("ae-pose-gate",  "ae-pose-gate-out",  "minPoseConf");
+    wireGate("ae-glove-gate", "ae-glove-gate-out", "minGloveConf");
     const updateCorrStatus = () => {
       const el = host.querySelector("#ae-corr-status");
       if (!el) return;
@@ -163,6 +192,7 @@ export const ArmExtensionRule = {
       });
     }
     updateCorrStatus();
+    updateGateStatus();
 
     // Click a punch row to seek. Same scrubber-dispatch trick the other
     // lenses use — keeps the seek path single-sourced through the existing
@@ -449,6 +479,26 @@ function renderTemplate(sig, cfg) {
       <output id="ae-threshold-out">${cfg.threshold.toFixed(2)}</output>
       <span class="muted small">peak ratio per punch must reach this to pass</span>
     </div>
+
+    <h3>Confidence gates</h3>
+    <p class="hint">
+      Frames where the relevant pose joints (shoulder/elbow/wrist/hip) or the
+      glove detection fall below these confidences are rejected from the
+      ratio computation. Raising the pose gate kills frames with sketchy
+      pose tracking; raising the glove gate makes the lens fall back to
+      the pose wrist more often.
+    </p>
+    <div class="slider-row">
+      <input type="range" id="ae-pose-gate" min="0.05" max="0.95" step="0.05" value="${cfg.minPoseConf}" />
+      <output id="ae-pose-gate-out">${cfg.minPoseConf.toFixed(2)}</output>
+      <span class="muted small">pose conf — shoulder, elbow, wrist-fallback, hip</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="ae-glove-gate" min="0.05" max="0.95" step="0.05" value="${cfg.minGloveConf}" />
+      <output id="ae-glove-gate-out">${cfg.minGloveConf.toFixed(2)}</output>
+      <span class="muted small">glove conf — when below, fall back to pose wrist</span>
+    </div>
+    <p class="hint muted small" id="ae-gate-status" style="margin:4px 0 0 0">—</p>
 
     <h3>Anatomical shoulder correction</h3>
     <p class="hint">
