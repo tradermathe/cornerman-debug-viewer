@@ -28,6 +28,14 @@ const DEFAULTS = {
   threshold:     0.95,        // pass if peak ratio ≥ this
   minGloveConf:  0.20,
   minPoseConf:   0.20,
+  // Anatomical shoulder correction. COCO labels the shoulder kp at the
+  // acromion (top of the shoulder); the glenohumeral joint center is a
+  // bit below it. Shifting the shoulder anchor by α × (hip_mid −
+  // shoulder_mid), where the offset vector is the round-median (so
+  // per-frame hip motion doesn't jitter it), reduces the false bend the
+  // acromion-anchor introduces on actually-straight punches.
+  shoulderCorrect:      false,
+  shoulderCorrectAlpha: 0.20,
   // Only straights have a "should be extended" goal — hooks/uppercuts
   // are supposed to be bent at the elbow.
   appliesTo: new Set([
@@ -117,6 +125,45 @@ export const ArmExtensionRule = {
       });
     }
 
+    // Shoulder correction toggle + α slider — both require a full recompute
+    // of signals (per-frame ratio depends on the corrected shoulder).
+    const recomputeAndRefresh = () => {
+      signals = computeAll(state, cfg);
+      renderPunchTable();
+      renderAggregate();
+      updateCorrStatus();
+      state.requestDraw?.();
+    };
+    const updateCorrStatus = () => {
+      const el = host.querySelector("#ae-corr-status");
+      if (!el) return;
+      if (!cfg.shoulderCorrect) { el.textContent = "—"; return; }
+      const b = signals.bodyAxis;
+      if (!b) { el.textContent = "Correction enabled but no valid hip frames in this round — falls back to raw shoulder."; return; }
+      const mag = Math.hypot(b.dx, b.dy);
+      el.textContent = `Body axis: dx=${b.dx.toFixed(1)} dy=${b.dy.toFixed(1)} px  (|offset| = ${mag.toFixed(1)} px, from ${b.nFrames} frames)`;
+    };
+    const corrToggle = host.querySelector("#ae-corr-toggle");
+    const corrAlpha  = host.querySelector("#ae-corr-alpha");
+    const corrAlphaOut = host.querySelector("#ae-corr-alpha-out");
+    const corrSliderRow = host.querySelector("#ae-corr-slider-row");
+    if (corrToggle) {
+      corrToggle.addEventListener("change", () => {
+        cfg.shoulderCorrect = corrToggle.checked;
+        if (corrAlpha) corrAlpha.disabled = !cfg.shoulderCorrect;
+        if (corrSliderRow) corrSliderRow.style.opacity = cfg.shoulderCorrect ? 1 : 0.5;
+        recomputeAndRefresh();
+      });
+    }
+    if (corrAlpha) {
+      corrAlpha.addEventListener("input", () => {
+        cfg.shoulderCorrectAlpha = Number(corrAlpha.value);
+        corrAlphaOut.textContent = cfg.shoulderCorrectAlpha.toFixed(2);
+        if (cfg.shoulderCorrect) recomputeAndRefresh();
+      });
+    }
+    updateCorrStatus();
+
     // Click a punch row to seek. Same scrubber-dispatch trick the other
     // lenses use — keeps the seek path single-sourced through the existing
     // input handler instead of inventing a new API.
@@ -141,8 +188,8 @@ export const ArmExtensionRule = {
     const f = state.frame;
 
     // Draw both arms with their current ratio overlay.
-    drawArmRatio(ctx, state.pose, f, "L", signals.ratioL[f], cfg, s);
-    drawArmRatio(ctx, state.pose, f, "R", signals.ratioR[f], cfg, s);
+    drawArmRatio(ctx, state.pose, f, "L", signals.ratioL[f], cfg, s, signals.bodyAxis);
+    drawArmRatio(ctx, state.pose, f, "R", signals.ratioR[f], cfg, s, signals.bodyAxis);
 
     // HUD — when the playhead is inside a labelled punch window, show the
     // GT verdict + our prediction so you can eyeball agreement on-video.
@@ -176,8 +223,13 @@ function computeAll(state, cfg) {
   // (which uses absolute source time).
   const startSec = pose.start_sec || 0;
 
-  const { ratio: ratioL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg);
-  const { ratio: ratioR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg);
+  // Body-axis offset for the optional anatomical shoulder correction.
+  // We use the round-median of (hip_mid − shoulder_mid) so that per-frame
+  // hip motion during a punch doesn't move the corrected shoulder around.
+  const bodyAxis = cfg.shoulderCorrect ? bodyAxisOffset(pose, cfg) : null;
+
+  const { ratio: ratioL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis);
+  const { ratio: ratioR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis);
 
   // Labelled punches — filtered to straights, with optional rule_extension
   // verdict for agreement scoring.
@@ -230,10 +282,62 @@ function computeAll(state, cfg) {
     };
   });
 
-  return { ratioL, ratioR, bendL, bendR, sourceL, sourceR, punches, fps };
+  return { ratioL, ratioR, bendL, bendR, sourceL, sourceR, punches, fps, bodyAxis };
 }
 
-function perFrameRatio(pose, side, cfg) {
+function bodyAxisOffset(pose, cfg) {
+  // Median (hip_mid − shoulder_mid) across frames where all four joints
+  // have decent confidence. Component-wise median keeps it stable against
+  // single bad frames. Returns null if too few frames qualify.
+  const N = pose.n_frames;
+  const dxs = [], dys = [];
+  const confGate = cfg.minPoseConf;
+  for (let f = 0; f < N; f++) {
+    const cLs = pose.conf[f * 17 + J.L_SHOULDER];
+    const cRs = pose.conf[f * 17 + J.R_SHOULDER];
+    const cLh = pose.conf[f * 17 + J.L_HIP];
+    const cRh = pose.conf[f * 17 + J.R_HIP];
+    if (cLs < confGate || cRs < confGate || cLh < confGate || cRh < confGate) continue;
+    const lsx = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2];
+    const lsy = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2 + 1];
+    const rsx = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2];
+    const rsy = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2 + 1];
+    const lhx = pose.skeleton[(f * 17 + J.L_HIP) * 2];
+    const lhy = pose.skeleton[(f * 17 + J.L_HIP) * 2 + 1];
+    const rhx = pose.skeleton[(f * 17 + J.R_HIP) * 2];
+    const rhy = pose.skeleton[(f * 17 + J.R_HIP) * 2 + 1];
+    if (![lsx, lsy, rsx, rsy, lhx, lhy, rhx, rhy].every(Number.isFinite)) continue;
+    const shMidX = 0.5 * (lsx + rsx), shMidY = 0.5 * (lsy + rsy);
+    const hipMidX = 0.5 * (lhx + rhx), hipMidY = 0.5 * (lhy + rhy);
+    dxs.push(hipMidX - shMidX);
+    dys.push(hipMidY - shMidY);
+  }
+  if (dxs.length < 5) return null;
+  const median = arr => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  return { dx: median(dxs), dy: median(dys), nFrames: dxs.length };
+}
+
+// Resolve the shoulder position for a given frame, applying the anatomical
+// correction when enabled. Single source of truth — used by both
+// perFrameRatio (for the metric) and drawArmRatio (for the visual).
+function shoulderXY(pose, frame, joints, cfg, bodyAxis) {
+  const raw_x = pose.skeleton[(frame * 17 + joints.shoulder) * 2];
+  const raw_y = pose.skeleton[(frame * 17 + joints.shoulder) * 2 + 1];
+  if (!cfg.shoulderCorrect || !bodyAxis) {
+    return { x: raw_x, y: raw_y, raw_x, raw_y };
+  }
+  const a = cfg.shoulderCorrectAlpha;
+  return {
+    x: raw_x + a * bodyAxis.dx,
+    y: raw_y + a * bodyAxis.dy,
+    raw_x, raw_y,
+  };
+}
+
+function perFrameRatio(pose, side, cfg, bodyAxis) {
   const N = pose.n_frames;
   const joints = JOINTS_FOR_SIDE[side];
   const ratio  = new Float32Array(N);
@@ -249,8 +353,8 @@ function perFrameRatio(pose, side, cfg) {
     if (sc < cfg.minPoseConf || ec < cfg.minPoseConf) {
       ratio[f] = NaN; bendDeg[f] = NaN; source[f] = null; continue;
     }
-    const sx = pose.skeleton[(f * 17 + joints.shoulder) * 2];
-    const sy = pose.skeleton[(f * 17 + joints.shoulder) * 2 + 1];
+    const sh = shoulderXY(pose, f, joints, cfg, bodyAxis);
+    const sx = sh.x, sy = sh.y;
     const ex = pose.skeleton[(f * 17 + joints.elbow) * 2];
     const ey = pose.skeleton[(f * 17 + joints.elbow) * 2 + 1];
 
@@ -345,6 +449,26 @@ function renderTemplate(sig, cfg) {
       <output id="ae-threshold-out">${cfg.threshold.toFixed(2)}</output>
       <span class="muted small">peak ratio per punch must reach this to pass</span>
     </div>
+
+    <h3>Anatomical shoulder correction</h3>
+    <p class="hint">
+      COCO labels the shoulder at the acromion (top of the shoulder), not the
+      glenohumeral joint center. When on, the shoulder anchor is shifted by
+      α × <code>(hip_mid − shoulder_mid)</code>, using the round-median offset
+      so per-frame hip motion during a punch doesn't move the anchor. The raw
+      acromion is shown as a hollow ring connected by a dashed line.
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <input type="checkbox" id="ae-corr-toggle" ${cfg.shoulderCorrect ? 'checked' : ''} />
+      <span>Enable correction</span>
+    </label>
+    <div class="slider-row" style="opacity:${cfg.shoulderCorrect ? 1 : 0.5}" id="ae-corr-slider-row">
+      <input type="range" id="ae-corr-alpha" min="0.00" max="0.35" step="0.01"
+        value="${cfg.shoulderCorrectAlpha}" ${cfg.shoulderCorrect ? '' : 'disabled'} />
+      <output id="ae-corr-alpha-out">${cfg.shoulderCorrectAlpha.toFixed(2)}</output>
+      <span class="muted small">α — fraction of torso-axis offset (~0.20 ≈ 5–7 cm down)</span>
+    </div>
+    <p class="hint muted small" id="ae-corr-status" style="margin:4px 0 0 0">—</p>
 
     <h3>Per-punch (straights only)</h3>
     <p class="hint">
@@ -550,7 +674,7 @@ function drawVerdictHud(ctx, punch, scale, pose) {
   ctx.restore();
 }
 
-function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
+function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale, bodyAxis) {
   const joints = JOINTS_FOR_SIDE[side];
   // Skip when the per-frame ratio couldn't be computed for this arm — that
   // means shoulder or elbow conf was below the gate (or the wrist was), so
@@ -559,8 +683,8 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   // returned, which looked like a lagging skeleton on rounds with poor
   // pose tracking.
   if (!Number.isFinite(ratio)) return;
-  const sx = pose.skeleton[(frame * 17 + joints.shoulder) * 2];
-  const sy = pose.skeleton[(frame * 17 + joints.shoulder) * 2 + 1];
+  const sh = shoulderXY(pose, frame, joints, cfg, bodyAxis);
+  const sx = sh.x, sy = sh.y;
   const ex = pose.skeleton[(frame * 17 + joints.elbow) * 2];
   const ey = pose.skeleton[(frame * 17 + joints.elbow) * 2 + 1];
   const w = wristXY(pose, frame, joints, cfg);
@@ -591,6 +715,9 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
   // Mark the three corners we measure against — shoulder and elbow get
   // solid dots so the user can see exactly which joints feed the ratio /
   // bend computation. The wrist gets its own glove-or-pose marker below.
+  // When the anatomical shoulder correction is on, also draw a hollow
+  // "ghost" marker at the raw acromion kp so the user can see where the
+  // correction moved the anchor.
   ctx.fillStyle = color;
   ctx.strokeStyle = "rgba(0,0,0,0.55)";
   ctx.lineWidth = 1.5 * scale;
@@ -600,6 +727,26 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale) {
     ctx.arc(cx, cy, cornerR, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+  }
+  if (cfg.shoulderCorrect && bodyAxis && (sh.raw_x !== sx || sh.raw_y !== sy)) {
+    // Dashed line from raw acromion → corrected joint center, then a
+    // hollow ring at the raw position. Subtle so it doesn't compete with
+    // the active arm bones.
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 1 * scale;
+    ctx.setLineDash([3 * scale, 3 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(sh.raw_x, sh.raw_y);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    ctx.arc(sh.raw_x, sh.raw_y, cornerR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Angle arc at the elbow — visualises the interior angle (elbow_angle).
