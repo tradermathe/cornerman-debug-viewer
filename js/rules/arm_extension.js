@@ -293,6 +293,22 @@ function computeAll(state, cfg) {
     const label = d.rule_extension === "pass" || d.rule_extension === "fail"
       ? d.rule_extension : null;
 
+    // Per-joint confidence at the peak frame — what fed the verdict.
+    // Wrist conf reflects whichever source was actually used: if the
+    // glove won the source pick that frame, use the glove conf; else
+    // the pose wrist conf.
+    const joints = JOINTS_FOR_SIDE[side];
+    let shConf = NaN, elConf = NaN, wrConf = NaN;
+    if (peakValid) {
+      shConf = pose.conf[peakFrame * 17 + joints.shoulder];
+      elConf = pose.conf[peakFrame * 17 + joints.elbow];
+      if (srcArr[peakFrame] === "glove" && pose.gloveWrists) {
+        wrConf = gloveConf(pose.gloveWrists, peakFrame, joints.gloveSide);
+      } else {
+        wrConf = pose.conf[peakFrame * 17 + joints.wrist];
+      }
+    }
+
     return {
       idx,
       timestamp: d.timestamp,
@@ -307,6 +323,10 @@ function computeAll(state, cfg) {
       peak: peakValid ? peak : NaN,
       peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
+      peak_sh_conf: shConf,
+      peak_el_conf: elConf,
+      peak_wr_conf: wrConf,
+      peak_wr_source: peakValid ? (srcArr[peakFrame] || "—") : "—",
       predicted,
       label,
     };
@@ -545,45 +565,51 @@ function pill(value, kind) {
   return `<span class="ae-pill" style="background:${col}1f;color:${col};border:1px solid ${col}66">${value}</span>`;
 }
 
+function confCell(value) {
+  // Same color vocabulary as the base skeleton renderer's confColor()
+  // (skeleton.js): green ≥ 0.5, amber ≥ 0.2, red < 0.2, em-dash when NaN.
+  if (!Number.isFinite(value)) {
+    return `<td class="muted" style="font-variant-numeric:tabular-nums">—</td>`;
+  }
+  const col = value >= 0.5 ? COLORS.pass
+            : value >= 0.2 ? COLORS.unclear
+            : COLORS.fail;
+  return `<td style="color:${col};font-variant-numeric:tabular-nums">${value.toFixed(2)}</td>`;
+}
+
 function renderPunchTable() {
   const hasAnyLabel = signals.punches.some(p => p.label);
   const tbody = signals.punches.length
     ? signals.punches.map(p => {
-        const peakStr = Number.isFinite(p.peak) ? p.peak.toFixed(3) : "—";
         const tsStr   = Number.isFinite(p.t_abs) ? p.t_abs.toFixed(2) : "—";
-        const cov     = Number.isFinite(p.glove_coverage)
-                          ? `${Math.round(100 * p.glove_coverage)}%` : "—";
-        const gtCell   = pill(p.label, "gt");
         const predCell = pill(p.predicted, "pred");
-        // Agreement marker — only meaningful when GT exists
+        // Agreement marker against GT — only meaningful when GT exists
         let match = "";
         if (p.label && p.predicted !== "unclear") {
           match = p.label === p.predicted
-            ? `<span style="color:${COLORS.agree}">✓</span>`
-            : `<span style="color:${COLORS.disagree}">✗</span>`;
+            ? `<span style="color:${COLORS.agree}" title="GT ${p.label} · agrees">✓</span>`
+            : `<span style="color:${COLORS.disagree}" title="GT ${p.label} · disagrees">✗</span>`;
         }
         const bendStr = Number.isFinite(p.peak_bend_deg)
           ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
-          <td>${p.hand}</td>
-          <td>${p.side}</td>
-          <td style="font-variant-numeric:tabular-nums">${peakStr}</td>
-          <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
-          <td>${gtCell}</td>
           <td>${predCell}</td>
           <td style="text-align:center">${match}</td>
-          <td class="muted small">${cov}</td>
+          <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
+          ${confCell(p.peak_sh_conf)}
+          ${confCell(p.peak_el_conf)}
+          ${confCell(p.peak_wr_conf)}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="10" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="8" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
     const gtNote = hasAnyLabel
       ? ""
-      : `<p class="hint muted" style="margin:0 0 8px 0">No <code>rule_extension</code> GT verdicts attached to this round (Sheet labels missing or no match).</p>`;
+      : `<p class="hint muted" style="margin:0 0 8px 0">No <code>rule_extension</code> GT verdicts attached to this round (Sheet labels missing or no match) — match column will be blank.</p>`;
     tableHost.innerHTML = `
       ${gtNote}
       <style>
@@ -599,8 +625,11 @@ function renderPunchTable() {
       </style>
       <table class="rule-table">
         <thead><tr>
-          <th>t</th><th>type</th><th>hand</th><th>side</th>
-          <th>peak r</th><th>bend</th><th>GT</th><th>pred</th><th></th><th>glove</th>
+          <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
+          <th>bend</th>
+          <th title="shoulder confidence at peak frame">sh</th>
+          <th title="elbow confidence at peak frame">el</th>
+          <th title="wrist confidence at peak frame — glove if used, pose if fallback">wr</th>
         </tr></thead>
         <tbody>${tbody}</tbody>
       </table>`;
