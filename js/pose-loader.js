@@ -150,3 +150,53 @@ export function jointXY(pose, frame, joint) {
 export function jointConf(pose, frame, joint) {
   return pose.conf[frame * N_JOINTS + joint];
 }
+
+// Glove-wrist sidecar loader. Cache shape is (N, 2, 3) — [L_wrist, R_wrist]
+// each storing (x_norm, y_norm, conf). NaN x/y means the glove model didn't
+// produce that wrist for this frame. Frame timing exactly matches the matching
+// vision cache (same actual_start_sec, fps, n_frames) so the index lines up
+// 1:1 with the vision pose object the rule attaches it to.
+//
+// Returns:
+//   { wrists: Float32Array(n*2*2),   // [f, side, xy] row-major, pixel coords
+//     conf:   Float32Array(n*2),     // [f, side]
+//     fps, start_sec, n_frames, width, height }
+export async function loadGloveWrists(npyFile, metaFile, videoSize) {
+  const meta = JSON.parse(await metaFile.text());
+  const fps = Number(meta.fps);
+  const start_sec = Number(meta.actual_start_sec ?? meta.start_sec ?? 0);
+
+  const { data, shape, dtype } = parseNpy(await npyFile.arrayBuffer());
+  if (shape.length !== 3 || shape[1] !== 2 || shape[2] !== 3) {
+    throw new Error(
+      `Expected glove cache shape (N, 2, 3), got (${shape.join(", ")}).`
+    );
+  }
+  if (dtype !== "<f4") {
+    throw new Error(`Expected float32 LE in glove .npy, got dtype '${dtype}'.`);
+  }
+  const n_frames = shape[0];
+  const w = videoSize?.width  || meta.width  || 1;
+  const h = videoSize?.height || meta.height || 1;
+
+  const wrists = new Float32Array(n_frames * 2 * 2);
+  const conf   = new Float32Array(n_frames * 2);
+  for (let f = 0; f < n_frames; f++) {
+    for (let s = 0; s < 2; s++) {
+      const base = (f * 2 + s) * 3;
+      wrists[(f * 2 + s) * 2 + 0] = data[base + 0] * w;
+      wrists[(f * 2 + s) * 2 + 1] = data[base + 1] * h;
+      conf[f * 2 + s] = data[base + 2];
+    }
+  }
+  return { wrists, conf, fps, start_sec, n_frames, width: w, height: h };
+}
+
+// Lookup helpers for the glove cache. side: 0=L, 1=R.
+export function gloveXY(g, frame, side) {
+  const i = (frame * 2 + side) * 2;
+  return [g.wrists[i], g.wrists[i + 1]];
+}
+export function gloveConf(g, frame, side) {
+  return g.conf[frame * 2 + side];
+}

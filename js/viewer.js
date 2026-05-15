@@ -6,13 +6,13 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-14.2";
+const BUILD = "2026-05-15.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
 }
 
-import { loadPose } from "./pose-loader.js";
+import { loadPose, loadGloveWrists } from "./pose-loader.js";
 import { loadPose3D } from "./pose-3d-loader.js";
 import { loadPunches } from "./punches-loader.js";
 import { fetchLiveLabels } from "./sheet-labels.js";
@@ -253,14 +253,11 @@ function populateDriveVideoSelect() {
     if (a.anyCache !== b.anyCache) return a.anyCache ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
-  const lensLabel = state.rule?.label || "this lens";
   for (const it of items) {
+    if (!it.matched) continue;   // hide non-matching videos entirely
     const o = document.createElement("option");
     o.value = it.name;
-    o.textContent = it.matched
-      ? it.name
-      : (it.anyCache ? `${it.name} (no ${lensLabel} cache)` : `${it.name} (no cache)`);
-    if (!it.matched) o.disabled = true;   // can't be selected, but visible
+    o.textContent = it.name;
     sel.appendChild(o);
   }
   // Restore previous selection if it's still selectable, else clear.
@@ -577,6 +574,24 @@ function loadFromIndex(videoFile, slot) {
           console.warn("3D pose load failed:", err.message);
         }
       }
+      // Optional: glove-wrist sidecar — attached to the vision pose object
+      // (or primary, if no vision). Frame timing matches the matching
+      // vision cache 1:1, so the wrist-swap lens can index it directly.
+      if (slot.glove) {
+        try {
+          const gNpy  = await drive.toFile(slot.glove.npy);
+          const gMeta = await drive.toFile(slot.glove.meta);
+          const glove = await loadGloveWrists(gNpy, gMeta, size);
+          // Attach to whichever pose is the Vision pose; fall back to primary.
+          if (poseSecondary && poseSecondary.engine === "apple_vision_2d") {
+            poseSecondary.gloveWrists = glove;
+          } else {
+            posePrimary.gloveWrists = glove;
+          }
+        } catch (err) {
+          console.warn("glove wrists load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
       start(posePrimary, poseSecondary, punches, pose3d);
 
@@ -798,12 +813,19 @@ window.addEventListener("resize", () => {
 
 // ── Rule panels ─────────────────────────────────────────────────────────────
 function populateRuleSelect() {
+  // Preserve current selection across the rebuild so loading a new video
+  // doesn't snap the lens back to the first one. The RULES list is static
+  // so the previous id will always still exist.
+  const prev = els.ruleSel.value;
   els.ruleSel.innerHTML = "";
   for (const r of RULES) {
     const o = document.createElement("option");
     o.value = r.id;
     o.textContent = r.label;
     els.ruleSel.appendChild(o);
+  }
+  if (prev && [...els.ruleSel.options].some(o => o.value === prev)) {
+    els.ruleSel.value = prev;
   }
 }
 

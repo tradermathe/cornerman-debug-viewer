@@ -68,14 +68,19 @@ export function drawSkeleton(ctx, pose, frame, style = {}) {
     jointRadius = 4,
     minConf = 0.05,            // hide joints/edges below this conf
     highlightJoints = null,    // Set of joint indices to draw larger
+    hideJoints = null,         // Set of joint indices to skip entirely
+                               //   (and any edge touching them)
   } = style;
 
   ctx.lineWidth = boneWidth;
   ctx.strokeStyle = boneColor;
 
   // Bones — only drawn if both endpoints are above minConf (otherwise they
-  // ghost-connect to (0,0) when a joint wasn't detected).
+  // ghost-connect to (0,0) when a joint wasn't detected). Edges that touch
+  // a hidden joint are skipped so the wrist-swap lens (which redraws wrists
+  // separately) doesn't show a forearm into thin air.
   for (const [a, b] of EDGES) {
+    if (hideJoints && (hideJoints.has(a) || hideJoints.has(b))) continue;
     const ca = pose.conf[frame * 17 + a];
     const cb = pose.conf[frame * 17 + b];
     if (ca < minConf || cb < minConf) continue;
@@ -91,6 +96,7 @@ export function drawSkeleton(ctx, pose, frame, style = {}) {
 
   // Joints
   for (let j = 0; j < 17; j++) {
+    if (hideJoints && hideJoints.has(j)) continue;
     const c = pose.conf[frame * 17 + j];
     if (c < minConf) continue;
     const x = pose.skeleton[(frame * 17 + j) * 2];

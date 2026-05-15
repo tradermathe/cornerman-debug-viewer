@@ -12,8 +12,9 @@
 
 import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
-import { ForearmProjectionRule } from "./forearm_projection.js";
+import { ArmExtensionRule } from "./arm_extension.js";
 import { EngineCompareRule } from "./engine_compare.js";
+import { WristSwapRule } from "./wrist_swap.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
 import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationRule } from "./hip_rotation.js";
@@ -23,8 +24,9 @@ import { Vision3DRule } from "./vision_3d.js";
 export const RULES = [
   OverviewRule,
   GuardDropRule,
-  ForearmProjectionRule,
+  ArmExtensionRule,
   EngineCompareRule,
+  WristSwapRule,
   StepPunchSyncRule,
   StepDetectorRule,
   HipRotationRule,

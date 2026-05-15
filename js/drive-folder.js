@@ -26,13 +26,17 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // Drive-folder walk indexes exactly the same files a manual folder pick would.
 // (GT labels are pulled live from the Sheet at load time; no sidecar.)
 //
-// Three engine tags now: `yolo` and `vision` are the COCO-17 2D engines;
+// Four engine tags now: `yolo` and `vision` are the COCO-17 2D engines;
 // `vision3d` is the experimental Apple Vision 3D engine producing
 // (N, 17, 4) body-frame metres + an optional `_cam.npy` sidecar with the
-// per-frame cameraOriginMatrix. The 3D files share the same `_r{N}` and
-// `_meta.json` conventions so the slot machinery below is reused as-is.
+// per-frame cameraOriginMatrix; `glove` is a wrist-only sidecar — shape
+// (N, 2, 3) holding (x, y, conf) for [L_wrist, R_wrist] from the trained
+// glove detector, time-aligned with the matching vision cache, used by the
+// wrist-swap lens to replace Vision's wrists at render time.
+// The 3D / glove files share the same `_r{N}` and `_meta.json` conventions
+// so the slot machinery below is reused as-is.
 const CACHE_FILE_RE =
-  /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
+  /^(.+?)_(yolo|vision|vision3d|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
 
 // ── IndexedDB plumbing (tiny manual wrapper to avoid pulling in idb-keyval) ──
 
@@ -190,13 +194,17 @@ export async function walk(rootHandle) {
   await visit(rootHandle);
 
   // Same completeness filter the manual picker applies: drop engines that
-  // don't have both .npy + _meta.json; drop rounds that lost ALL engines.
-  // The 3D engine is treated the same way — it needs its own .npy + meta.
+  // don't have both .npy + _meta.json; drop rounds that lost ALL skeleton
+  // engines. The 3D engine is treated the same way — it needs its own
+  // .npy + meta. The `glove` sidecar follows the same npy+meta requirement,
+  // but does NOT count as a skeleton engine — it's only useful when paired
+  // with vision (it replaces Vision's wrists at render time).
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision", "vision3d"]) {
+      for (const eng of ["yolo", "vision", "vision3d", "glove"]) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
+      // glove alone is useless — needs a skeleton engine to overlay on
       if (!slot.yolo && !slot.vision && !slot.vision3d) rounds.delete(round);
     }
     if (rounds.size === 0) cacheIndex.delete(base);
