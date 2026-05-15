@@ -21,6 +21,7 @@ import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationRule } from "./hip_rotation.js";
 import { FacingDirectionRule } from "./facing_direction.js";
 import { Vision3DRule } from "./vision_3d.js";
+import { OrientationLabelerRule } from "./orientation_labeler.js";
 
 export const RULES = [
   OverviewRule,
@@ -34,4 +35,5 @@ export const RULES = [
   HipRotationRule,
   FacingDirectionRule,
   Vision3DRule,
+  OrientationLabelerRule,
 ];
