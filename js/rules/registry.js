@@ -13,6 +13,7 @@
 import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
 import { ArmExtensionRule } from "./arm_extension.js";
+import { PunchDirectionRule } from "./punch_direction.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { WristSwapRule } from "./wrist_swap.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
@@ -25,6 +26,7 @@ export const RULES = [
   OverviewRule,
   GuardDropRule,
   ArmExtensionRule,
+  PunchDirectionRule,
   EngineCompareRule,
   WristSwapRule,
   StepPunchSyncRule,
