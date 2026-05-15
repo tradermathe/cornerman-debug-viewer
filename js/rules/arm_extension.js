@@ -117,12 +117,17 @@ export const ArmExtensionRule = {
       });
     }
 
-    // Click a punch row to seek
+    // Click a punch row to seek. Same scrubber-dispatch trick the other
+    // lenses use — keeps the seek path single-sourced through the existing
+    // input handler instead of inventing a new API.
     host.addEventListener("click", (ev) => {
       const tr = ev.target.closest("tr[data-frame]");
       if (!tr) return;
       const f = Number(tr.dataset.frame);
-      state.seekFrame?.(f);
+      const slider = document.getElementById("scrubber");
+      if (!slider) return;
+      slider.value = String(f);
+      slider.dispatchEvent(new Event("input"));
     });
   },
 
