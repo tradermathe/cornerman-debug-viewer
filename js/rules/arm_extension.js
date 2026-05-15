@@ -334,16 +334,34 @@ function computeAll(state, cfg) {
     const bendArr  = side === "L" ? bendL : bendR;
     const srcArr   = side === "L" ? sourceL : sourceR;
 
-    let peak = -Infinity, peakFrame = sf, gloveFrames = 0, validFrames = 0;
+    // Pick the peak frame as the most-extended one in the window — that's
+    // the moment of "full extension" that drives the verdict. Prefer max
+    // reach (|sh→wr|/arm_length); fall back to max r (straightness) when
+    // arm_length is unknown so reach is NaN.
+    let peakReachWin = -Infinity, minReachWin = Infinity;
+    let peakRWin = -Infinity, peakFrame = sf, gloveFrames = 0, validFrames = 0;
+    let peakFrameByR = sf, peakFrameByReach = sf;
     for (let f = sf; f <= ef; f++) {
       const r = ratioArr[f];
       if (!Number.isFinite(r)) continue;
       validFrames++;
       if (srcArr[f] === "glove") gloveFrames++;
-      if (r > peak) { peak = r; peakFrame = f; }
+      if (r > peakRWin) { peakRWin = r; peakFrameByR = f; }
+      const rea = reachArr[f];
+      if (Number.isFinite(rea)) {
+        if (rea > peakReachWin) { peakReachWin = rea; peakFrameByReach = f; }
+        if (rea < minReachWin)  minReachWin  = rea;
+      }
     }
-    const peakValid = Number.isFinite(peak);
+    const peakValid = Number.isFinite(peakRWin);
+    peakFrame = (peakReachWin > -Infinity) ? peakFrameByReach : peakFrameByR;
+    const peak = peakValid ? ratioArr[peakFrame] : NaN;
     const peakReach = peakValid ? reachArr[peakFrame] : NaN;
+    // Travel: range of |sh→wr|/arm_length swept during the punch window.
+    // peak − min so static poses (no motion) read ≈ 0, even when reach is
+    // high. Robust to label boundaries that include retraction frames.
+    const peakTravel = (peakReachWin > -Infinity && minReachWin < Infinity)
+      ? (peakReachWin - minReachWin) : NaN;
     // Conjunction predictor:
     //   - "pass" only when geometry says straight AND wrist reached out
     //   - "skip" when straight in 2D but reach is short = depth-foreshortened
@@ -395,6 +413,7 @@ function computeAll(state, cfg) {
       peak: peakValid ? peak : NaN,
       peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
       peak_reach: peakValid ? peakReach : NaN,
+      peak_travel: peakValid ? peakTravel : NaN,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       peak_sh_conf: shConf,
       peak_el_conf: elConf,
@@ -754,6 +773,10 @@ function renderPunchTable() {
                     : COLORS.fail;
           reachCell = `<td style="color:${col};font-variant-numeric:tabular-nums">${p.peak_reach.toFixed(2)}</td>`;
         }
+        // Travel cell — no threshold/coloring yet, observation only.
+        const travelStr = Number.isFinite(p.peak_travel)
+          ? p.peak_travel.toFixed(2) : "—";
+        const travelCell = `<td style="font-variant-numeric:tabular-nums" class="muted">${travelStr}</td>`;
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
@@ -761,12 +784,13 @@ function renderPunchTable() {
           <td style="text-align:center">${match}</td>
           <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
           ${reachCell}
+          ${travelCell}
           ${confCell(p.peak_sh_conf)}
           ${confCell(p.peak_el_conf)}
           ${confCell(p.peak_wr_conf)}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="9" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="10" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
@@ -790,7 +814,8 @@ function renderPunchTable() {
         <thead><tr>
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
           <th>bend</th>
-          <th title="peak reach = |sh→wr| / arm_length at peak frame">reach</th>
+          <th title="peak reach = |sh→wr| / arm_length at peak frame — high means the wrist ENDED far from the shoulder in 2D (mine)">reach</th>
+          <th title="travel = (peak − min) of reach during the punch window — high means the hand SWEPT a big arc in 2D (yours)">travel</th>
           <th title="shoulder confidence at peak frame">sh</th>
           <th title="elbow confidence at peak frame">el</th>
           <th title="wrist confidence at peak frame — glove if used, pose if fallback">wr</th>
