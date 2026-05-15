@@ -947,6 +947,65 @@ function renderAggregate() {
 
 // ─── draw ──────────────────────────────────────────────────────────────────
 
+function drawArmGhost(ctx, pose, frame, side, cfg, scale) {
+  // The lens couldn't score this arm at this frame. Don't go silent —
+  // draw a faded marker at whichever joints we have positions for, and
+  // label the failure reason so the user sees "the lens is here, but
+  // joint X is too low conf to score". Uses raw acromion (not the
+  // corrected anchor) since corrected shoulder needs the gate to pass.
+  const joints = JOINTS_FOR_SIDE[side];
+  const sx = pose.skeleton[(frame * 17 + joints.shoulder) * 2];
+  const sy = pose.skeleton[(frame * 17 + joints.shoulder) * 2 + 1];
+  const ex = pose.skeleton[(frame * 17 + joints.elbow) * 2];
+  const ey = pose.skeleton[(frame * 17 + joints.elbow) * 2 + 1];
+  const wx = pose.skeleton[(frame * 17 + joints.wrist) * 2];
+  const wy = pose.skeleton[(frame * 17 + joints.wrist) * 2 + 1];
+  const sc = pose.conf[frame * 17 + joints.shoulder];
+  const ec = pose.conf[frame * 17 + joints.elbow];
+  const wc = pose.conf[frame * 17 + joints.wrist];
+  const gloveOK = pose.gloveWrists && (() => {
+    const gc = gloveConf(pose.gloveWrists, frame, joints.gloveSide);
+    const [gx] = gloveXY(pose.gloveWrists, frame, joints.gloveSide);
+    return gc >= cfg.minGloveConf && Number.isFinite(gx);
+  })();
+
+  const tooLow = [];
+  if (sc < cfg.minPoseConf) tooLow.push(`sh ${sc.toFixed(2)}`);
+  if (ec < cfg.minPoseConf) tooLow.push(`el ${ec.toFixed(2)}`);
+  if (!gloveOK && wc < cfg.minPoseConf) tooLow.push(`wr ${wc.toFixed(2)}`);
+  if (!tooLow.length) tooLow.push("no wrist signal");
+
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 1.5 * scale;
+  ctx.setLineDash([3 * scale, 3 * scale]);
+  // Bones — only if both ends are finite
+  if (Number.isFinite(sx) && Number.isFinite(ex)) {
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+  }
+  if (Number.isFinite(ex) && Number.isFinite(wx)) {
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(wx, wy); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // Dots at whichever joints are finite
+  for (const [x, y] of [[sx, sy], [ex, ey], [wx, wy]]) {
+    if (!Number.isFinite(x)) continue;
+    ctx.beginPath(); ctx.arc(x, y, 4 * scale, 0, Math.PI * 2); ctx.fill();
+  }
+  // Label near the shoulder (most stable joint) saying why we're hiding
+  if (Number.isFinite(sx)) {
+    const txt = `${side}: ${tooLow.join(", ")}`;
+    ctx.font = `${12 * scale}px ui-monospace, monospace`;
+    const tw = ctx.measureText(txt).width;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(sx + 10 * scale, sy - 9 * scale, tw + 8 * scale, 18 * scale);
+    ctx.fillStyle = "rgba(255,200,80,0.95)";
+    ctx.fillText(txt, sx + 14 * scale, sy + 4 * scale);
+  }
+  ctx.restore();
+}
+
 function rescorePunch(p, cfg) {
   // Mirrors the conjunction in computeAll. Used by UI handlers that
   // change config bits which don't require a per-frame recompute.
@@ -1043,8 +1102,13 @@ function drawArmRatio(ctx, pose, frame, side, ratio, cfg, scale, bodyAxis) {
   // any positions we'd plot are unreliable. Without this gate, the lens
   // happily painted bones/arc at whatever stale coords the pose model
   // returned, which looked like a lagging skeleton on rounds with poor
-  // pose tracking.
-  if (!Number.isFinite(ratio)) return;
+  // pose tracking. BUT we still want to tell the user *why* this side
+  // disappeared — draw a faded ghost with a label showing which joint
+  // failed the conf gate.
+  if (!Number.isFinite(ratio)) {
+    drawArmGhost(ctx, pose, frame, side, cfg, scale);
+    return;
+  }
   const sh = shoulderXY(pose, frame, joints, cfg, bodyAxis);
   const sx = sh.x, sy = sh.y;
   const ex = pose.skeleton[(frame * 17 + joints.elbow) * 2];
