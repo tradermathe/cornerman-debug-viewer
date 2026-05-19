@@ -26,17 +26,27 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // Drive-folder walk indexes exactly the same files a manual folder pick would.
 // (GT labels are pulled live from the Sheet at load time; no sidecar.)
 //
-// Four engine tags now: `yolo` and `vision` are the COCO-17 2D engines;
+// Five engine tags now: `yolo` and `vision` are the COCO-17 2D engines;
 // `vision3d` is the experimental Apple Vision 3D engine producing
 // (N, 17, 4) body-frame metres + an optional `_cam.npy` sidecar with the
 // per-frame cameraOriginMatrix; `glove` is a wrist-only sidecar — shape
 // (N, 2, 3) holding (x, y, conf) for [L_wrist, R_wrist] from the trained
 // glove detector, time-aligned with the matching vision cache, used by the
 // wrist-swap lens to replace Vision's wrists at render time.
+// `vision_combined` is a synthetic tag we apply to `_vision_` files that
+// live inside a `pose_cache_v*/` folder — the production-shaped cache built
+// by glove_wrist_cache_build.ipynb §8 with glove wrists baked into joints 9/10.
 // The 3D / glove files share the same `_r{N}` and `_meta.json` conventions
 // so the slot machinery below is reused as-is.
 const CACHE_FILE_RE =
   /^(.+?)_(yolo|vision|vision3d|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
+const COMBINED_DIR_RE = /^pose_cache_v/i;
+function classifyEngine(engine, parentDirName) {
+  if (engine === "vision" && parentDirName && COMBINED_DIR_RE.test(parentDirName)) {
+    return "vision_combined";
+  }
+  return engine;
+}
 
 // ── IndexedDB plumbing (tiny manual wrapper to avoid pulling in idb-keyval) ──
 
@@ -169,9 +179,13 @@ export async function walk(rootHandle) {
       if (name.endsWith(".bak.npy")) continue;
       const m = name.match(CACHE_FILE_RE);
       if (!m) continue;
-      const [, base, engine, roundStr, suffix, ext] = m;
+      const [, base, rawEngine, roundStr, suffix, ext] = m;
       const round = parseInt(roundStr);
       if (ext === "json" && !suffix) continue;
+      // Parent-folder hint disambiguates `pose_cache_v5/foo_vision_r0.npy`
+      // (combined cache with glove wrists baked in) from `apple_vision_pose_cache/`
+      // (raw vision). Same filename pattern; only the folder differs.
+      const engine = classifyEngine(rawEngine, dirHandle.name);
       // The 3D loader expects `npy` (data) and `_cam.npy` (camera matrices)
       // to live in the same engine slot. The cam .npy isn't required —
       // viewer is happy without it — but if present, stash it as `cam`.
@@ -199,13 +213,17 @@ export async function walk(rootHandle) {
   // .npy + meta. The `glove` sidecar follows the same npy+meta requirement,
   // but does NOT count as a skeleton engine — it's only useful when paired
   // with vision (it replaces Vision's wrists at render time).
+  // `vision_combined` IS a skeleton engine — it's a full COCO-17 pose, just
+  // with wrists 9/10 replaced by glove predictions on confident frames.
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision", "vision3d", "glove"]) {
+      for (const eng of ["yolo", "vision", "vision3d", "glove", "vision_combined"]) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
       // glove alone is useless — needs a skeleton engine to overlay on
-      if (!slot.yolo && !slot.vision && !slot.vision3d) rounds.delete(round);
+      if (!slot.yolo && !slot.vision && !slot.vision3d && !slot.vision_combined) {
+        rounds.delete(round);
+      }
     }
     if (rounds.size === 0) cacheIndex.delete(base);
   }

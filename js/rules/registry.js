@@ -16,6 +16,7 @@ import { ArmExtensionRule } from "./arm_extension.js";
 import { PunchDirectionRule } from "./punch_direction.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { WristSwapRule } from "./wrist_swap.js";
+import { CombinedCompareRule } from "./combined_compare.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
 import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationRule } from "./hip_rotation.js";
@@ -30,6 +31,7 @@ export const RULES = [
   PunchDirectionRule,
   EngineCompareRule,
   WristSwapRule,
+  CombinedCompareRule,
   StepPunchSyncRule,
   StepDetectorRule,
   HipRotationRule,

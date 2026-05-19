@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-15.16";
+const BUILD = "2026-05-19.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -60,6 +60,22 @@ const els = {
 // FileSystemFileHandle objects (Drive folder). loadFromIndex calls
 // drive.toFile() on values when it's actually time to load.
 // Survives across video picks within one page session.
+//
+// Engine slots: `yolo`, `vision`, `vision3d`, `glove` are recognized by
+// filename. `vision_combined` is a synthetic tag we apply when a `_vision_`
+// file lives inside a folder whose name starts with `pose_cache_v` — that's
+// the "Apple Vision skeleton with glove-model wrists baked in" cache built
+// by glove_wrist_cache_build.ipynb §8. Filename pattern collides with raw
+// vision; the parent-folder hint is what disambiguates.
+const ENGINE_TAGS = ["yolo", "vision", "vision3d", "glove", "vision_combined"];
+const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "vision_combined"];
+const COMBINED_DIR_RE = /^pose_cache_v/i;
+function classifyEngine(engine, parentDir) {
+  if (engine === "vision" && parentDir && COMBINED_DIR_RE.test(parentDir)) {
+    return "vision_combined";
+  }
+  return engine;
+}
 let cacheIndex = null;
 
 // Drive-folder state: a separate index of video filename -> FileSystemFileHandle
@@ -342,9 +358,16 @@ function onCacheFolder(e) {
       /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
     );
     if (!m) continue;
-    const [, base, engine, roundStr, suffix, ext] = m;
+    const [, base, rawEngine, roundStr, suffix, ext] = m;
     const round = parseInt(roundStr);
     if (ext === "json" && !suffix) continue;
+    // webkitRelativePath is "pickedFolder/.../file.npy" — the immediate parent
+    // directory is what disambiguates `pose_cache_v5/foo_vision_r0.npy` (the
+    // combined cache) from `apple_vision_pose_cache/foo_vision_r0.npy` (raw).
+    const relPath = f.webkitRelativePath || "";
+    const segs = relPath.split("/");
+    const parentDir = segs.length >= 2 ? segs[segs.length - 2] : "";
+    const engine = classifyEngine(rawEngine, parentDir);
 
     if (!cacheIndex.has(base)) cacheIndex.set(base, new Map());
     const rounds = cacheIndex.get(base);
@@ -363,10 +386,10 @@ function onCacheFolder(e) {
   // and cam-matrix sidecars are optional — their absence is fine.
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision", "vision3d"]) {
+      for (const eng of ENGINE_TAGS) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
-      if (!slot.yolo && !slot.vision && !slot.vision3d) rounds.delete(round);
+      if (!SKELETON_ENGINES.some(eng => slot[eng])) rounds.delete(round);
     }
     if (rounds.size === 0) cacheIndex.delete(base);
   }
@@ -391,20 +414,22 @@ function onCacheClear() {
 
 function refreshCacheStatus() {
   const nVideos = cacheIndex?.size || 0;
-  let nRounds = 0, nYolo = 0, nVision = 0, nVision3D = 0;
+  let nRounds = 0, nYolo = 0, nVision = 0, nVision3D = 0, nCombined = 0;
   for (const rounds of cacheIndex?.values() || []) {
     for (const slot of rounds.values()) {
       nRounds++;
-      if (slot.yolo)     nYolo++;
-      if (slot.vision)   nVision++;
-      if (slot.vision3d) nVision3D++;
+      if (slot.yolo)             nYolo++;
+      if (slot.vision)           nVision++;
+      if (slot.vision3d)         nVision3D++;
+      if (slot.vision_combined)  nCombined++;
     }
   }
   if (nRounds) {
     const parts = [];
-    if (nYolo)     parts.push(`${nYolo} YOLO`);
-    if (nVision)   parts.push(`${nVision} Apple Vision`);
-    if (nVision3D) parts.push(`${nVision3D} Vision 3D`);
+    if (nYolo)      parts.push(`${nYolo} YOLO`);
+    if (nVision)    parts.push(`${nVision} Apple Vision`);
+    if (nVision3D)  parts.push(`${nVision3D} Vision 3D`);
+    if (nCombined)  parts.push(`${nCombined} Vision+glove`);
     els.cacheStatus.textContent =
       `— ${nRounds} rounds across ${nVideos} videos (${parts.join(" + ")})`;
     if (els.cacheSection) els.cacheSection.open = false;
@@ -458,6 +483,7 @@ function loadVideoOnly(videoFile, errMessage) {
       if (token !== currentLoadToken) return;
       state.pose = null;
       state.poseSecondary = null;
+      state.poseCombined = null;
       state.pose3d = null;
       state.n_frames = 0;
       state.frame = 0;
@@ -592,8 +618,23 @@ function loadFromIndex(videoFile, slot) {
           console.warn("glove wrists load failed:", err.message);
         }
       }
+      // Optional: combined vision+glove cache (pose_cache_v*/). Same shape as
+      // a raw vision cache but with wrists 9/10 replaced where the glove
+      // model was confident. Carried separately so combined_compare can
+      // overlay it against the raw vision pose.
+      let poseCombined = null;
+      if (slot.vision_combined) {
+        try {
+          const cNpy  = await drive.toFile(slot.vision_combined.npy);
+          const cMeta = await drive.toFile(slot.vision_combined.meta);
+          poseCombined = await loadPose([cNpy, cMeta], size);
+          poseCombined.engine = "apple_vision_2d_combined";
+        } catch (err) {
+          console.warn("combined pose load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches, pose3d);
+      start(posePrimary, poseSecondary, punches, pose3d, poseCombined);
 
       // Live GT labels: derive a basename from the cache filename, then hit
       // the Sheet. Best-effort — failure just leaves state.labels null so
@@ -737,9 +778,10 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
+  state.poseCombined = poseCombined;     // optional vision+glove combined cache
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()

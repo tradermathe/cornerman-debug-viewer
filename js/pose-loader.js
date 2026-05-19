@@ -88,6 +88,7 @@ async function loadNpy(npyFile, metaFile, videoSize) {
     engine: "yolo_pose",
     source: npyFile.name,
     normalised,
+    meta,                // parsed _meta.json — lenses read extras (e.g. wrist_run)
   };
 }
 
