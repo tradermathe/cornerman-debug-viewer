@@ -52,10 +52,10 @@ function ankleVecAt(pose, f, stance) {
   const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
   if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
   // Same convention as orientation_lens / 07_punch_directions:
-  // orthodox = L→R, southpaw = R→L.
+  // orthodox arrow points R→L (toward front foot); southpaw L→R.
   const orthodox = stance !== "southpaw";
-  const dx = orthodox ? (rx - lx) : (lx - rx);
-  const dy = orthodox ? (ry - ly) : (ly - ry);
+  const dx = orthodox ? (lx - rx) : (rx - lx);
+  const dy = orthodox ? (ly - ry) : (ry - ly);
   if (dx * dx + dy * dy < 1e-6) return null;
   return { lx, ly, rx, ry, dx, dy };
 }
@@ -410,14 +410,13 @@ export const PunchDirectionReviewRule = {
       ctx.fillStyle = COLOR_RAW;
       ctx.lineWidth = 2.5 * s;
       ctx.beginPath();
-      // Draw from L ankle to R ankle for orthodox; reverse for southpaw.
-      // Since `live.dx` already encodes direction, derive endpoints from the
-      // L/R coords stored on `live`.
+      // Orthodox: tail at R (back foot), head at L (front foot).
+      // Southpaw: mirrored. Matches window_arrow / orientation_lens.
       const orthodox = det.stance !== "southpaw";
-      const sx = orthodox ? live.lx : live.rx;
-      const sy = orthodox ? live.ly : live.ry;
-      const ex = orthodox ? live.rx : live.lx;
-      const ey = orthodox ? live.ry : live.ly;
+      const sx = orthodox ? live.rx : live.lx;
+      const sy = orthodox ? live.ry : live.ly;
+      const ex = orthodox ? live.lx : live.rx;
+      const ey = orthodox ? live.ly : live.ry;
       ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       // small dots at each ankle for spatial context
       for (const [x, y] of [[live.lx, live.ly], [live.rx, live.ry]]) {

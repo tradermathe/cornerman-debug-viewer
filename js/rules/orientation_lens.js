@@ -32,13 +32,14 @@ import { fetchOrientationForStem } from "../sheet-labels.js";
 // snippet printed by its last cell, replacing this block, and pushing.
 // The fit changes infrequently — a code edit beats infra plumbing.
 //
-// Provenance: 06_ankle_arrow.py 2026-05-21 n=183 chest-label fit,
-// translated to the L→R arrow convention adopted 2026-05-21 (was
-// "front − back by stance", now anchored to anatomy). These are
-// placeholders — refit with 07_punch_directions.ipynb once dense.
+// Provenance: 07_punch_directions.ipynb 2026-05-21 n=2046, translated
+// to the "arrow points to FRONT foot" convention adopted 2026-05-21
+// (orthodox arrow = R→L; southpaw = L→R — still anchored to L/R
+// anatomy for stability, just visually points forward instead of back).
+// Refit with 07_punch_directions.ipynb when label count grows.
 export const STANCE_FITS = {
-  orthodox: { sign: -1, offset_deg: -121.2 },
-  southpaw: { sign: -1, offset_deg: -79.4 },
+  orthodox: { sign: -1, offset_deg: 59.1 },   // was -120.9 under L→R convention
+  southpaw: { sign: -1, offset_deg: 104.6 },  // was -75.4 under L→R convention
 };
 
 const MIN_ANKLE_CONF = 0.30;
@@ -84,18 +85,17 @@ function ankleArrow(pose, f, stance) {
   const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
   const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
   if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
-  // Arrow convention (2026-05-21): orthodox always points L→R, southpaw R→L.
-  // Anchored to L/R anatomy (not stance front/back) so the arrow stays
-  // visually stable through pivots / mid-punch when the front-foot
-  // assignment would otherwise briefly flip. fx/fy = arrowhead end,
-  // bx/by = tail end — names kept from the old convention to minimise
-  // downstream diff; "front" here means "head of drawn arrow", not
-  // "front foot in stance".
+  // Arrow convention (2026-05-21 v2): orthodox arrow points R→L (toward
+  // the boxer's FRONT foot); southpaw points L→R (also toward front).
+  // Still anchored to L/R anatomy (not stance "front/back") so the arrow
+  // stays stable through pivots — we just flipped which end gets the
+  // arrowhead so visually it points the way the boxer is going.
+  // fx/fy = arrowhead end (front foot), bx/by = tail end (back foot).
   const orthodox = stance !== "southpaw";
-  const fx = orthodox ? rx : lx;
-  const fy = orthodox ? ry : ly;
-  const bx = orthodox ? lx : rx;
-  const by = orthodox ? ly : ry;
+  const fx = orthodox ? lx : rx;
+  const fy = orthodox ? ly : ry;
+  const bx = orthodox ? rx : lx;
+  const by = orthodox ? ry : ly;
   const dx = fx - bx, dy = fy - by;
   if (dx * dx + dy * dy < 1e-6) return null;
   return { lx, ly, rx, ry, fx, fy, bx, by, dx, dy,
