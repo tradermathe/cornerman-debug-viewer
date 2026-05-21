@@ -268,9 +268,50 @@ function installKeyHandlers(state) {
 }
 
 // ─── sidebar ──────────────────────────────────────────────────────────────
+// Two-pass design: buildSidebarSkeleton() runs ONCE per mount and creates
+// the static structure (buttons, layout) so button click listeners persist.
+// rebuildSidebar() runs every update() call and only mutates the dynamic
+// text inside specific spans/divs — never replaces the buttons. Previous
+// design re-set host.innerHTML on every frame, which destroyed the buttons
+// faster than a click could complete → click events lost.
+
+let latestState = null;  // module-level so static listeners can use latest
+
+function buildSidebarSkeleton() {
+  if (!host) return;
+  host.innerHTML = `
+    <h2>Punch direction review</h2>
+    <p class="hint">
+      <span style="color:${COLOR_RAW}">●</span> raw per-frame arrow ·
+      <span style="color:${COLOR_MEDIAN}">●</span> median arrow over window ·
+      <span style="color:${COLOR_PRED}">●</span> predicted facing ·
+      <span style="color:${COLOR_GT}">●</span> GT label
+    </p>
+    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
+      <button id="pdr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
+      <button id="pdr-next" class="orient-btn-action secondary" style="padding:6px 10px;">next (N) ⏭</button>
+      <span id="pdr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
+    </div>
+    <div id="pdr-state" class="hint" style="line-height:1.55;"></div>
+    <p class="hint" style="margin-top:14px; font-size:11px;">
+      Punch loops automatically within [start, end]. Use N/P to step through
+      punches. The lens iterates every punch_uuid in Combined Data for this
+      video — GT arrow only draws when a Punch Directions row exists.
+    </p>
+  `;
+  // Listeners attached once, persist for the life of the mount. They read
+  // the freshest state from latestState (updated by rebuildSidebar / mount).
+  host.querySelector("#pdr-prev")?.addEventListener("click",
+    () => seekToPunch(activeIdx - 1, latestState));
+  host.querySelector("#pdr-next")?.addEventListener("click",
+    () => seekToPunch(activeIdx + 1, latestState));
+}
 
 function rebuildSidebar(state) {
   if (!host) return;
+  latestState = state;
+  // First call after mount: build the static skeleton.
+  if (!host.querySelector("#pdr-state")) buildSidebarSkeleton();
 
   const current = labelledPunches[activeIdx] || null;
   const det = current?.detection;
@@ -290,38 +331,12 @@ function rebuildSidebar(state) {
   const liveAngle = liveVec
     ? Math.atan2(liveVec.dy, liveVec.dx) * 180 / Math.PI : null;
 
-  host.innerHTML = `
-    <h2>Punch direction review</h2>
-    <p class="hint">
-      <span style="color:${COLOR_RAW}">●</span> raw per-frame arrow ·
-      <span style="color:${COLOR_MEDIAN}">●</span> median arrow over window ·
-      <span style="color:${COLOR_PRED}">●</span> predicted facing ·
-      <span style="color:${COLOR_GT}">●</span> GT label
-    </p>
-    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
-      <button id="pdr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
-      <button id="pdr-next" class="orient-btn-action secondary" style="padding:6px 10px;">next (N) ⏭</button>
-      <span id="pdr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
-    </div>
-    <div id="pdr-state" class="hint" style="line-height:1.55;"></div>
-    <p class="hint" style="margin-top:14px; font-size:11px;">
-      Punch loops automatically within [start, end]. Use N/P to step through
-      labelled punches. The lens skips punches without a label in the
-      "Punch Directions" sheet.
-    </p>
-  `;
-
   const counter = host.querySelector("#pdr-counter");
   if (counter) {
     counter.textContent = labelledPunches.length
       ? `${activeIdx + 1} / ${labelledPunches.length}`
       : "no labelled punches";
   }
-
-  host.querySelector("#pdr-prev")?.addEventListener("click",
-    () => seekToPunch(activeIdx - 1, state));
-  host.querySelector("#pdr-next")?.addEventListener("click",
-    () => seekToPunch(activeIdx + 1, state));
 
   const el = host.querySelector("#pdr-state");
   if (!el) return;
