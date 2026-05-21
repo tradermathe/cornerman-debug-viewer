@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-21.2";
+const BUILD = "2026-05-21.3";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -760,7 +760,11 @@ function stripCacheSuffix(fileName) {
   if (!fileName) return null;
   return fileName
     .replace(/\.npy$/i, "")
-    .replace(/_(yolo|vision)_r\d+$/i, "");
+    // Strip any recognised cache-shape tail. Engines are
+    // yolo/vision/vision3d/glove/vision_combined per ENGINE_TAGS;
+    // anything else falls through and we hand the raw stem to the
+    // auto-matcher's fuzzy logic.
+    .replace(/_(yolo|vision3d|vision_combined|vision|glove)_r\d+$/i, "");
 }
 
 // Fire a best-effort live-label fetch. Doesn't block UI. On success, sets
