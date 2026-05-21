@@ -42,22 +42,34 @@ function wrap180(deg) { return ((deg + 180) % 360 + 360) % 360 - 180; }
 
 // ─── geometry helpers ─────────────────────────────────────────────────────
 
-function ankleVecAt(pose, f, stance) {
-  const cL = pose.conf[f * 17 + J.L_ANKLE];
-  const cR = pose.conf[f * 17 + J.R_ANKLE];
-  if (cL < MIN_ANKLE_CONF || cR < MIN_ANKLE_CONF) return null;
+// Loose: no confidence gate, just requires the ankle xy to be finite
+// numbers. Used by the visual draw — the live amber arrow should not
+// flicker off whenever the pose detector loses brief confidence mid-punch
+// (which happens during load-up / follow-through routinely). Returns
+// minConf so the caller can style low-confidence frames differently.
+function ankleVecLoose(pose, f, stance) {
   const lx = pose.skeleton[(f * 17 + J.L_ANKLE) * 2];
   const ly = pose.skeleton[(f * 17 + J.L_ANKLE) * 2 + 1];
   const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
   const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
   if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
-  // Same convention as orientation_lens / 07_punch_directions:
-  // orthodox arrow points R→L (toward front foot); southpaw L→R.
+  // Arrow convention (2026-05-21 v2): orthodox arrow points R→L (toward
+  // front foot); southpaw L→R.
   const orthodox = stance !== "southpaw";
   const dx = orthodox ? (lx - rx) : (rx - lx);
   const dy = orthodox ? (ly - ry) : (ry - ly);
   if (dx * dx + dy * dy < 1e-6) return null;
-  return { lx, ly, rx, ry, dx, dy };
+  const cL = pose.conf[f * 17 + J.L_ANKLE];
+  const cR = pose.conf[f * 17 + J.R_ANKLE];
+  return { lx, ly, rx, ry, dx, dy, minConf: Math.min(cL, cR) };
+}
+
+// Strict: gated by MIN_ANKLE_CONF. Used by computeMedianArrow — the
+// median fit must stay on clean frames or it gets noisier.
+function ankleVecAt(pose, f, stance) {
+  const v = ankleVecLoose(pose, f, stance);
+  if (!v || v.minConf < MIN_ANKLE_CONF) return null;
+  return v;
 }
 
 function hipMidAt(pose, f) {
@@ -264,7 +276,9 @@ function rebuildSidebar(state) {
     ? Math.abs(wrap180(predFromMedian - gt)) : null;
 
   const f = state.frame;
-  const liveVec = det ? ankleVecAt(state.pose, f, det.stance) : null;
+  // Loose so the sidebar's live-arrow readout doesn't blink off on
+  // low-conf frames (matches the visual draw).
+  const liveVec = det ? ankleVecLoose(state.pose, f, det.stance) : null;
   const liveAngle = liveVec
     ? Math.atan2(liveVec.dy, liveVec.dx) * 180 / Math.PI : null;
 
@@ -421,10 +435,15 @@ export const PunchDirectionReviewRule = {
     const f = state.frame;
     const s = state.renderScale || 1;
 
-    // (1) Live per-frame raw arrow — same as orientation_lens.
-    const live = ankleVecAt(state.pose, f, det.stance);
+    // (1) Live per-frame raw arrow. Use the LOOSE ankle vec (no conf gate)
+    // so the amber arrow doesn't flicker off mid-punch — pose-detector
+    // confidence routinely dips during load-up / follow-through. When conf
+    // is below the strict threshold we still draw, just at half opacity
+    // as a visual hint that this frame is uncertain.
+    const live = ankleVecLoose(state.pose, f, det.stance);
     if (live) {
       ctx.save();
+      ctx.globalAlpha = live.minConf >= MIN_ANKLE_CONF ? 1.0 : 0.5;
       ctx.strokeStyle = COLOR_RAW;
       ctx.fillStyle = COLOR_RAW;
       ctx.lineWidth = 2.5 * s;
@@ -449,6 +468,9 @@ export const PunchDirectionReviewRule = {
     }
 
     // Ankle midpoint of CURRENT frame — anchor for the median arrow.
+    // Use loose ankleVec here too so the orange median arrow stays anchored
+    // even on low-conf frames; the median value itself is still computed
+    // from the strict ankleVecAt above (in computeMedianArrow).
     let ankleMid = null;
     if (live) {
       ankleMid = { x: 0.5 * (live.lx + live.rx), y: 0.5 * (live.ly + live.ry) };
