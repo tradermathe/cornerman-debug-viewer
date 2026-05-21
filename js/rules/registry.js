@@ -23,6 +23,7 @@ import { HipRotationRule } from "./hip_rotation.js";
 import { FacingDirectionRule } from "./facing_direction.js";
 import { Vision3DRule } from "./vision_3d.js";
 import { OrientationLabelerRule } from "./orientation_labeler.js";
+import { OrientationLensRule } from "./orientation_lens.js";
 
 export const RULES = [
   OverviewRule,
@@ -38,4 +39,5 @@ export const RULES = [
   FacingDirectionRule,
   Vision3DRule,
   OrientationLabelerRule,
+  OrientationLensRule,
 ];
