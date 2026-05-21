@@ -377,19 +377,28 @@ export const PunchDirectionReviewRule = {
   update(state) {
     ensureFetched(state);
     rebuildLabelledPunches(state);
-    // If the user has scrubbed entirely OUT of the active punch's window,
-    // hop to whichever labelled punch the cursor is now inside. Inside the
-    // active window we stay locked — combos overlap in time, and without
-    // this lock the loop-snap-back to the active punch's start would
-    // immediately re-detect "now inside the OTHER overlapping punch" and
-    // bounce between two activeIdx values.
+    // If the user has scrubbed entirely AWAY from the active punch's window,
+    // hop to whichever labelled punch the cursor is now inside. Inside (or
+    // within a short tolerance of) the active window we stay locked.
+    //
+    // The tolerance handles a race: when playback crosses the end of the
+    // active punch, the viewer's timeupdate listener updates state.frame
+    // to `end+1` BEFORE my lens-installed timeupdate handler fires its
+    // snap-back. update() runs in between — and without tolerance it sees
+    // "frame outside active, frame inside overlapping punch 16" and
+    // switches. Then the snap snaps to the WRONG punch's start. Flip-flop.
+    //
+    // 15-frame tolerance (~500ms at 30fps) absorbs that gap while staying
+    // small enough that real manual scrubs to neighbouring punches still
+    // auto-switch correctly.
+    const ACTIVE_TOLERANCE_FRAMES = 15;
     if (labelledPunches.length) {
       const f = state.frame;
       const active = activeIdx >= 0 ? labelledPunches[activeIdx] : null;
-      const stillInActive = active &&
-        f >= active.detection.start_frame &&
-        f <= active.detection.end_frame;
-      if (!stillInActive) {
+      const nearActive = active &&
+        f >= active.detection.start_frame - ACTIVE_TOLERANCE_FRAMES &&
+        f <= active.detection.end_frame   + ACTIVE_TOLERANCE_FRAMES;
+      if (!nearActive) {
         const inside = labelledPunches.findIndex(p =>
           f >= p.detection.start_frame && f <= p.detection.end_frame);
         if (inside !== -1 && inside !== activeIdx) {
