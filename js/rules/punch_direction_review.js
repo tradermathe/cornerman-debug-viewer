@@ -169,25 +169,33 @@ function rebuildLabelledPunches(state) {
   lastDetectionsRef = dets;
   lastStemForReset = stem;
 
+  // Include every punch from Combined Data — labelled OR not. Direction
+  // labels (GT) get attached when present so the red dashed arrow can
+  // draw, but their absence doesn't block review. The amber raw / orange
+  // median / cyan predicted arrows always draw — that's the whole point
+  // when you're scrubbing through a video to sanity-check the model on
+  // unlabelled footage.
   const next = [];
+  let nWithGt = 0;
   for (const det of dets || []) {
     if (!det.punch_uuid) continue;
     const gt = byUuidMap.get(det.punch_uuid);
-    if (!gt) continue;
     const median = computeMedianArrow(state.pose, det);
     next.push({
       detection: det,
-      gtLabel: gt.label,
-      gtLabeler: gt.labeler,
+      gtLabel:   gt ? gt.label   : null,
+      gtLabeler: gt ? gt.labeler : null,
+      hasGt:     !!gt,
       median,
     });
+    if (gt) nWithGt++;
   }
   next.sort((a, b) => a.detection.start_frame - b.detection.start_frame);
 
   const totalDets = dets?.length || 0;
-  fetchInfo = `${next.length} labelled punches in this video`
+  fetchInfo = `${next.length} punches · ${nWithGt} with GT direction label`
     + (totalDets > next.length
-        ? ` (${totalDets - next.length} unlabelled — skipped)` : "");
+        ? ` (${totalDets - next.length} skipped — no punch_uuid)` : "");
 
   const hadNone = labelledPunches.length === 0;
   labelledPunches = next;
@@ -338,16 +346,8 @@ function rebuildSidebar(state) {
     lines.push(`<span class="bad">Combined Data has 0 detections for this video</span>`);
     lines.push(`<span class="muted">cacheBasename: <code>${state.cacheBasename || "(none)"}</code>, sheet matched: <code>${state.labels.source_video || "(none)"}</code></span>`);
   } else if (!labelledPunches.length) {
-    const total = state.labels.detections.length;
-    lines.push(`<span class="bad">Combined Data has ${total} detections for this video, but none have a row in Punch Directions.</span>`);
-    lines.push(`<span class="muted">Either the punch_uuid format differs across sheets, or this video has Combined Data labels but no direction labels yet.</span>`);
-    lines.push(`<span class="muted">byUuidMap size: ${byUuidMap.size} (total across all videos)</span>`);
-    // Surface a few uuid samples so the user can spot a format mismatch.
-    const sampleDet = state.labels.detections.slice(0, 3)
-      .map(d => d.punch_uuid || "(blank)").join(", ");
-    const sampleDir = [...byUuidMap.keys()].slice(0, 3).join(", ");
-    lines.push(`<span class="muted">First 3 detection uuids: <code>${sampleDet}</code></span>`);
-    lines.push(`<span class="muted">First 3 direction uuids: <code>${sampleDir}</code></span>`);
+    lines.push(`<span class="bad">Combined Data has 0 detections with a punch_uuid for this video.</span>`);
+    lines.push(`<span class="muted">Either this video has no punch labels yet, or the rows are missing punch_uuid values.</span>`);
   } else if (det) {
     lines.push(`<code>${det.punch_type}</code> · stance <code>${det.stance}</code>`);
     lines.push(`frames <code>${det.start_frame}-${det.end_frame}</code> (${(det.end_frame - det.start_frame + 1)} frames)`);
@@ -364,9 +364,11 @@ function rebuildSidebar(state) {
     }
     if (gt != null) {
       lines.push(`<span style="color:${COLOR_GT}">GT label:</span> <code>${gt.toFixed(1)}°</code>${current.gtLabeler ? ` by ${current.gtLabeler}` : ""}`);
-    }
-    if (err != null) {
-      lines.push(`error: <code>${err.toFixed(1)}°</code>`);
+      if (err != null) {
+        lines.push(`error: <code>${err.toFixed(1)}°</code>`);
+      }
+    } else {
+      lines.push(`<span class="muted">no GT direction label — prediction only</span>`);
     }
   }
   el.innerHTML = lines.join("<br>");
