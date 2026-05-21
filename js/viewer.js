@@ -700,6 +700,9 @@ function loadFromFiles(videoFile, poseFiles) {
 }
 
 function populateRoundSelect(rounds) {
+  // start()→setRule() rebuilds this dropdown on every load, so the user's
+  // pick has to survive the rebuild or it visually snaps back to r0.
+  const prev = els.roundSel.value;
   els.roundSel.innerHTML = "";
   if (!rounds || rounds.size === 0) {
     els.roundSel.innerHTML = `<option value="">—</option>`;
@@ -722,6 +725,9 @@ function populateRoundSelect(rounds) {
     if (ok) enabledCount++;
   }
   els.roundSel.disabled = enabledCount < 2;
+  if (prev && [...els.roundSel.options].some(o => o.value === prev && !o.disabled)) {
+    els.roundSel.value = prev;
+  }
 }
 
 // Strip extension; the cache files were named after the source video so
