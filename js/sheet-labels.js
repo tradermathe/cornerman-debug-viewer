@@ -25,6 +25,7 @@ const PUBLIC_SHEET_ID = "1CewEaweCBw9F-qSvNapiQMNj4wnidHqLA-I19whrly0";
 const COMBINED_SHEET = "Combined Data";
 const FORM_LABELS_SHEET = "Combined Form Labels";
 const ORIENTATION_SHEET = "Orientation Labels";
+const PUNCH_DIR_SHEET = "Punch Directions";
 // Form-rule fields we surface on each detection so per-rule lenses can
 // score their predictions against the coach's verdict.
 const FORM_LABEL_KEYS = [
@@ -314,6 +315,47 @@ export async function fetchOrientationForStem(videoStem, { force = false } = {})
     byKey.set(`${round}:${frame}`, { label, labeler: r.labeler || "", ts: r.ts || "" });
   }
   return { byKey, countForVideo, totalRows: rows.length };
+}
+
+// Punch Directions tab — per-punch facing labels, keyed by punch_uuid.
+// Written by the orientation labeler's PUNCH mode. Same gviz fetch pattern
+// as orientation labels.
+let cachedPunchDirRows = null;
+let cachedPunchDirFetchedAt = 0;
+
+async function fetchPunchDirRows({ force = false } = {}) {
+  if (!force && cachedPunchDirRows
+      && Date.now() - cachedPunchDirFetchedAt < CACHE_TTL_MS) {
+    return cachedPunchDirRows;
+  }
+  const url =
+    `https://docs.google.com/spreadsheets/d/${PUBLIC_SHEET_ID}` +
+    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(PUNCH_DIR_SHEET)}`;
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${PUNCH_DIR_SHEET}`);
+  cachedPunchDirRows = parseCsv(await r.text());
+  cachedPunchDirFetchedAt = Date.now();
+  return cachedPunchDirRows;
+}
+
+// Returns Map<punch_uuid, {label, labeler, ts}> across all videos. Lens code
+// joins to its own detections by uuid. Drops deleted + skip rows.
+export async function fetchPunchDirectionsAll({ force = false } = {}) {
+  let rows;
+  try { rows = await fetchPunchDirRows({ force }); }
+  catch (err) { return { error: err.message, byUuid: new Map() }; }
+  const byUuid = new Map();
+  for (const r of rows) {
+    if (String(r.deleted ?? "") === "1") continue;
+    const lbl = String(r.label ?? "").trim();
+    if (lbl === "") continue;
+    const uuid = String(r.punch_uuid ?? "").trim();
+    if (!uuid) continue;
+    const label = Number(lbl);
+    if (!Number.isFinite(label)) continue;
+    byUuid.set(uuid, { label, labeler: r.labeler || "", ts: r.ts || "" });
+  }
+  return { byUuid, totalRows: rows.length };
 }
 
 // Top-level convenience: given a cache basename + cache offset + fps + frame

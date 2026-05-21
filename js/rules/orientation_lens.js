@@ -36,7 +36,7 @@ import { fetchOrientationForStem } from "../sheet-labels.js";
 // translated to the L→R arrow convention adopted 2026-05-21 (was
 // "front − back by stance", now anchored to anatomy). These are
 // placeholders — refit with 07_punch_directions.ipynb once dense.
-const STANCE_FITS = {
+export const STANCE_FITS = {
   orthodox: { sign: -1, offset_deg: -121.2 },
   southpaw: { sign: -1, offset_deg: -79.4 },
 };
