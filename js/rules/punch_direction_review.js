@@ -304,10 +304,36 @@ function rebuildSidebar(state) {
   const el = host.querySelector("#pdr-state");
   if (!el) return;
   const lines = [];
+
+  // Diagnose: which side of the join is missing?
+  // - byUuidMap null → Punch Directions sheet still fetching (or failed)
+  // - state.labels null → Combined Data not loaded yet
+  // - state.labels.error → Combined Data load failed (e.g., auto-match)
+  // - state.labels.detections empty → no rows for this video in Combined Data
+  // - labelledPunches empty BUT detections present → no uuid overlap
   if (fetchError) {
-    lines.push(`<span class="bad">label fetch failed: ${fetchError}</span>`);
+    lines.push(`<span class="bad">Punch Directions fetch failed: ${fetchError}</span>`);
+  } else if (!byUuidMap) {
+    lines.push(`<span class="muted">Fetching Punch Directions sheet…</span>`);
+  } else if (!state.labels) {
+    lines.push(`<span class="muted">Combined Data not loaded yet — waiting for tryLiveLabels…</span>`);
+  } else if (state.labels.error) {
+    lines.push(`<span class="bad">Combined Data error: ${state.labels.error}</span>`);
+    lines.push(`<span class="muted">cacheBasename used for match: <code>${state.cacheBasename || "(none)"}</code></span>`);
+  } else if (!state.labels.detections || state.labels.detections.length === 0) {
+    lines.push(`<span class="bad">Combined Data has 0 detections for this video</span>`);
+    lines.push(`<span class="muted">cacheBasename: <code>${state.cacheBasename || "(none)"}</code>, sheet matched: <code>${state.labels.source_video || "(none)"}</code></span>`);
   } else if (!labelledPunches.length) {
-    lines.push(`<span class="muted">${fetchInfo || "no punch direction labels for this video"}</span>`);
+    const total = state.labels.detections.length;
+    lines.push(`<span class="bad">Combined Data has ${total} detections for this video, but none have a row in Punch Directions.</span>`);
+    lines.push(`<span class="muted">Either the punch_uuid format differs across sheets, or this video has Combined Data labels but no direction labels yet.</span>`);
+    lines.push(`<span class="muted">byUuidMap size: ${byUuidMap.size} (total across all videos)</span>`);
+    // Surface a few uuid samples so the user can spot a format mismatch.
+    const sampleDet = state.labels.detections.slice(0, 3)
+      .map(d => d.punch_uuid || "(blank)").join(", ");
+    const sampleDir = [...byUuidMap.keys()].slice(0, 3).join(", ");
+    lines.push(`<span class="muted">First 3 detection uuids: <code>${sampleDet}</code></span>`);
+    lines.push(`<span class="muted">First 3 direction uuids: <code>${sampleDir}</code></span>`);
   } else if (det) {
     lines.push(`<code>${det.punch_type}</code> · stance <code>${det.stance}</code>`);
     lines.push(`frames <code>${det.start_frame}-${det.end_frame}</code> (${(det.end_frame - det.start_frame + 1)} frames)`);
