@@ -377,18 +377,28 @@ export const PunchDirectionReviewRule = {
   update(state) {
     ensureFetched(state);
     rebuildLabelledPunches(state);
-    // If user manually scrubbed into a different labelled punch, update the
-    // active index + loop window to match (so N/P navigation stays sane).
+    // If the user has scrubbed entirely OUT of the active punch's window,
+    // hop to whichever labelled punch the cursor is now inside. Inside the
+    // active window we stay locked — combos overlap in time, and without
+    // this lock the loop-snap-back to the active punch's start would
+    // immediately re-detect "now inside the OTHER overlapping punch" and
+    // bounce between two activeIdx values.
     if (labelledPunches.length) {
       const f = state.frame;
-      const inside = labelledPunches.findIndex(p =>
-        f >= p.detection.start_frame && f <= p.detection.end_frame);
-      if (inside !== -1 && inside !== activeIdx) {
-        activeIdx = inside;
-        const det = labelledPunches[inside].detection;
-        loopWindow = { start_frame: det.start_frame, end_frame: det.end_frame,
-                       uuid: det.punch_uuid };
-        rebuildSidebar(state);
+      const active = activeIdx >= 0 ? labelledPunches[activeIdx] : null;
+      const stillInActive = active &&
+        f >= active.detection.start_frame &&
+        f <= active.detection.end_frame;
+      if (!stillInActive) {
+        const inside = labelledPunches.findIndex(p =>
+          f >= p.detection.start_frame && f <= p.detection.end_frame);
+        if (inside !== -1 && inside !== activeIdx) {
+          activeIdx = inside;
+          const det = labelledPunches[inside].detection;
+          loopWindow = { start_frame: det.start_frame, end_frame: det.end_frame,
+                         uuid: det.punch_uuid };
+          rebuildSidebar(state);
+        }
       }
     }
   },
