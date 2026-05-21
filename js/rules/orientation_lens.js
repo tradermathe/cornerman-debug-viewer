@@ -27,20 +27,19 @@
 import { J } from "../skeleton.js";
 import { fetchOrientationForStem } from "../sheet-labels.js";
 
-// Default per-stance fit (chest-direction labels, 06_ankle_arrow.py 2026-05-21,
-// n=183, MAE 41° orthodox / 13° southpaw). Overridden at mount-time by
-// data/punch_direction_fits.json when that file is present — that fit comes
-// from per-punch direction labels (07_punch_directions.py), which target the
-// "where the enemy is" signal the rules engine actually wants.
-const DEFAULT_STANCE_FITS = {
-  orthodox: { sign: -1, offset_deg: 58.8 },
-  southpaw: { sign: -1, offset_deg: 100.6 },
+// Per-stance fit baked here as a constant. Update by running
+// boxing_ai/orientation_model/07_punch_directions.ipynb, copying the
+// snippet printed by its last cell, replacing this block, and pushing.
+// The fit changes infrequently — a code edit beats infra plumbing.
+//
+// Provenance: 06_ankle_arrow.py 2026-05-21 n=183 chest-label fit,
+// translated to the L→R arrow convention adopted 2026-05-21 (was
+// "front − back by stance", now anchored to anatomy). These are
+// placeholders — refit with 07_punch_directions.ipynb once dense.
+const STANCE_FITS = {
+  orthodox: { sign: -1, offset_deg: -121.2 },
+  southpaw: { sign: -1, offset_deg: -79.4 },
 };
-// Live fits, populated by loadFitOverlay(). Same shape; per-stance.
-let STANCE_FITS = { ...DEFAULT_STANCE_FITS };
-// Provenance info for the sidebar: where the current fit came from + when.
-let fitInfo = { source: "default (06_ankle_arrow.py chest labels)",
-                n: null, mae: null, fitted_at: null };
 
 const MIN_ANKLE_CONF = 0.30;
 const COLOR_RAW   = "#ffd24a";  // amber — raw ankle line
@@ -56,41 +55,6 @@ let lastFetchedStem = null;
 let labelMap = null;       // Map<`${round}:${frame}`, {label, labeler, ts}>
 let fetchError = null;
 let fetchInfo = "";        // human-readable summary for the sidebar
-
-// One-shot fetch of the live per-punch fit JSON. Runs once per page load
-// (the file is small and rarely changes; refresh by hard-reloading the
-// viewer). If the file is missing / unreadable / has no per-stance entries,
-// we keep the chest-label defaults so the cyan arrow still draws.
-let fitOverlayLoaded = false;
-async function loadFitOverlay() {
-  if (fitOverlayLoaded) return;
-  fitOverlayLoaded = true;
-  try {
-    const res = await fetch("./data/punch_direction_fits.json", { cache: "no-cache" });
-    if (!res.ok) return;
-    const body = await res.json();
-    const fits = body && body.fits;
-    if (!fits || typeof fits !== "object") return;
-    let n = 0;
-    for (const stance of ["orthodox", "southpaw"]) {
-      const f = fits[stance];
-      if (!f || typeof f.sign !== "number" || typeof f.offset_deg !== "number") continue;
-      STANCE_FITS[stance] = { sign: f.sign, offset_deg: f.offset_deg };
-      n++;
-    }
-    if (n > 0) {
-      fitInfo = {
-        source: body.source || "punch_direction_fits.json",
-        n: body.n_intersection ?? null,
-        mae: body.lovo_mae_deg ?? null,
-        fitted_at: body.fitted_at || null,
-      };
-    }
-  } catch (_) {
-    // Network / parse failure — silently keep defaults. The sidebar will
-    // still show that we're on the default fit.
-  }
-}
 
 function wrap180(deg) {
   return ((deg + 180) % 360 + 360) % 360 - 180;
@@ -120,13 +84,18 @@ function ankleArrow(pose, f, stance) {
   const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
   const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
   if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
-  // Front foot by stance. When stance is unknown we still want to draw the
-  // raw line; arbitrarily treat L as "front" so the arrow has a direction.
-  const orthodoxFront = stance !== "southpaw";
-  const fx = orthodoxFront ? lx : rx;
-  const fy = orthodoxFront ? ly : ry;
-  const bx = orthodoxFront ? rx : lx;
-  const by = orthodoxFront ? ry : ly;
+  // Arrow convention (2026-05-21): orthodox always points L→R, southpaw R→L.
+  // Anchored to L/R anatomy (not stance front/back) so the arrow stays
+  // visually stable through pivots / mid-punch when the front-foot
+  // assignment would otherwise briefly flip. fx/fy = arrowhead end,
+  // bx/by = tail end — names kept from the old convention to minimise
+  // downstream diff; "front" here means "head of drawn arrow", not
+  // "front foot in stance".
+  const orthodox = stance !== "southpaw";
+  const fx = orthodox ? rx : lx;
+  const fy = orthodox ? ry : ly;
+  const bx = orthodox ? lx : rx;
+  const by = orthodox ? ly : ry;
   const dx = fx - bx, dy = fy - by;
   if (dx * dx + dy * dy < 1e-6) return null;
   return { lx, ly, rx, ry, fx, fy, bx, by, dx, dy,
@@ -250,28 +219,6 @@ function renderSidebar(state) {
   else if (fetchInfo) lines.push(`<span class="muted">${fetchInfo}</span>`);
 
   el.innerHTML = lines.join("<br>");
-
-  // Provenance line — which fit produced the cyan arrow.
-  const fitEl = host.querySelector("#ol-fit-info");
-  if (fitEl) {
-    if (fitInfo.source && fitInfo.source !== "default (06_ankle_arrow.py chest labels)") {
-      const when = fitInfo.fitted_at ? new Date(fitInfo.fitted_at).toLocaleString() : "?";
-      const nTxt = fitInfo.n != null ? `n=${fitInfo.n}` : "n=?";
-      const maeTxt = fitInfo.mae != null ? `LOVO MAE ${fitInfo.mae.toFixed(1)}°` : "MAE n/a";
-      fitEl.innerHTML =
-        `Live fit from <code>${fitInfo.source}</code> · ${nTxt} · ${maeTxt}` +
-        `<br>fitted ${when}.<br>` +
-        Object.entries(STANCE_FITS).map(([s, f]) =>
-          `${s}: sign ${f.sign}, offset ${f.offset_deg.toFixed(1)}°`).join(" · ");
-    } else {
-      fitEl.innerHTML =
-        `Default fit (06_ankle_arrow.py, chest labels 2026-05-21).<br>` +
-        Object.entries(STANCE_FITS).map(([s, f]) =>
-          `${s}: sign ${f.sign}, offset ${f.offset_deg.toFixed(1)}°`).join(" · ") +
-        `<br><span class="muted">Push <code>data/punch_direction_fits.json</code> ` +
-        `from 07_punch_directions.py to override.</span>`;
-    }
-  }
 }
 
 export const OrientationLensRule = {
@@ -289,18 +236,18 @@ export const OrientationLensRule = {
         <span style="color:${COLOR_GT}">●</span> GT label (only when this frame is in the Orientation Labels sheet).
       </p>
       <div id="ol-state" class="hint" style="line-height:1.55"></div>
-      <p class="hint" id="ol-fit-info" style="margin-top:14px; font-size:11px;"></p>
+      <p class="hint" style="margin-top:14px; font-size:11px;">
+        Fit constants live at the top of <code>orientation_lens.js</code> —
+        replace them with the snippet printed by
+        <code>07_punch_directions.ipynb</code> when you re-fit.
+      </p>
     `;
     refreshLabelsIfNeeded(state);
-    // Load the per-punch fit (if pushed) and re-render once it lands so the
-    // cyan arrow uses the latest correction. No-op if already loaded.
-    loadFitOverlay().then(() => renderSidebar(state));
     renderSidebar(state);
   },
 
   update(state) {
     refreshLabelsIfNeeded(state);
-    loadFitOverlay();
     renderSidebar(state);
   },
 
