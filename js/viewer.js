@@ -636,11 +636,20 @@ function loadFromIndex(videoFile, slot) {
       if (token !== currentLoadToken) return;
       start(posePrimary, poseSecondary, punches, pose3d, poseCombined);
 
+      // Expose cache identity on state so lenses that key by (stem, round, frame)
+      // — e.g. orientation_lens looking up orientation GT labels — can find it
+      // without re-parsing filenames themselves. Round comes from the `_rN`
+      // suffix; cacheBasename is the source-video stem (suffix stripped).
+      const npyName = primary.npy.name;
+      state.cacheBasename = stripCacheSuffix(npyName);
+      const rndMatch = /_(?:yolo|vision)_r(\d+)\.npy$/i.exec(npyName);
+      state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
+
       // Live GT labels: derive a basename from the cache filename, then hit
       // the Sheet. Best-effort — failure just leaves state.labels null so
       // the lens falls back to ST-GCN / heuristic.
       tryLiveLabels({
-        cacheBasename: stripCacheSuffix(primary.npy.name),
+        cacheBasename: state.cacheBasename,
         cacheStartSec: posePrimary.start_sec || 0,
         fps: posePrimary.fps,
         nFrames: posePrimary.n_frames,
@@ -683,9 +692,16 @@ function loadFromFiles(videoFile, poseFiles) {
     .then(loaded => {
       if (loaded == null || token !== currentLoadToken) return;
       start(loaded.pose, null, loaded.punches);
+      // Mirror the cache-identity wiring from loadFromIndex so lenses that
+      // need (stem, round, frame) work in the manual-picker path too.
+      if (npyFile) {
+        state.cacheBasename = stripCacheSuffix(npyFile.name);
+        const rndMatch = /_(?:yolo|vision)_r(\d+)\.npy$/i.exec(npyFile.name);
+        state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
+      }
       // Live GT labels.
       tryLiveLabels({
-        cacheBasename: npyFile ? stripCacheSuffix(npyFile.name) : null,
+        cacheBasename: state.cacheBasename || null,
         cacheStartSec: loaded.pose.start_sec || 0,
         fps: loaded.pose.fps,
         nFrames: loaded.pose.n_frames,
@@ -791,6 +807,7 @@ function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCo
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()
+  state.orientationLabels = null;        // populated by orientation lens on demand
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;

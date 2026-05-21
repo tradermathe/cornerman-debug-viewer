@@ -24,6 +24,7 @@
 const PUBLIC_SHEET_ID = "1CewEaweCBw9F-qSvNapiQMNj4wnidHqLA-I19whrly0";
 const COMBINED_SHEET = "Combined Data";
 const FORM_LABELS_SHEET = "Combined Form Labels";
+const ORIENTATION_SHEET = "Orientation Labels";
 // Form-rule fields we surface on each detection so per-rule lenses can
 // score their predictions against the coach's verdict.
 const FORM_LABEL_KEYS = [
@@ -268,6 +269,51 @@ export function rowsToDetections(rows, { cacheStartSec = 0, fps, nFrames, formBy
   }
   detections.sort((a, b) => a.start_frame - b.start_frame);
   return detections;
+}
+
+// Orientation Labels tab — separate from Combined Data. Stored verbatim by
+// the labeler keyed by (video_stem, round, frame); we filter client-side.
+// Light enough (<50 KB typically) that one fetch per session is fine.
+let cachedOrientationRows = null;
+let cachedOrientationFetchedAt = 0;
+
+async function fetchOrientationRows({ force = false } = {}) {
+  if (!force && cachedOrientationRows
+      && Date.now() - cachedOrientationFetchedAt < CACHE_TTL_MS) {
+    return cachedOrientationRows;
+  }
+  const url =
+    `https://docs.google.com/spreadsheets/d/${PUBLIC_SHEET_ID}` +
+    `/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(ORIENTATION_SHEET)}`;
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${ORIENTATION_SHEET}`);
+  cachedOrientationRows = parseCsv(await r.text());
+  cachedOrientationFetchedAt = Date.now();
+  return cachedOrientationRows;
+}
+
+// Returns a Map keyed `${round}:${frame}` → { label, labeler, ts }, restricted
+// to a single video stem (the cache basename, which the labeler also uses as
+// its `video` identifier). Drops deleted rows and skip-rows (empty label).
+export async function fetchOrientationForStem(videoStem, { force = false } = {}) {
+  let rows;
+  try { rows = await fetchOrientationRows({ force }); }
+  catch (err) { return { error: err.message, byKey: new Map() }; }
+  const byKey = new Map();
+  let countForVideo = 0;
+  for (const r of rows) {
+    if (String(r.deleted ?? "") === "1") continue;
+    if ((r.video ?? "") !== videoStem) continue;
+    countForVideo++;
+    const lbl = String(r.label ?? "").trim();
+    if (lbl === "") continue;   // skip rows the labeler marked as "skip"
+    const round = Number(r.round);
+    const frame = Number(r.frame);
+    const label = Number(lbl);
+    if (!Number.isFinite(round) || !Number.isFinite(frame) || !Number.isFinite(label)) continue;
+    byKey.set(`${round}:${frame}`, { label, labeler: r.labeler || "", ts: r.ts || "" });
+  }
+  return { byKey, countForVideo, totalRows: rows.length };
 }
 
 // Top-level convenience: given a cache basename + cache offset + fps + frame
