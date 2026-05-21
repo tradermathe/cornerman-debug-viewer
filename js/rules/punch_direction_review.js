@@ -28,7 +28,10 @@ let host = null;
 let loopWindow = null;        // {start_frame, end_frame, uuid} or null
 let activeIdx = -1;           // index into labelledPunches
 let labelledPunches = [];     // [{detection, gtLabel, gtLabeler, medianArrow}]
-let lastFetchedStem = null;   // re-fetch when video changes
+let byUuidMap = null;         // Map<punch_uuid, {label, labeler, ts}> — all videos
+let fetchInFlight = false;    // dedupe concurrent fetches
+let lastDetectionsRef = null; // identity of the detections array we last joined
+let lastStemForReset = null;  // detect video change to reset activeIdx
 let fetchError = null;
 let fetchInfo = "";
 let videoEl = null;
@@ -111,48 +114,80 @@ function drawArrow(ctx, x0, y0, angle_rad, length, color, { dashed = false, line
   ctx.restore();
 }
 
-// ─── data loading: punch direction labels for the current video ──────────
+// ─── data loading: punch direction labels (cached across videos) ─────────
+//
+// Punch Directions is fetched once per session (the sheet is all videos in
+// one call). state.labels.detections, however, arrives asynchronously from
+// tryLiveLabels — and might not be populated when the user first picks this
+// lens. So we (a) ensure the fetch is in flight, (b) re-derive the joined
+// list whenever the detections array reference changes, (c) reset cursor
+// when the video stem changes.
 
-async function refreshLabelsIfNeeded(state) {
-  const stem = state.cacheBasename;
-  if (!stem || stem === lastFetchedStem) return;
-  lastFetchedStem = stem;
+async function ensureFetched(state) {
+  if (byUuidMap || fetchInFlight) return;
+  fetchInFlight = true;
   fetchError = null;
   fetchInfo = "fetching punch direction labels…";
   rebuildSidebar(state);
+  try {
+    const res = await fetchPunchDirectionsAll({});
+    if (res.error) { fetchError = res.error; }
+    else            { byUuidMap = res.byUuid; }
+  } catch (e) {
+    fetchError = e.message;
+  } finally {
+    fetchInFlight = false;
+    rebuildLabelledPunches(state);
+  }
+}
 
-  const res = await fetchPunchDirectionsAll({});
-  if (state.cacheBasename !== stem) return;  // stale (video switched)
-  if (res.error) {
-    fetchError = res.error;
-    labelledPunches = [];
+function rebuildLabelledPunches(state) {
+  if (!byUuidMap) { rebuildSidebar(state); return; }
+
+  const stem = state.cacheBasename || "";
+  const dets = state.labels?.detections;
+  const stemChanged = stem !== lastStemForReset;
+  // Skip the heavy re-join if neither the detections array nor the stem
+  // changed — update() runs every frame; we don't want to recompute medians
+  // on each tick.
+  if (!stemChanged && dets === lastDetectionsRef && labelledPunches.length) {
     rebuildSidebar(state);
     return;
   }
+  lastDetectionsRef = dets;
+  lastStemForReset = stem;
 
-  // Filter detections to those that have a label, compute median arrow once.
-  const dets = state.labels?.detections || [];
-  labelledPunches = [];
-  for (const det of dets) {
+  const next = [];
+  for (const det of dets || []) {
     if (!det.punch_uuid) continue;
-    const gt = res.byUuid.get(det.punch_uuid);
+    const gt = byUuidMap.get(det.punch_uuid);
     if (!gt) continue;
     const median = computeMedianArrow(state.pose, det);
-    labelledPunches.push({
+    next.push({
       detection: det,
       gtLabel: gt.label,
       gtLabeler: gt.labeler,
-      median,  // may be null if window has <3 valid frames
+      median,
     });
   }
-  labelledPunches.sort((a, b) => a.detection.start_frame - b.detection.start_frame);
+  next.sort((a, b) => a.detection.start_frame - b.detection.start_frame);
 
-  fetchInfo = `${labelledPunches.length} labelled punches in this video`
-    + (dets.length > labelledPunches.length
-        ? ` (${dets.length - labelledPunches.length} unlabelled — skipped)` : "");
-  // Land on the first labelled punch automatically.
-  if (labelledPunches.length) seekToPunch(0, state);
-  else { loopWindow = null; activeIdx = -1; }
+  const totalDets = dets?.length || 0;
+  fetchInfo = `${next.length} labelled punches in this video`
+    + (totalDets > next.length
+        ? ` (${totalDets - next.length} unlabelled — skipped)` : "");
+
+  const hadNone = labelledPunches.length === 0;
+  labelledPunches = next;
+
+  // If the video changed OR we just got our first labelled punches, land on
+  // the first one. Otherwise preserve the user's current cursor.
+  if (stemChanged || (hadNone && next.length)) {
+    if (next.length) seekToPunch(0, state);
+    else             { loopWindow = null; activeIdx = -1; }
+  } else if (activeIdx >= next.length) {
+    activeIdx = next.length - 1;
+  }
   rebuildSidebar(state);
 }
 
@@ -309,13 +344,13 @@ export const PunchDirectionReviewRule = {
     rebuildSidebar(state);
     installTimeupdateLoop(state);
     installKeyHandlers(state);
-    // Force a re-fetch / recompute when remounting (e.g. video change).
-    lastFetchedStem = null;
-    refreshLabelsIfNeeded(state);
+    ensureFetched(state);
+    rebuildLabelledPunches(state);
   },
 
   update(state) {
-    refreshLabelsIfNeeded(state);
+    ensureFetched(state);
+    rebuildLabelledPunches(state);
     // If user manually scrubbed into a different labelled punch, update the
     // active index + loop window to match (so N/P navigation stays sane).
     if (labelledPunches.length) {
@@ -328,10 +363,8 @@ export const PunchDirectionReviewRule = {
         loopWindow = { start_frame: det.start_frame, end_frame: det.end_frame,
                        uuid: det.punch_uuid };
         rebuildSidebar(state);
-        return;
       }
     }
-    rebuildSidebar(state);
   },
 
   draw(ctx, state) {
