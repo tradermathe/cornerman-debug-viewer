@@ -276,9 +276,12 @@ function seekToPunch(idx, state) {
   if (idx >= punches.length) idx = punches.length - 1;
   const p = punches[idx];
   activeIdx = idx;
-  loopWindow = { start_frame: p.start_frame, end_frame: p.end_frame };
+  // Loop the FULL search window (label window + ±searchWindowSec padding)
+  // so the user actually sees the frames the verdict was computed over —
+  // including the wind-up and follow-through where peak/trough can sit.
+  loopWindow = { start_frame: p.search_start, end_frame: p.search_end };
   if (videoEl && state.fps) {
-    videoEl.currentTime = (state.start_sec || 0) + p.start_frame / state.fps;
+    videoEl.currentTime = (state.start_sec || 0) + p.search_start / state.fps;
     if (videoEl.paused) {
       const promise = videoEl.play();
       if (promise && typeof promise.catch === "function") promise.catch(() => {});
@@ -442,7 +445,7 @@ function rebuildSidebar(state) {
 
   const lines = [
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
-    `frames <code>${p.start_frame}-${p.end_frame}</code> (${p.end_frame - p.start_frame + 1} frames) · search ±<code>${cfg.searchWindowSec.toFixed(2)}s</code>`,
+    `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (±${cfg.searchWindowSec.toFixed(2)}s)`,
     "",
     `<b>1. Orientation gate</b>`,
     orientLine,
@@ -648,22 +651,24 @@ export const HipRotationReviewRule = {
   update(state) {
     rebuildPunches(state);
     // If the user scrubbed away from the active punch, hop to whichever
-    // rotation-applicable punch the cursor is now inside. Same 15-frame
-    // tolerance straights_review uses to avoid flip-flop with the loop snap.
-    const ACTIVE_TOLERANCE_FRAMES = 15;
+    // rotation-applicable punch the cursor is now inside. Compares against
+    // the search window (label window + ±searchWindowSec padding) since
+    // that's what the loop plays. Small extra tolerance handles the race
+    // between the viewer's frame update and the snap-back handler.
+    const ACTIVE_TOLERANCE_FRAMES = 5;
     if (punches.length) {
       const f = state.frame;
       const active = activeIdx >= 0 ? punches[activeIdx] : null;
       const nearActive = active &&
-        f >= active.start_frame - ACTIVE_TOLERANCE_FRAMES &&
-        f <= active.end_frame   + ACTIVE_TOLERANCE_FRAMES;
+        f >= active.search_start - ACTIVE_TOLERANCE_FRAMES &&
+        f <= active.search_end   + ACTIVE_TOLERANCE_FRAMES;
       if (!nearActive) {
         const inside = punches.findIndex(p =>
-          f >= p.start_frame && f <= p.end_frame);
+          f >= p.search_start && f <= p.search_end);
         if (inside !== -1 && inside !== activeIdx) {
           activeIdx = inside;
           const p = punches[inside];
-          loopWindow = { start_frame: p.start_frame, end_frame: p.end_frame };
+          loopWindow = { start_frame: p.search_start, end_frame: p.search_end };
           rebuildSidebar(state);
         }
       }
