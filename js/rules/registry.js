@@ -25,6 +25,7 @@ import { Vision3DRule } from "./vision_3d.js";
 import { OrientationLabelerRule } from "./orientation_labeler.js";
 import { OrientationLensRule } from "./orientation_lens.js";
 import { PunchDirectionReviewRule } from "./punch_direction_review.js";
+import { StraightsReviewRule } from "./straights_review.js";
 import { AngleChangeRule } from "./angle_change.js";
 
 export const RULES = [
@@ -43,5 +44,6 @@ export const RULES = [
   OrientationLabelerRule,
   OrientationLensRule,
   PunchDirectionReviewRule,
+  StraightsReviewRule,
   AngleChangeRule,
 ];

@@ -23,11 +23,21 @@
 
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
+import { STANCE_FITS } from "./orientation_lens.js";
 
 const DEFAULTS = {
   threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
   reachThreshold:   0.70,     // and peak reach ≥ this (in-plane extension)
   reachEnabled:     true,     // turn the reach gate on/off
+  // Orientation gate. The arm-extension ratio is only trustworthy when the
+  // boxer is roughly sideways to the camera: a punch travelling along the
+  // camera axis foreshortens (high r on a bent arm). Use the orientation
+  // model's predicted facing at the punch's peak frame; require |angle|
+  // to lie inside [min, max] (degrees) for the verdict to count.
+  // GT convention: 0° = facing camera, ±90° = sideways, ±180° = facing away.
+  orientationGate:        true,
+  orientationMinAbsDeg:   60,
+  orientationMaxAbsDeg:   150,
   // Facing-camera exclusion. When both eyes AND both ears clear this
   // confidence at the punch's peak frame, the boxer is squared up to the
   // camera and the punch travels into the camera axis — untrustworthy
@@ -252,6 +262,62 @@ export const ArmExtensionRule = {
       });
     }
     updateFrontalStatus();
+
+    // Orientation gate
+    const updateOrientStatus = () => {
+      const el = host.querySelector("#ae-orient-status");
+      if (!el) return;
+      if (!cfg.orientationGate) { el.textContent = "Disabled — predictions ignore orientation."; return; }
+      const N = signals.punches.length;
+      const sideways = signals.punches.filter(p => p.orientation_sideways).length;
+      const unknown = signals.punches.filter(p => p.orientation_deg == null).length;
+      el.textContent = `${sideways}/${N} punches sideways · ${unknown} with unknown orientation (predicted "skip").`;
+    };
+    const orientToggle = host.querySelector("#ae-orient-toggle");
+    const orientMin    = host.querySelector("#ae-orient-min");
+    const orientMinOut = host.querySelector("#ae-orient-min-out");
+    const orientMax    = host.querySelector("#ae-orient-max");
+    const orientMaxOut = host.querySelector("#ae-orient-max-out");
+    const orientMinRow = host.querySelector("#ae-orient-min-row");
+    const orientMaxRow = host.querySelector("#ae-orient-max-row");
+    if (orientToggle) {
+      orientToggle.addEventListener("change", () => {
+        cfg.orientationGate = orientToggle.checked;
+        if (orientMin) orientMin.disabled = !cfg.orientationGate;
+        if (orientMax) orientMax.disabled = !cfg.orientationGate;
+        if (orientMinRow) orientMinRow.style.opacity = cfg.orientationGate ? 1 : 0.5;
+        if (orientMaxRow) orientMaxRow.style.opacity = cfg.orientationGate ? 1 : 0.5;
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
+        updateOrientStatus();
+        state.requestDraw?.();
+      });
+    }
+    if (orientMin) {
+      orientMin.addEventListener("input", () => {
+        cfg.orientationMinAbsDeg = Number(orientMin.value);
+        orientMinOut.textContent = `${cfg.orientationMinAbsDeg}°`;
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
+        updateOrientStatus();
+        state.requestDraw?.();
+      });
+    }
+    if (orientMax) {
+      orientMax.addEventListener("input", () => {
+        cfg.orientationMaxAbsDeg = Number(orientMax.value);
+        orientMaxOut.textContent = `${cfg.orientationMaxAbsDeg}°`;
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
+        updateOrientStatus();
+        state.requestDraw?.();
+      });
+    }
+    updateOrientStatus();
+
     const updateCorrStatus = () => {
       const el = host.querySelector("#ae-corr-status");
       if (!el) return;
@@ -332,6 +398,14 @@ export const ArmExtensionRule = {
     setText("ae-r-source", signals.sourceR[f] || "—");
   },
 };
+
+// Exposed so the "Straights review" lens can reuse the per-punch
+// compute pipeline without duplicating code.
+export const ARM_EXT_DEFAULTS = DEFAULTS;
+export function computeArmExtension(state, cfg) {
+  return computeAll(state, cfg);
+}
+export { predictedFacingAt, medianPredictedFacing };
 
 // ─── compute ───────────────────────────────────────────────────────────────
 
@@ -414,10 +488,23 @@ function computeAll(state, cfg) {
         pose.conf[peakFrame * 17 + J.R_EAR] >= c;
     }
 
+    // Orientation gate. Prefer the window-median predicted facing — it's
+    // robust to per-frame pose noise the way 07_punch_directions uses it.
+    // Falls back to peak-frame prediction when median isn't computable.
+    // "Sideways enough" = |angle| inside [min, max] of cfg.
+    const orientationDeg = medianPredictedFacing(pose, sf, ef, stance)
+      ?? (peakValid ? predictedFacingAt(pose, peakFrame, stance) : null);
+    const orientationSideways = (orientationDeg != null) && (() => {
+      const a = Math.abs(orientationDeg);
+      return a >= cfg.orientationMinAbsDeg && a <= cfg.orientationMaxAbsDeg;
+    })();
+
     // Conjunction predictor:
     //   - "pass" only when geometry says straight AND wrist reached out
+    //     AND fighter was sideways
     //   - "skip" when straight in 2D but reach is short = depth-foreshortened
     //     (the punch travelled into/out of the camera, untrustworthy)
+    //   - "skip" when fighter wasn't sideways (orientation gate)
     //   - "fail" when geometry says bent (regardless of reach)
     //   - "unclear" when we can't compute anything
     let predicted;
@@ -427,6 +514,14 @@ function computeAll(state, cfg) {
       // Boxer was facing camera at peak — depth-sensitive geometry can't
       // be trusted. Skip BEFORE looking at r/reach so the user sees a
       // dedicated reason for the exclusion (the row will get a face icon).
+      predicted = "skip";
+    } else if (cfg.orientationGate && orientationDeg == null) {
+      // Gate is on but we couldn't determine orientation — treat as skip
+      // rather than guessing.
+      predicted = "skip";
+    } else if (cfg.orientationGate && !orientationSideways) {
+      // Fighter not sideways → straights travel along depth axis, ratio
+      // can't be trusted.
       predicted = "skip";
     } else if (peak < cfg.threshold) {
       predicted = "fail";
@@ -472,6 +567,8 @@ function computeAll(state, cfg) {
       peak_reach: peakValid ? peakReach : NaN,
       peak_travel: peakValid ? peakTravel : NaN,
       frontal_at_peak: frontalAtPeak,
+      orientation_deg: orientationDeg,
+      orientation_sideways: orientationSideways,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       peak_sh_conf: shConf,
       peak_el_conf: elConf,
@@ -487,6 +584,67 @@ function computeAll(state, cfg) {
     sourceL, sourceR, punches, fps, bodyAxis,
     armLengthL, armLengthR,
   };
+}
+
+// Ankle-arrow → predicted facing direction at a given frame.
+// Mirrors orientation_lens.js: orthodox arrow points R→L (toward front
+// foot), southpaw L→R. Both ankles must clear 0.30 conf.
+const MIN_ANKLE_CONF_GATE = 0.30;
+function predictedFacingAt(pose, frame, stance) {
+  if (!stance) return null;
+  const fit = STANCE_FITS[stance];
+  if (!fit) return null;
+  const cL = pose.conf[frame * 17 + J.L_ANKLE];
+  const cR = pose.conf[frame * 17 + J.R_ANKLE];
+  if (cL < MIN_ANKLE_CONF_GATE || cR < MIN_ANKLE_CONF_GATE) return null;
+  const lx = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2];
+  const ly = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2 + 1];
+  const rx = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2];
+  const ry = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2 + 1];
+  if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
+  const orthodox = stance !== "southpaw";
+  const dx = orthodox ? (lx - rx) : (rx - lx);
+  const dy = orthodox ? (ly - ry) : (ry - ly);
+  if (dx * dx + dy * dy < 1e-6) return null;
+  const arrowDeg = Math.atan2(dy, dx) * 180 / Math.PI;
+  // wrap180
+  let pred = fit.sign * arrowDeg + fit.offset_deg;
+  pred = ((pred + 180) % 360 + 360) % 360 - 180;
+  return pred;
+}
+
+// Median predicted facing across the punch window — same robustness trick
+// 07_punch_directions uses for the ankle arrow itself. Returns null when
+// fewer than 3 frames pass the conf gate.
+function medianPredictedFacing(pose, sf, ef, stance) {
+  if (!stance) return null;
+  const fit = STANCE_FITS[stance];
+  if (!fit) return null;
+  const dxs = [], dys = [];
+  for (let f = sf; f <= ef; f++) {
+    const cL = pose.conf[f * 17 + J.L_ANKLE];
+    const cR = pose.conf[f * 17 + J.R_ANKLE];
+    if (cL < MIN_ANKLE_CONF_GATE || cR < MIN_ANKLE_CONF_GATE) continue;
+    const lx = pose.skeleton[(f * 17 + J.L_ANKLE) * 2];
+    const ly = pose.skeleton[(f * 17 + J.L_ANKLE) * 2 + 1];
+    const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
+    const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
+    if (![lx, ly, rx, ry].every(Number.isFinite)) continue;
+    const orthodox = stance !== "southpaw";
+    dxs.push(orthodox ? (lx - rx) : (rx - lx));
+    dys.push(orthodox ? (ly - ry) : (ry - ly));
+  }
+  if (dxs.length < 3) return null;
+  dxs.sort((a, b) => a - b);
+  dys.sort((a, b) => a - b);
+  const mid = Math.floor(dxs.length / 2);
+  const mdx = dxs.length % 2 ? dxs[mid] : 0.5 * (dxs[mid - 1] + dxs[mid]);
+  const mdy = dys.length % 2 ? dys[mid] : 0.5 * (dys[mid - 1] + dys[mid]);
+  if (mdx * mdx + mdy * mdy < 1e-6) return null;
+  const arrowDeg = Math.atan2(mdy, mdx) * 180 / Math.PI;
+  let pred = fit.sign * arrowDeg + fit.offset_deg;
+  pred = ((pred + 180) % 360 + 360) % 360 - 180;
+  return pred;
 }
 
 function bodyAxisOffset(pose, cfg) {
@@ -704,6 +862,32 @@ function renderTemplate(sig, cfg) {
       <output id="ae-threshold-out">${cfg.threshold.toFixed(2)}</output>
       <span class="muted small">peak ratio r — geometric straightness</span>
     </div>
+
+    <h3>Orientation gate (sideways only)</h3>
+    <p class="hint">
+      Predicted facing direction (from the orientation model on ankle arrow)
+      must satisfy <code>${cfg.orientationMinAbsDeg}° ≤ |angle| ≤ ${cfg.orientationMaxAbsDeg}°</code>
+      at the punch window for the verdict to count. Straights travelling
+      along the depth axis can't be scored from 2D geometry — those punches
+      get a <b>skip</b>. (0° = facing camera, ±90° = sideways, ±180° = facing away.)
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <input type="checkbox" id="ae-orient-toggle" ${cfg.orientationGate ? 'checked' : ''} />
+      <span>Enable orientation gate</span>
+    </label>
+    <div class="slider-row" style="opacity:${cfg.orientationGate ? 1 : 0.5}" id="ae-orient-min-row">
+      <input type="range" id="ae-orient-min" min="0" max="180" step="5"
+        value="${cfg.orientationMinAbsDeg}" ${cfg.orientationGate ? '' : 'disabled'} />
+      <output id="ae-orient-min-out">${cfg.orientationMinAbsDeg}°</output>
+      <span class="muted small">min |angle| (lower bound — exclude facing-camera)</span>
+    </div>
+    <div class="slider-row" style="opacity:${cfg.orientationGate ? 1 : 0.5}" id="ae-orient-max-row">
+      <input type="range" id="ae-orient-max" min="0" max="180" step="5"
+        value="${cfg.orientationMaxAbsDeg}" ${cfg.orientationGate ? '' : 'disabled'} />
+      <output id="ae-orient-max-out">${cfg.orientationMaxAbsDeg}°</output>
+      <span class="muted small">max |angle| (upper bound — exclude facing-away)</span>
+    </div>
+    <p class="hint muted small" id="ae-orient-status" style="margin:4px 0 0 0">—</p>
 
     <h3>Facing-camera exclusion</h3>
     <p class="hint">
@@ -1011,6 +1195,13 @@ function rescorePunch(p, cfg) {
   // change config bits which don't require a per-frame recompute.
   if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; return; }
   if (cfg.frontalExclude && p.frontal_at_peak) { p.predicted = "skip"; return; }
+  if (cfg.orientationGate) {
+    if (p.orientation_deg == null) { p.predicted = "skip"; return; }
+    const a = Math.abs(p.orientation_deg);
+    const sideways = a >= cfg.orientationMinAbsDeg && a <= cfg.orientationMaxAbsDeg;
+    p.orientation_sideways = sideways;
+    if (!sideways) { p.predicted = "skip"; return; }
+  }
   if (p.peak < cfg.threshold) { p.predicted = "fail"; return; }
   if (cfg.reachEnabled && Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) {
     p.predicted = "skip"; return;
