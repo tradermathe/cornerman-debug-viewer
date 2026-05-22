@@ -54,6 +54,20 @@ const DEFAULTS = {
   // when boxers move, switch guards, or chain combos.
   minRangeInner:          0.10,
   minRangeOuter:          0.10,    // tune from the table verdicts
+
+  // ── Mode toggle ────────────────────────────────────────────────────
+  // "range" = compare raw range (max gap − min gap) against minRangeInner /
+  //           minRangeOuter per band. Default — works for all videos.
+  // "ratio" = use W_est (99th percentile of gap across the round, ≈ this
+  //           boxer's true hip-width / torso-height ratio) to convert gap
+  //           into an implied hip-rotation angle in degrees. Skip punches
+  //           where the trough gap stays close to W (hips parked broadside,
+  //           arcsin too noisy). Requires the round to contain at least
+  //           one near-broadside frame for W_est to be accurate.
+  mode:                   "range",  // "range" | "ratio"
+  wEstQuantile:           0.99,
+  noiseRatioMin:          0.95,     // skip if trough/W_est > this
+  minRotationDeg:         15,       // pass threshold in ratio mode
   // Rule only applies to punches with rotation expectation (jab + body shots
   // excluded — matches hip_rotation.js).
   appliesTo: new Set([
@@ -186,6 +200,12 @@ function computeAll(state, cfg) {
   const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
   const gap = movingAvg(gapRaw, smoothFrames);
 
+  // W_est: round-level estimate of this boxer's true hip-width / torso-height
+  // ratio. Take a high quantile of the gap signal (default 99th percentile)
+  // since the maximum visible gap across many frames approaches W·sin(90°) = W.
+  // Used by ratio mode only, but cheap to compute either way.
+  const wEst = quantile(gap, cfg.wEstQuantile);
+
   const detections = (state.labels?.detections || [])
     .filter(d => cfg.appliesTo.has(d.punch_type));
 
@@ -225,10 +245,30 @@ function computeAll(state, cfg) {
                     : band === "outer" ? cfg.minRangeOuter
                     : null;
 
+    // Ratio-mode derived quantities. Always computed so the UI can show
+    // them; only USED for the verdict when cfg.mode === "ratio".
+    const peakRatio = wEst > 0 ? Math.min(1, peak / wEst) : NaN;
+    const troughRatio = wEst > 0 ? Math.min(1, trough / wEst) : NaN;
+    const peakTheta = Number.isFinite(peakRatio) ? Math.asin(peakRatio) * 180 / Math.PI : NaN;
+    const troughTheta = Number.isFinite(troughRatio) ? Math.asin(troughRatio) * 180 / Math.PI : NaN;
+    const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
+      ? peakTheta - troughTheta : NaN;
+
     let predicted;
     if (cfg.orientationGate && (orientationDeg == null || band == null)) {
       predicted = "skip";
+    } else if (cfg.mode === "ratio") {
+      // Ratio-mode: skip if hips parked at broadside (arcsin too noisy),
+      // else compare implied rotation angle (in degrees) to minRotationDeg.
+      if (Number.isFinite(troughRatio) && troughRatio > cfg.noiseRatioMin) {
+        predicted = "skip";
+      } else if (Number.isFinite(rotationDeg) && rotationDeg >= cfg.minRotationDeg) {
+        predicted = "pass";
+      } else {
+        predicted = "fail";
+      }
     } else if (range >= threshold) {
+      // Range-mode: original peak-trough vs per-band threshold.
       predicted = "pass";
     } else {
       predicted = "fail";
@@ -252,6 +292,11 @@ function computeAll(state, cfg) {
       trough_gap: trough,
       trough_frame: troughAt,
       range,
+      peak_ratio: peakRatio,
+      trough_ratio: troughRatio,
+      peak_theta: peakTheta,
+      trough_theta: troughTheta,
+      rotation_deg: rotationDeg,
       orientation_deg: orientationDeg,
       band,
       threshold,
@@ -260,7 +305,20 @@ function computeAll(state, cfg) {
     };
   });
 
-  return { gap, punches: out, fps };
+  return { gap, punches: out, fps, wEst };
+}
+
+// 99th percentile (or whichever quantile) of a Float32Array, ignoring
+// non-finite values. Used to estimate this boxer's true hip width.
+function quantile(arr, q) {
+  const sorted = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (Number.isFinite(arr[i])) sorted.push(arr[i]);
+  }
+  if (!sorted.length) return NaN;
+  sorted.sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(q * (sorted.length - 1))));
+  return sorted[idx];
 }
 
 // ─── data plumbing ────────────────────────────────────────────────────────
@@ -365,11 +423,17 @@ function buildSidebarSkeleton() {
       <span style="color:${COLOR_HIP_TROUGH}">●</span> hip line at trough frame (narrowest gap).
       The two ghost lines are the evidence behind the verdict.
     </p>
-    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
+    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 8px;">
       <button id="hrr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
       <button id="hrr-next" class="orient-btn-action secondary" style="padding:6px 10px;">next (N) ⏭</button>
       <button id="hrr-mute" class="orient-btn-action secondary" style="padding:6px 10px;">mute (M)</button>
       <span id="hrr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
+    </div>
+    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:0 0 14px;">
+      <span style="color:#888; font-size:12px;">mode:</span>
+      <button id="hrr-mode-range" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">range</button>
+      <button id="hrr-mode-ratio" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">ratio (W_est)</button>
+      <span id="hrr-w-est" style="margin-left:6px; color:#888; font-size:12px; font-family:ui-monospace,monospace;"></span>
     </div>
     <div id="hrr-state" class="hint" style="line-height:1.7;"></div>
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
@@ -386,8 +450,47 @@ function buildSidebarSkeleton() {
   host.querySelector("#hrr-next")?.addEventListener("click",
     () => seekToPunch(activeIdx + 1, latestState));
   host.querySelector("#hrr-mute")?.addEventListener("click", toggleMute);
+  host.querySelector("#hrr-mode-range")?.addEventListener("click", () => setMode("range"));
+  host.querySelector("#hrr-mode-ratio")?.addEventListener("click", () => setMode("ratio"));
   updateMuteButton();
+  updateModeButtons();
   renderPunchTable();
+}
+
+function setMode(newMode) {
+  if (cfg.mode === newMode) return;
+  cfg.mode = newMode;
+  // Re-score every punch under the new mode.
+  if (latestState) {
+    lastPose = null;  // force computeAll to re-run
+    rebuildPunches(latestState);
+  }
+  updateModeButtons();
+}
+
+function updateModeButtons() {
+  const rangeBtn = host?.querySelector("#hrr-mode-range");
+  const ratioBtn = host?.querySelector("#hrr-mode-ratio");
+  if (!rangeBtn || !ratioBtn) return;
+  const active = cfg.mode || "range";
+  for (const [btn, name] of [[rangeBtn, "range"], [ratioBtn, "ratio"]]) {
+    if (name === active) {
+      btn.style.background = "rgba(255,210,74,0.18)";
+      btn.style.borderColor = COLOR_HIP_PEAK;
+      btn.style.color = COLOR_HIP_PEAK;
+      btn.style.fontWeight = "700";
+    } else {
+      btn.style.background = "";
+      btn.style.borderColor = "";
+      btn.style.color = "";
+      btn.style.fontWeight = "normal";
+    }
+  }
+  // Refresh W_est readout.
+  const wEl = host?.querySelector("#hrr-w-est");
+  if (wEl && signals && Number.isFinite(signals.wEst)) {
+    wEl.textContent = `W_est = ${signals.wEst.toFixed(3)} (hip/torso)`;
+  }
 }
 
 // Build the per-punch summary table. Called once after the skeleton is
@@ -398,21 +501,26 @@ function renderPunchTable() {
   if (!container) return;
   if (!punches.length) { container.innerHTML = ""; return; }
 
+  const isRatio = cfg.mode === "ratio";
+  const metricCol = isRatio ? "rotation" : "range";
+
   const rows = punches.map((p, i) => {
     const predCol = colorFor(p.predicted);
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
-    const rangeStr = p.range.toFixed(3);
     const bandStr = p.band || "—";
     const bandCol = p.band === "inner" ? COLOR_PASS
                   : p.band === "outer" ? COLOR_SKIP
                   : "#888";
+    const metricStr = isRatio
+      ? (Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—")
+      : p.range.toFixed(3);
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
       <td style="padding:4px 6px;">${typeStr}</td>
       <td style="padding:4px 6px; font-size:11px; color:${bandCol};">${bandStr}</td>
-      <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${rangeStr}</td>
+      <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${metricStr}</td>
       <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
     </tr>`;
   }).join("");
@@ -425,7 +533,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; font-weight:600;">t</th>
           <th style="padding:4px 6px; font-weight:600;">type</th>
           <th style="padding:4px 6px; font-weight:600;">band</th>
-          <th style="padding:4px 6px; text-align:right; font-weight:600;">range</th>
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">${metricCol}</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
         </tr>
       </thead>
@@ -492,6 +600,7 @@ function rebuildSidebar(state) {
   if (!host.querySelector("#hrr-state")) buildSidebarSkeleton();
 
   updateActiveRow();
+  updateModeButtons();
 
   const counter = host.querySelector("#hrr-counter");
   if (counter) {
@@ -554,7 +663,7 @@ function rebuildSidebar(state) {
       + `<code>${oDeg.toFixed(1)}°</code> · |a|=<code>${a.toFixed(1)}°</code> · ${status}`;
   }
 
-  // 2) Rotation data — uses the per-band threshold attached to the punch.
+  // 2) Rotation data — content varies by mode.
   const rangeCol = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
   const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
 
@@ -575,13 +684,41 @@ function rebuildSidebar(state) {
     `<b>1. Orientation gate</b>`,
     orientLine,
     "",
-    `<b>2. Hip rotation swing (local)</b>`,
-    `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
-    `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (${p.band || "—"} band threshold <code>${thrStr}</code>)`,
+  ];
+
+  if (cfg.mode === "ratio") {
+    // Ratio-mode signal display.
+    const wEstStr = Number.isFinite(signals.wEst) ? signals.wEst.toFixed(3) : "—";
+    const pRatio = Number.isFinite(p.peak_ratio) ? p.peak_ratio.toFixed(3) : "—";
+    const tRatio = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
+    const pTheta = Number.isFinite(p.peak_theta) ? p.peak_theta.toFixed(1) + "°" : "—";
+    const tTheta = Number.isFinite(p.trough_theta) ? p.trough_theta.toFixed(1) + "°" : "—";
+    const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
+    const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
+    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
+    const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
+    lines.push(
+      `<b>2. Hip / torso ratio → angle</b>`,
+      `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across round)`,
+      `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
+      `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
+      `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`
+        + (noiseZone ? ` · ${pill("NOISE ZONE", COLOR_SKIP)} trough/W > ${cfg.noiseRatioMin}` : ""),
+    );
+  } else {
+    // Range-mode signal display (original).
+    lines.push(
+      `<b>2. Hip rotation swing (local)</b>`,
+      `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
+      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (${p.band || "—"} band threshold <code>${thrStr}</code>)`,
+    );
+  }
+
+  lines.push(
     "",
     `<b>3. Verdict</b>`,
     verdictLine,
-  ];
+  );
   el.innerHTML = lines.join("<br>");
 }
 
@@ -645,14 +782,22 @@ function drawCanvas(ctx, state) {
   // Ghost hip lines at the two extreme frames inside the search window —
   // these are the two frames whose gap difference IS the range we're
   // testing. Drawn semi-transparent / dashed so they sit behind the
-  // current-frame line.
+  // current-frame line. Labels show gap value, and (in ratio mode) the
+  // implied angle θ recovered via arcsin(gap/W_est).
+  const ratioMode = cfg.mode === "ratio";
+  const troughLabel = ratioMode && Number.isFinite(p.trough_theta)
+    ? `trough · ${p.trough_gap.toFixed(3)} → ${p.trough_theta.toFixed(0)}°`
+    : `trough · ${p.trough_gap.toFixed(3)}`;
+  const peakLabel = ratioMode && Number.isFinite(p.peak_theta)
+    ? `peak · ${p.peak_gap.toFixed(3)} → ${p.peak_theta.toFixed(0)}°`
+    : `peak · ${p.peak_gap.toFixed(3)}`;
   drawHipLine(ctx, pose, p.trough_frame, s, {
     color: COLOR_HIP_TROUGH,
     alpha: 0.55,
     lineWidth: 2.5 * s,
     dotRadius: 4 * s,
     dashed: true,
-    label: `trough · ${p.trough_gap.toFixed(3)}`,
+    label: troughLabel,
   });
   drawHipLine(ctx, pose, p.peak_frame, s, {
     color: COLOR_HIP_PEAK,
@@ -660,7 +805,7 @@ function drawCanvas(ctx, state) {
     lineWidth: 2.5 * s,
     dotRadius: 4 * s,
     dashed: true,
-    label: `peak · ${p.peak_gap.toFixed(3)}`,
+    label: peakLabel,
   });
 
   // Current-frame hip line (purple, solid, full opacity) — drawn last so
@@ -697,8 +842,27 @@ function drawHud(ctx, p, s) {
                    : p.band === "outer" ? COLOR_SKIP
                    : COLOR_FAIL;
   const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
-  const rangeTxt = `range ${p.range.toFixed(3)}  ·  thr ${thrStr}`;
-  const peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
+  const ratioMode = cfg.mode === "ratio";
+
+  // Two info lines depend on mode: peak/trough display and the metric/threshold line.
+  let peakTxt, metricTxt, metricCol;
+  if (ratioMode) {
+    const pTheta = Number.isFinite(p.peak_theta) ? `${p.peak_theta.toFixed(0)}°` : "—";
+    const tTheta = Number.isFinite(p.trough_theta) ? `${p.trough_theta.toFixed(0)}°` : "—";
+    const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
+    peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
+    metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
+    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
+    metricCol = noiseZone
+      ? COLOR_SKIP
+      : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
+          ? COLOR_PASS : COLOR_FAIL);
+  } else {
+    peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
+    metricTxt = `range ${p.range.toFixed(3)}  ·  thr ${thrStr}`;
+    metricCol = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
+  }
+
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const predTxt  = `pred: ${p.predicted}`;
   const gtTxt    = p.label ? `GT: ${p.label}` : "GT: —";
@@ -711,7 +875,7 @@ function drawHud(ctx, p, s) {
   const padY   = 10 * s;
   const x0 = 24 * s, y0 = 24 * s;
 
-  const lines = [titleTxt, orientStatus, peakTxt, rangeTxt, predTxt, gtTxt + agreeSym];
+  const lines = [titleTxt, orientStatus, peakTxt, metricTxt, predTxt, gtTxt + agreeSym];
 
   ctx.save();
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
@@ -736,8 +900,8 @@ function drawHud(ctx, p, s) {
   ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(titleTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = orientCol;                ctx.fillText(orientStatus, x0 + padX, y); y += lineH;
   ctx.fillStyle = "rgba(255,255,255,0.78)"; ctx.fillText(peakTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
-  ctx.fillText(rangeTxt, x0 + padX, y); y += lineH;
+  ctx.fillStyle = metricCol;
+  ctx.fillText(metricTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = predCol;                  ctx.fillText(predTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = p.label ? colorFor(p.label) : "rgba(255,255,255,0.55)";
   ctx.fillText(gtTxt, x0 + padX, y);
