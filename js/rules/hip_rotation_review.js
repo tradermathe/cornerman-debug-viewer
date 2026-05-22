@@ -35,12 +35,13 @@ const DEFAULTS = {
   // linear, so range ≈ amount of hip rotation (in projection units).
   minRange:               0.10,
   orientationGate:        true,
-  // Tight gate: only score punches where the boxer is genuinely broadside
+  // Orientation gate: only score punches where the boxer is roughly broadside
   // to the camera. Outside this band, hip rotation can't be reliably read
-  // from 2D — we'd rather skip than guess. Calibrate empirically against
-  // labels; [75°, 105°] is the starting precision-favouring choice.
-  orientationMinAbsDeg:   75,
-  orientationMaxAbsDeg:   105,
+  // from 2D — we'd rather skip than guess. [60°, 120°] is a moderate band:
+  // wide enough to catch most fight-camera angles, tight enough to keep
+  // the hip line on the steep wings of sin(θ).
+  orientationMinAbsDeg:   60,
+  orientationMaxAbsDeg:   120,
   // Rule only applies to punches with rotation expectation (jab + body shots
   // excluded — matches hip_rotation.js).
   appliesTo: new Set([
@@ -51,12 +52,14 @@ const DEFAULTS = {
 };
 
 const MIN_ANKLE_CONF = 0.30;
-const COLOR_HIP     = "#a78bfa";  // purple — hip line
-const COLOR_PRED    = "#3ad9e0";  // cyan   — predicted facing
-const COLOR_PASS    = "#5fd97a";
-const COLOR_FAIL    = "#e85a5a";
-const COLOR_SKIP    = "#7ec8ff";
-const COLOR_UNCLEAR = "#f5b945";
+const COLOR_HIP        = "#a78bfa";  // purple — current-frame hip line
+const COLOR_HIP_PEAK   = "#ffd24a";  // amber  — hip line at peak (widest) frame
+const COLOR_HIP_TROUGH = "#ff7e3a";  // orange — hip line at trough (narrowest) frame
+const COLOR_PRED       = "#3ad9e0";  // cyan   — predicted facing
+const COLOR_PASS       = "#5fd97a";
+const COLOR_FAIL       = "#e85a5a";
+const COLOR_SKIP       = "#7ec8ff";
+const COLOR_UNCLEAR    = "#f5b945";
 
 let host = null;
 let videoEl = null;
@@ -325,6 +328,13 @@ function buildSidebarSkeleton() {
       <i>skip</i>. Otherwise scores <code>max(gap) − min(gap) ≥ min_range</code>
       inside the search window — pure local swing, no round-level baseline.
     </p>
+    <p class="hint" style="margin-top:6px">
+      Canvas overlay:
+      <span style="color:${COLOR_HIP}">●</span> current-frame hip line,
+      <span style="color:${COLOR_HIP_PEAK}">●</span> hip line at peak frame (widest gap),
+      <span style="color:${COLOR_HIP_TROUGH}">●</span> hip line at trough frame (narrowest gap).
+      The two ghost lines are the evidence behind the verdict.
+    </p>
     <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
       <button id="hrr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
       <button id="hrr-next" class="orient-btn-action secondary" style="padding:6px 10px;">next (N) ⏭</button>
@@ -449,25 +459,52 @@ function rebuildSidebar(state) {
 
 // ─── draw ─────────────────────────────────────────────────────────────────
 
-function drawHipLine(ctx, pose, frame, scale) {
+function drawHipLine(ctx, pose, frame, scale, opts = {}) {
+  const color = opts.color || COLOR_HIP;
+  const alpha = opts.alpha ?? 0.85;
+  const lineWidth = opts.lineWidth ?? 3 * scale;
+  const dotRadius = opts.dotRadius ?? 5 * scale;
+  const label = opts.label || null;
+
   const lc = pose.conf[frame * 17 + J.L_HIP];
   const rc = pose.conf[frame * 17 + J.R_HIP];
-  if (lc < 0.05 || rc < 0.05) return;
+  if (lc < 0.05 || rc < 0.05) return null;
   const lx = pose.skeleton[(frame * 17 + J.L_HIP) * 2];
   const ly = pose.skeleton[(frame * 17 + J.L_HIP) * 2 + 1];
   const rx = pose.skeleton[(frame * 17 + J.R_HIP) * 2];
   const ry = pose.skeleton[(frame * 17 + J.R_HIP) * 2 + 1];
+
   ctx.save();
-  ctx.strokeStyle = COLOR_HIP;
-  ctx.lineWidth = 3 * scale;
-  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.globalAlpha = alpha;
+  if (opts.dashed) ctx.setLineDash([6 * scale, 4 * scale]);
   ctx.beginPath();
   ctx.moveTo(lx, ly); ctx.lineTo(rx, ry);
   ctx.stroke();
-  ctx.fillStyle = COLOR_HIP;
-  ctx.beginPath(); ctx.arc(lx, ly, 5 * scale, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(rx, ry, 5 * scale, 0, Math.PI * 2); ctx.fill();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(lx, ly, dotRadius, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(rx, ry, dotRadius, 0, Math.PI * 2); ctx.fill();
+
+  if (label) {
+    // Small label above the midpoint of the line.
+    const mx = (lx + rx) / 2;
+    const my = (ly + ry) / 2;
+    const fontPx = Math.round(11 * scale);
+    ctx.globalAlpha = 1;
+    ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
+    const tw = ctx.measureText(label).width;
+    const padX = 4 * scale, padY = 3 * scale;
+    const h = fontPx + 2 * padY;
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.fillRect(mx - tw / 2 - padX, my - h - 6 * scale, tw + 2 * padX, h);
+    ctx.fillStyle = color;
+    ctx.textBaseline = "top";
+    ctx.fillText(label, mx - tw / 2, my - h - 6 * scale + padY);
+  }
   ctx.restore();
+  return { lx, ly, rx, ry };
 }
 
 function drawCanvas(ctx, state) {
@@ -477,7 +514,29 @@ function drawCanvas(ctx, state) {
   const s = state.renderScale || 1;
   const pose = state.pose;
 
-  // Hip line (purple) — the rule's input signal.
+  // Ghost hip lines at the two extreme frames inside the search window —
+  // these are the two frames whose gap difference IS the range we're
+  // testing. Drawn semi-transparent / dashed so they sit behind the
+  // current-frame line.
+  drawHipLine(ctx, pose, p.trough_frame, s, {
+    color: COLOR_HIP_TROUGH,
+    alpha: 0.55,
+    lineWidth: 2.5 * s,
+    dotRadius: 4 * s,
+    dashed: true,
+    label: `trough · ${p.trough_gap.toFixed(3)}`,
+  });
+  drawHipLine(ctx, pose, p.peak_frame, s, {
+    color: COLOR_HIP_PEAK,
+    alpha: 0.55,
+    lineWidth: 2.5 * s,
+    dotRadius: 4 * s,
+    dashed: true,
+    label: `peak · ${p.peak_gap.toFixed(3)}`,
+  });
+
+  // Current-frame hip line (purple, solid, full opacity) — drawn last so
+  // it stays on top.
   drawHipLine(ctx, pose, f, s);
 
   // Predicted facing arrow (cyan) from hip midpoint — fixed across the window.
