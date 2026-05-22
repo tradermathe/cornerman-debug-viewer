@@ -1,33 +1,31 @@
 // Hip rotation review — walk through every labelled rotation-applicable punch
-// (cross/hook/uppercut, head/body), apply the orientation gate, and read off
-// how much the hips swung during the punch window. Mirrors
-// straights_review.js: one punch at a time, video loops within [start, end],
-// N/P keys (or buttons) step to next/prev.
+// (cross/hook/uppercut, head/body) and read off how much the hips swung
+// during the punch window. Mirrors straights_review.js: one punch at a time,
+// video loops within the search window, N/P keys (or buttons) step to next/
+// prev, M mutes.
 //
-// Why the orientation gate matters here: the rule's signal is
-//   gap[f] = |L_hip − R_hip| / torso_height
-// When the boxer is too frontal/back-on (|facing| close to 0° or ±180°), the
-// hip line collapses on the image and rotation creates depth-only motion that
-// doesn't lift the gap. We tightly gate to broadside (|facing| ≈ 90°) so the
-// hip line sits on the STEEP wings of sin(θ), where range ≈ rotation amount.
+// Signal:
+//   gap[f] = |L_hip − R_hip| / torso_height          (smoothed)
+//   W_est  = quantile(gap, 0.99) across the video    (running max across rounds)
 //
-// Per-punch compute (no round-level baseline — too unreliable when the boxer
-// moves, switches stance, or chains combos):
-//   * gap[f] smoothed with moving-average over cfg.gapSmoothSeconds
-//   * search window = [start − searchPreSec, end + searchPostSec]
-//                     asymmetric: load-up often happens before the labeled
-//                     start, but the labeled end already extends past the
-//                     furthest rotation point (until the hand returns) so
-//                     we don't need padding on the back side.
-//   * peak  = max(gap[search])
-//   * trough = min(gap[search])
-//   * range = peak − trough     ← THE signal: how much the hips swung
-//   * predicted = skip if orientation gate fails
-//                 pass if range ≥ min_range
-//                 fail otherwise
+// Per-punch compute:
+//   search window = [start − searchPreSec, end + searchPostSec]
+//                   asymmetric: load-up happens before the labelled start;
+//                   the labelled end already runs past peak rotation.
+//   peak / trough = max / min of gap inside the window
+//   range         = peak − trough
+//   peak_θ / trough_θ = arcsin(peak / W_est), arcsin(trough / W_est)
+//   rotation_deg  = peak_θ − trough_θ
+//
+// Single gate (both modes): skip if trough/W_est > noiseRatioMin. Catches
+// "hips parked broadside the whole punch" — gap signal saturated, neither
+// raw range nor recovered angle is trustworthy.
+//
+// Pass test depends on mode:
+//   range mode → range >= minRange
+//   ratio mode → rotation_deg >= minRotationDeg
 
 import { J, torsoHeight, drawSkeleton } from "../skeleton.js";
-import { STANCE_FITS } from "./orientation_lens.js";
 
 // W_est is per-VIDEO, not per-round. As the user visits more rounds of the
 // same video we take the running max so the estimate gets more accurate (the
@@ -43,41 +41,24 @@ const DEFAULTS = {
   // is past the furthest rotation point — so we don't pad after.
   searchPreSec:           0.3,
   searchPostSec:          0.0,
-  orientationGate:        true,
-  // Tiered orientation gate. INNER band = boxer broadside to camera, hip
-  // line on the steep wings of sin(θ) — the cleanest regime. OUTER band =
-  // boxer angled toward / away from camera, hip line closer to sin's peak
-  // where each degree of rotation moves the gap less. Empirically the
-  // metric still works in the outer band, just with a different (usually
-  // smaller) range value for the same rotation amount. Set per-band
-  // thresholds independently. Punches outside both bands → skip.
-  orientationInnerMinAbsDeg: 60,
-  orientationInnerMaxAbsDeg: 120,
-  orientationOuterMinAbsDeg: 30,
-  orientationOuterMaxAbsDeg: 150,
-  // Verdict threshold on (max gap − min gap) inside the search window.
-  // Range, not delta-from-round-median: we don't trust the round median
-  // when boxers move, switch guards, or chain combos. Single threshold
-  // since W-based gating now handles the sin-flat regime directly — no
-  // need for a per-band split.
-  minRange:               0.10,
 
-  // ── Mode toggle ────────────────────────────────────────────────────
-  // "range" = compare raw range (max gap − min gap) against a single
-  //           minRange threshold; gating handled by W-based noise-zone
-  //           check, same as ratio mode. Default — works for all videos.
-  // "ratio" = use W_est (99th percentile of gap across the round, ≈ this
-  //           boxer's true hip-width / torso-height ratio) to convert gap
-  //           into an implied hip-rotation angle in degrees. Skip punches
-  //           where the trough gap stays close to W (hips parked broadside,
-  //           arcsin too noisy). Requires the round to contain at least
-  //           one near-broadside frame for W_est to be accurate.
-  mode:                   "range",  // "range" | "ratio"
+  // ── Gate ─────────────────────────────────────────────────────────────
+  // The only gate: trough/W_est > noiseRatioMin → skip. Catches "hips
+  // parked broadside the whole punch" (gap signal saturated; can't tell
+  // rotation from noise).
+  noiseRatioMin:          0.95,
   wEstQuantile:           0.99,
-  noiseRatioMin:          0.95,     // skip if trough/W_est > this
-  minRotationDeg:         15,       // pass threshold in ratio mode
-  // Rule only applies to punches with rotation expectation (jab + body shots
-  // excluded — matches hip_rotation.js).
+
+  // ── Mode toggle ──────────────────────────────────────────────────────
+  // "range" = pass if (max gap − min gap) ≥ minRange. Unitless.
+  // "ratio" = recover hip-line angle θ = arcsin(gap/W_est) per frame,
+  //           pass if (θ_peak − θ_trough) ≥ minRotationDeg. In degrees.
+  mode:                   "range",  // "range" | "ratio"
+  minRange:               0.10,
+  minRotationDeg:         15,
+
+  // Rule only applies to punches with rotation expectation (jab + body
+  // shots excluded — matches hip_rotation.js).
   appliesTo: new Set([
     "cross_head", "cross_body",
     "lead_hook_head", "lead_uppercut_head",
@@ -85,11 +66,9 @@ const DEFAULTS = {
   ]),
 };
 
-const MIN_ANKLE_CONF = 0.30;
 const COLOR_HIP        = "#a78bfa";  // purple — current-frame hip line
 const COLOR_HIP_PEAK   = "#ffd24a";  // amber  — hip line at peak (widest) frame
 const COLOR_HIP_TROUGH = "#ff7e3a";  // orange — hip line at trough (narrowest) frame
-const COLOR_PRED       = "#3ad9e0";  // cyan   — predicted facing
 const COLOR_PASS       = "#5fd97a";
 const COLOR_FAIL       = "#e85a5a";
 const COLOR_SKIP       = "#7ec8ff";
@@ -110,8 +89,6 @@ let latestState = null;
 let cfg = { ...DEFAULTS };
 
 // ─── helpers ──────────────────────────────────────────────────────────────
-
-function wrap180(deg) { return ((deg + 180) % 360 + 360) % 360 - 180; }
 
 function colorFor(predicted) {
   if (predicted === "pass") return COLOR_PASS;
@@ -134,59 +111,6 @@ function movingAvg(arr, w) {
   return out;
 }
 
-// Window-median ankle-arrow → predicted facing direction (same algorithm
-// arm_extension / 07_punch_directions use). Returns null when fewer than
-// 3 frames clear the ankle conf gate.
-function medianPredictedFacing(pose, sf, ef, stance) {
-  if (!stance) return null;
-  const fit = STANCE_FITS[stance];
-  if (!fit) return null;
-  const dxs = [], dys = [];
-  for (let f = sf; f <= ef; f++) {
-    const cL = pose.conf[f * 17 + J.L_ANKLE];
-    const cR = pose.conf[f * 17 + J.R_ANKLE];
-    if (cL < MIN_ANKLE_CONF || cR < MIN_ANKLE_CONF) continue;
-    const lx = pose.skeleton[(f * 17 + J.L_ANKLE) * 2];
-    const ly = pose.skeleton[(f * 17 + J.L_ANKLE) * 2 + 1];
-    const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
-    const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
-    if (![lx, ly, rx, ry].every(Number.isFinite)) continue;
-    const orthodox = stance !== "southpaw";
-    dxs.push(orthodox ? (lx - rx) : (rx - lx));
-    dys.push(orthodox ? (ly - ry) : (ry - ly));
-  }
-  if (dxs.length < 3) return null;
-  dxs.sort((a, b) => a - b);
-  dys.sort((a, b) => a - b);
-  const mid = Math.floor(dxs.length / 2);
-  const mdx = dxs.length % 2 ? dxs[mid] : 0.5 * (dxs[mid - 1] + dxs[mid]);
-  const mdy = dys.length % 2 ? dys[mid] : 0.5 * (dys[mid - 1] + dys[mid]);
-  if (mdx * mdx + mdy * mdy < 1e-6) return null;
-  const arrowDeg = Math.atan2(mdy, mdx) * 180 / Math.PI;
-  return wrap180(fit.sign * arrowDeg + fit.offset_deg);
-}
-
-function hipMidAt(pose, f) {
-  const cLH = pose.conf[f * 17 + J.L_HIP];
-  const cRH = pose.conf[f * 17 + J.R_HIP];
-  if (cLH < 0.2 || cRH < 0.2) return null;
-  const lhx = pose.skeleton[(f * 17 + J.L_HIP) * 2];
-  const lhy = pose.skeleton[(f * 17 + J.L_HIP) * 2 + 1];
-  const rhx = pose.skeleton[(f * 17 + J.R_HIP) * 2];
-  const rhy = pose.skeleton[(f * 17 + J.R_HIP) * 2 + 1];
-  if (![lhx, lhy, rhx, rhy].every(Number.isFinite)) return null;
-  return { x: 0.5 * (lhx + rhx), y: 0.5 * (lhy + rhy) };
-}
-
-function drawArrowhead(ctx, x, y, angle, size) {
-  const a = 0.45;
-  ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x - size * Math.cos(angle - a), y - size * Math.sin(angle - a));
-  ctx.lineTo(x - size * Math.cos(angle + a), y - size * Math.sin(angle + a));
-  ctx.closePath();
-  ctx.fill();
-}
 
 // ─── compute ──────────────────────────────────────────────────────────────
 
@@ -254,24 +178,7 @@ function computeAll(state, cfg) {
     }
     const range = peak - trough;
 
-    // Orientation gate — window-median predicted facing from ankle arrow.
     const stance = d.stance?.toLowerCase?.() || null;
-    const orientationDeg = medianPredictedFacing(pose, sf, ef, stance);
-    // Classify into a facing band. "inner" = broadside (steep wings of sin).
-    // "outer" = angled toward/away from camera (closer to sin peak).
-    // null = outside both bands → skip.
-    let band = null;
-    if (orientationDeg != null) {
-      const a = Math.abs(orientationDeg);
-      if (a >= cfg.orientationInnerMinAbsDeg && a <= cfg.orientationInnerMaxAbsDeg) {
-        band = "inner";
-      } else if (a >= cfg.orientationOuterMinAbsDeg && a <= cfg.orientationOuterMaxAbsDeg) {
-        band = "outer";
-      }
-    }
-    // threshold is now a single value, used only by range mode. Kept on the
-    // punch object so the sidebar/table can display it consistently.
-    const threshold = cfg.minRange;
 
     // Ratio-mode derived quantities. Always computed so the UI can show
     // them; only USED for the verdict when cfg.mode === "ratio".
@@ -282,15 +189,12 @@ function computeAll(state, cfg) {
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
-    // Unified gating: both modes use the W-based noise-zone check.
-    // trough/W_est > noiseRatioMin means the gap stayed saturated throughout
-    // the punch (hips parked broadside) — neither raw range nor recovered
-    // angle is trustworthy there. Outside that zone, each mode applies its
-    // own threshold:
+    // Single gate: trough/W_est > noiseRatioMin means the gap stayed
+    // saturated throughout the punch (hips parked broadside) — neither
+    // raw range nor recovered angle is trustworthy there. Outside that
+    // zone, each mode applies its own threshold:
     //   range mode → range vs minRange
     //   ratio mode → rotationDeg vs minRotationDeg
-    // The orientation `band` is still computed and shown as context but no
-    // longer gates anything in either mode.
     const noiseZone = Number.isFinite(troughRatio) && troughRatio > cfg.noiseRatioMin;
     let predicted;
     if (cfg.mode === "ratio") {
@@ -306,7 +210,7 @@ function computeAll(state, cfg) {
     } else {
       if (noiseZone) {
         predicted = "skip";          // saturated gap signal, range untrustworthy
-      } else if (range >= threshold) {
+      } else if (range >= cfg.minRange) {
         predicted = "pass";
       } else {
         predicted = "fail";
@@ -336,9 +240,6 @@ function computeAll(state, cfg) {
       peak_theta: peakTheta,
       trough_theta: troughTheta,
       rotation_deg: rotationDeg,
-      orientation_deg: orientationDeg,
-      band,
-      threshold,
       predicted,
       label,
     };
@@ -453,8 +354,6 @@ function buildSidebarSkeleton() {
       <b>range</b> compares gap swing to <code>minRange = ${cfg.minRange.toFixed(2)}</code>.
       <b>ratio</b> recovers hip-line angle via <code>arcsin(gap/W_est)</code>
       and compares rotation in degrees to <code>minRotationDeg = ${cfg.minRotationDeg}°</code>.
-      The orientation band (inner / outer / out) is shown as context but
-      no longer gates anything.
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -645,10 +544,6 @@ function renderPunchTable() {
     const predCol = colorFor(p.predicted);
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
-    const bandStr = p.band || "—";
-    const bandCol = p.band === "inner" ? COLOR_PASS
-                  : p.band === "outer" ? COLOR_SKIP
-                  : "#888";
     const metricStr = isRatio
       ? (Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—")
       : p.range.toFixed(3);
@@ -656,7 +551,6 @@ function renderPunchTable() {
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
       <td style="padding:4px 6px;">${typeStr}</td>
-      <td style="padding:4px 6px; font-size:11px; color:${bandCol};">${bandStr}</td>
       <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${metricStr}</td>
       <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
     </tr>`;
@@ -669,7 +563,6 @@ function renderPunchTable() {
           <th style="padding:4px 6px; text-align:right; font-weight:600;">#</th>
           <th style="padding:4px 6px; font-weight:600;">t</th>
           <th style="padding:4px 6px; font-weight:600;">type</th>
-          <th style="padding:4px 6px; font-weight:600;">band</th>
           <th style="padding:4px 6px; text-align:right; font-weight:600;">${metricCol}</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
         </tr>
@@ -787,35 +680,10 @@ function rebuildSidebar(state) {
   const p = punches[activeIdx];
   if (!p) { el.innerHTML = ""; return; }
 
-  // 1) Orientation block. Ratio mode shows the band as info-only (the
-  // noise-zone gate is what actually skips); range mode shows ✓/✗ pills
-  // because the orientation gate is load-bearing there.
-  const oDeg = p.orientation_deg;
-  const ratioMode = cfg.mode === "ratio";
-  let orientLine;
-  if (oDeg == null) {
-    orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> <code>—</code> · ${pill("UNKNOWN", COLOR_UNCLEAR)}`;
-  } else {
-    const a = Math.abs(oDeg);
-    let status;
-    if (ratioMode) {
-      status = p.band === "inner" ? pill("inner (info)", COLOR_PASS)
-             : p.band === "outer" ? pill("outer (info)", COLOR_SKIP)
-             : pill("out of band (info)", COLOR_UNCLEAR);
-    } else {
-      status = p.band === "inner" ? pill("INNER ✓", COLOR_PASS)
-             : p.band === "outer" ? pill("OUTER ✓", COLOR_SKIP)
-             : pill("OUT OF GATE ✗", COLOR_FAIL);
-    }
-    orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> `
-      + `<code>${oDeg.toFixed(1)}°</code> · |a|=<code>${a.toFixed(1)}°</code> · ${status}`;
-  }
+  const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
+  const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
 
-  // 2) Rotation data — content varies by mode.
-  const rangeCol = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
-  const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
-
-  // 3) Verdict
+  // Verdict line.
   const predCol = colorFor(p.predicted);
   const verdictLine = `<span style="color:${predCol}">predicted:</span> ${pill(p.predicted, predCol)}`
     + (p.label
@@ -829,13 +697,13 @@ function rebuildSidebar(state) {
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
     `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (−${cfg.searchPreSec.toFixed(2)}s / +${cfg.searchPostSec.toFixed(2)}s)`,
     "",
-    `<b>1. Orientation gate</b>`,
-    orientLine,
+    `<b>1. Gate</b> (trough/W_est vs ${cfg.noiseRatioMin})`,
+    `trough / W_est = <code>${tRatioStr}</code>`
+      + (noiseZone ? ` · ${pill("NOISE ZONE → skip", COLOR_SKIP)}` : ` · ${pill("OK", COLOR_PASS)}`),
     "",
   ];
 
   if (cfg.mode === "ratio") {
-    // Ratio-mode signal display.
     const wEstStr = Number.isFinite(signals.wEst) ? signals.wEst.toFixed(3) : "—";
     const pRatio = Number.isFinite(p.peak_ratio) ? p.peak_ratio.toFixed(3) : "—";
     const tRatio = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
@@ -843,28 +711,20 @@ function rebuildSidebar(state) {
     const tTheta = Number.isFinite(p.trough_theta) ? p.trough_theta.toFixed(1) + "°" : "—";
     const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
     const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
-    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
     const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
     lines.push(
-      `<b>2. Hip / torso ratio → angle</b>`,
-      `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across round)`,
+      `<b>2. Rotation (degrees)</b>`,
+      `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across video)`,
       `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
       `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
-      `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`
-        + (noiseZone ? ` · ${pill("NOISE ZONE", COLOR_SKIP)} trough/W > ${cfg.noiseRatioMin}` : ""),
+      `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
     );
   } else {
-    // Range-mode signal display. W-gating (noise-zone check) now applies
-    // in range mode too — surface the trough/W ratio so the user can see
-    // when a skip was triggered by the W-gate.
-    const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
-    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
+    const rangeCol = (p.range >= cfg.minRange) ? COLOR_PASS : COLOR_FAIL;
     lines.push(
-      `<b>2. Hip rotation swing (local)</b>`,
+      `<b>2. Range (unitless)</b>`,
       `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
-      `trough / W_est = <code>${tRatioStr}</code>`
-        + (noiseZone ? ` · ${pill("NOISE ZONE", COLOR_SKIP)} > ${cfg.noiseRatioMin}` : ""),
-      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${thrStr}</code>)`,
+      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${cfg.minRange.toFixed(2)}</code>)`,
     );
   }
 
@@ -966,39 +826,15 @@ function drawCanvas(ctx, state) {
   // it stays on top.
   drawHipLine(ctx, pose, f, s);
 
-  // Predicted facing arrow (cyan) from hip midpoint — fixed across the window.
-  const hip = hipMidAt(pose, f);
-  if (hip && p.orientation_deg != null) {
-    const imgAngle = (90 - p.orientation_deg) * Math.PI / 180;
-    const len = 80 * s;
-    const x1 = hip.x + len * Math.cos(imgAngle);
-    const y1 = hip.y + len * Math.sin(imgAngle);
-    ctx.save();
-    ctx.strokeStyle = COLOR_PRED;
-    ctx.fillStyle = COLOR_PRED;
-    ctx.lineWidth = 3.5 * s;
-    ctx.beginPath(); ctx.moveTo(hip.x, hip.y); ctx.lineTo(x1, y1); ctx.stroke();
-    drawArrowhead(ctx, x1, y1, imgAngle, 14 * s);
-    ctx.restore();
-  }
-
   drawHud(ctx, p, s);
 }
 
 function drawHud(ctx, p, s) {
   const predCol = colorFor(p.predicted);
-  const bandTag = p.band ? `[${p.band}]` : "[out]";
-  const orientStatus = p.orientation_deg == null
-    ? "orientation: —"
-    : `orientation: ${p.orientation_deg.toFixed(0)}° ${bandTag}`;
-  const orientCol = p.orientation_deg == null ? COLOR_UNCLEAR
-                   : p.band === "inner" ? COLOR_PASS
-                   : p.band === "outer" ? COLOR_SKIP
-                   : COLOR_FAIL;
-  const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
   const ratioMode = cfg.mode === "ratio";
+  const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
 
-  // Two info lines depend on mode: peak/trough display and the metric/threshold line.
+  // Mode-specific peak/trough + metric lines.
   let peakTxt, metricTxt, metricCol;
   if (ratioMode) {
     const pTheta = Number.isFinite(p.peak_theta) ? `${p.peak_theta.toFixed(0)}°` : "—";
@@ -1006,16 +842,19 @@ function drawHud(ctx, p, s) {
     const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
     peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
     metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
-    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
-    metricCol = noiseZone
-      ? COLOR_SKIP
+    metricCol = noiseZone ? COLOR_SKIP
       : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
           ? COLOR_PASS : COLOR_FAIL);
   } else {
     peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
-    metricTxt = `range ${p.range.toFixed(3)}  ·  thr ${thrStr}`;
-    metricCol = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
+    metricTxt = `range ${p.range.toFixed(3)}  ·  thr ${cfg.minRange.toFixed(2)}`;
+    metricCol = noiseZone ? COLOR_SKIP
+      : (p.range >= cfg.minRange ? COLOR_PASS : COLOR_FAIL);
   }
+
+  const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
+  const gateTxt = `trough/W ${tRatioStr}  ·  thr ${cfg.noiseRatioMin}`;
+  const gateCol = noiseZone ? COLOR_SKIP : COLOR_PASS;
 
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const predTxt  = `pred: ${p.predicted}`;
@@ -1029,7 +868,7 @@ function drawHud(ctx, p, s) {
   const padY   = 10 * s;
   const x0 = 24 * s, y0 = 24 * s;
 
-  const lines = [titleTxt, orientStatus, peakTxt, metricTxt, predTxt, gtTxt + agreeSym];
+  const lines = [titleTxt, gateTxt, peakTxt, metricTxt, predTxt, gtTxt + agreeSym];
 
   ctx.save();
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
@@ -1052,10 +891,9 @@ function drawHud(ctx, p, s) {
 
   let y = y0 + padY + fontPx;
   ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(titleTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = orientCol;                ctx.fillText(orientStatus, x0 + padX, y); y += lineH;
+  ctx.fillStyle = gateCol;                  ctx.fillText(gateTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = "rgba(255,255,255,0.78)"; ctx.fillText(peakTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = metricCol;
-  ctx.fillText(metricTxt, x0 + padX, y); y += lineH;
+  ctx.fillStyle = metricCol;                ctx.fillText(metricTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = predCol;                  ctx.fillText(predTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = p.label ? colorFor(p.label) : "rgba(255,255,255,0.55)";
   ctx.fillText(gtTxt, x0 + padX, y);
@@ -1070,7 +908,7 @@ function drawHud(ctx, p, s) {
 
 export const HipRotationReviewRule = {
   id: "hip_rotation_review",
-  label: "Hip rotation review (loop + orientation)",
+  label: "Hip rotation review (loop)",
 
   skeletonStyle() {
     return {
