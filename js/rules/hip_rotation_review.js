@@ -25,7 +25,16 @@
 // floor too high). Crossover rotations pass through zero, so they're
 // never flagged as noise.
 //
-// Verdict: pass if rotation_deg >= minRotationDeg, else fail.
+// Per punch:
+//   score = clamp(rotation_deg / scoreTargetDeg × 100, 0, 100)
+//   tier  = pass (≥ solidRotationDeg) / warn / fail (<minRotationDeg)
+// The tier is a debug-friendly label; the score is the load-bearing
+// number that flows to the app. Session score = mean(score) over
+// applicable + evaluable (non-skipped) punches. Session severity:
+//   sessionScore ≥ scoreHideAbove → don't show the FormIssue card
+//   ≥ scoreLowAbove               → low
+//   ≥ scoreMedAbove               → medium
+//   else                          → high
 
 import { J, torsoHeight, drawSkeleton } from "../skeleton.js";
 
@@ -49,8 +58,37 @@ const DEFAULTS = {
   // ±W; can't tell rotation from noise).
   noiseRatioMin:          0.95,
   wEstQuantile:           0.99,
-  // Pass threshold on (θ_peak − θ_trough) in degrees.
+  // Per-punch debug tier labels (the load-bearing number is the score
+  // below — these are just coarse spot-check labels).
+  //   rotation < minRotationDeg                     → fail
+  //   minRotationDeg ≤ rotation < solidRotationDeg  → warn
+  //   rotation ≥ solidRotationDeg                   → pass
   minRotationDeg:         15,
+  solidRotationDeg:       40,
+
+  // Per-punch score (0–100). Linear in rotation_deg, capped at 100 once
+  // the boxer hits the target. Anchored at 40° because everything below
+  // 40° is considered imperfect; 25–40° is "not a massive issue but
+  // also not perfect", and <25° starts feeling like a real penalty.
+  //   rotation 40°+ → 100  (perfect)
+  //   rotation 30°  →  75
+  //   rotation 25°  →  62
+  //   rotation 15°  →  37
+  //   rotation 0°   →   0  (no rotation at all)
+  //
+  // Session score = mean(per-punch score) across applicable + evaluable
+  // (non-skipped) punches. The session-level severity for the app's
+  // FormIssue card is derived from the session score:
+  //   ≥ scoreHideAbove        → don't show the card (boxer is fine)
+  //   scoreLowAbove–HideAbove → low
+  //   scoreMedAbove–LowAbove  → medium
+  //   < scoreMedAbove         → high
+  // Cutoffs are policy and will be re-tuned once real session reports
+  // ship; current values are sensible defaults.
+  scoreTargetDeg:         40,
+  scoreHideAbove:         90,
+  scoreLowAbove:          80,
+  scoreMedAbove:          65,
   // Minimum hip-keypoint confidence to include a frame in the gap
   // signal. Below this on either hip, the frame becomes NaN and the
   // moving average skips it. Defends against pose-detector L/R swaps
@@ -83,6 +121,7 @@ const COLOR_HIP        = "#a78bfa";  // purple — current-frame hip line
 const COLOR_HIP_PEAK   = "#ffd24a";  // amber  — hip line at peak (widest) frame
 const COLOR_HIP_TROUGH = "#ff7e3a";  // orange — hip line at trough (narrowest) frame
 const COLOR_PASS       = "#5fd97a";
+const COLOR_WARN       = "#f5b945";  // amber — between fail and pass
 const COLOR_FAIL       = "#e85a5a";
 const COLOR_SKIP       = "#7ec8ff";
 const COLOR_UNCLEAR    = "#f5b945";
@@ -94,7 +133,7 @@ let keydownHandler = null;
 let loopWindow = null;
 let activeIdx = -1;
 let punches = [];
-let signals = null;           // {gap, punches, fps}
+let signals = null;           // {gap, punches, fps, wEst, sessionScore, sessionSeverity, sessionN, ...}
 let lastDetectionsRef = null;
 let lastStemForReset = null;
 let lastPose = null;
@@ -120,9 +159,35 @@ function signedDeg0(v) {
 
 function colorFor(predicted) {
   if (predicted === "pass") return COLOR_PASS;
+  if (predicted === "warn") return COLOR_WARN;
   if (predicted === "fail") return COLOR_FAIL;
   if (predicted === "skip") return COLOR_SKIP;
   return COLOR_UNCLEAR;
+}
+
+// Per-punch score (0–100), linear in rotation_deg, capped at the target.
+// Returns NaN if rotation_deg isn't finite (skip/no data).
+function rotationScore(rotationDeg, targetDeg) {
+  if (!Number.isFinite(rotationDeg)) return NaN;
+  return Math.max(0, Math.min(100, (rotationDeg / targetDeg) * 100));
+}
+
+// Session score → severity (or null for "don't show the card").
+function severityFor(sessionScore, cfg) {
+  if (!Number.isFinite(sessionScore)) return null;
+  if (sessionScore >= cfg.scoreHideAbove) return null;
+  if (sessionScore >= cfg.scoreLowAbove)  return "low";
+  if (sessionScore >= cfg.scoreMedAbove)  return "medium";
+  return "high";
+}
+
+// Map session severity → display color. Keeps the per-punch palette but
+// remaps to fit the high/medium/low naming.
+function severityColor(severity) {
+  if (severity === "high")   return COLOR_FAIL;
+  if (severity === "medium") return COLOR_WARN;
+  if (severity === "low")    return COLOR_PASS;
+  return COLOR_SKIP;
 }
 
 // NaN-aware moving average. Frames with NaN (e.g., low-confidence pose
@@ -261,6 +326,7 @@ function computeAll(state, cfg) {
     const troughTheta = Number.isFinite(troughRatio) ? Math.asin(troughRatio) * 180 / Math.PI : NaN;
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
+    const score = rotationScore(rotationDeg, cfg.scoreTargetDeg);
 
     // Gates: (1) low-validity → too few frames had valid pose data,
     // the surviving frames probably miss part of the motion (e.g. the
@@ -277,10 +343,12 @@ function computeAll(state, cfg) {
       predicted = "skip";              // too sparse — likely missing the drive
     } else if (minAbsRatio > cfg.noiseRatioMin) {
       predicted = "skip";              // sin-flat zone (one-sided saturation)
+    } else if (rotationDeg >= cfg.solidRotationDeg) {
+      predicted = "pass";              // solid rotation
     } else if (rotationDeg >= cfg.minRotationDeg) {
-      predicted = "pass";
+      predicted = "warn";              // not enough rotation
     } else {
-      predicted = "fail";
+      predicted = "fail";              // real problem
     }
 
     const label = d.rule_hip_rotation === "pass" || d.rule_hip_rotation === "fail"
@@ -309,12 +377,26 @@ function computeAll(state, cfg) {
       peak_theta: peakTheta,
       trough_theta: troughTheta,
       rotation_deg: rotationDeg,
+      score,
       predicted,
       label,
     };
   });
 
-  return { gap, punches: out, fps, wEst, wEstFrame, wEstFrameGap, wEstFromCache };
+  // Session-level aggregate: mean per-punch score across applicable +
+  // evaluable (non-skipped) punches. Drives the FormIssue severity.
+  let sumScore = 0, nEval = 0;
+  for (const p of out) {
+    if (p.predicted === "skip") continue;
+    if (!Number.isFinite(p.score)) continue;
+    sumScore += p.score;
+    nEval++;
+  }
+  const sessionScore = nEval > 0 ? sumScore / nEval : NaN;
+  const sessionSeverity = severityFor(sessionScore, cfg);
+
+  return { gap, punches: out, fps, wEst, wEstFrame, wEstFrameGap, wEstFromCache,
+           sessionScore, sessionSeverity, sessionN: nEval };
 }
 
 // 99th percentile (or whichever quantile) of a Float32Array, ignoring
@@ -448,8 +530,16 @@ function buildSidebarSkeleton() {
       hip/torso ratio at broadside) as the 99th percentile of
       <code>|signed gap|</code> across all rounds. Per punch we recover the
       hip-line angle <code>θ = arcsin(gap/W_est) ∈ [−90°, 90°]</code> at
-      peak and trough and compare the swing to
-      <code>minRotationDeg = ${cfg.minRotationDeg}°</code>. Skip when
+      peak and trough, then convert to a 0–100 score
+      <code>= clamp(rotation_deg / ${cfg.scoreTargetDeg}° × 100, 0, 100)</code>.
+      The session score (mean over evaluable punches) drives the app's
+      <span style="color:${COLOR_FAIL}">high</span> /
+      <span style="color:${COLOR_WARN}">medium</span> /
+      <span style="color:${COLOR_PASS}">low</span> / hide severity.
+      Per-punch we also tag a <code>pass/warn/fail</code> tier
+      (<code>&lt;${cfg.minRotationDeg}°</code> fail,
+      <code>${cfg.minRotationDeg}–${cfg.solidRotationDeg}°</code> warn,
+      <code>≥${cfg.solidRotationDeg}°</code> pass) for spot-checking. Skip when
       <code>min |gap|/W_est > ${cfg.noiseRatioMin}</code> (hips stayed
       saturated near ±W throughout — arcsin noise floor too high). Frames
       where either hip's confidence is below
@@ -480,10 +570,12 @@ function buildSidebarSkeleton() {
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
     <div id="hrr-table-wrap" style="margin-top:10px; max-height:360px; overflow-y:auto;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
-      Loops within the punch window. Thresholds
-      (<code>minRotationDeg=${cfg.minRotationDeg}°</code>,
-      <code>noiseRatioMin=${cfg.noiseRatioMin}</code>) and search padding
-      come from the defaults; tweak in <code>hip_rotation_review.js</code>.
+      Loops within the punch window. Score target
+      <code>${cfg.scoreTargetDeg}°</code>; severity cutoffs
+      <code>≥${cfg.scoreHideAbove}</code> hide,
+      <code>${cfg.scoreLowAbove}+</code> low,
+      <code>${cfg.scoreMedAbove}+</code> medium,
+      <code>else</code> high. Tweak in <code>hip_rotation_review.js</code>.
     </p>
   `;
   host.querySelector("#hrr-prev")?.addEventListener("click",
@@ -607,11 +699,13 @@ function renderPunchTable() {
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
     const metricStr = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
+    const scoreStr = Number.isFinite(p.score) ? p.score.toFixed(0) : "—";
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
       <td style="padding:4px 6px;">${typeStr}</td>
       <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${metricStr}</td>
+      <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${scoreStr}</td>
       <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
     </tr>`;
   }).join("");
@@ -624,6 +718,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; font-weight:600;">t</th>
           <th style="padding:4px 6px; font-weight:600;">type</th>
           <th style="padding:4px 6px; text-align:right; font-weight:600;">rotation</th>
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">score</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
         </tr>
       </thead>
@@ -706,21 +801,38 @@ function rebuildSidebar(state) {
     if (!punches.length) {
       summary.innerHTML = "";
     } else {
-      const counts = { pass: 0, fail: 0, skip: 0, unclear: 0 };
+      const counts = { pass: 0, warn: 0, fail: 0, skip: 0, unclear: 0 };
       let agree = 0, withGt = 0;
       for (const p of punches) {
         counts[p.predicted] = (counts[p.predicted] || 0) + 1;
         if (p.label) {
-          withGt++;
-          if (p.label === p.predicted) agree++;
+          // GT is binary pass/fail; collapse our 3 tiers to that for agreement.
+          const predGT = p.predicted === "pass" ? "pass"
+                       : (p.predicted === "warn" || p.predicted === "fail") ? "fail"
+                       : null;
+          if (predGT) {
+            withGt++;
+            if (p.label === predGT) agree++;
+          }
         }
       }
       const agreeStr = withGt
         ? `${agree}/${withGt} agree (${Math.round(100 * agree / withGt)}%)`
         : `no GT verdicts`;
+      const sScore = signals?.sessionScore;
+      const sSev = signals?.sessionSeverity;
+      const sN = signals?.sessionN || 0;
+      const scoreStr = Number.isFinite(sScore) ? sScore.toFixed(0) : "—";
+      const sevLabel = sSev === null ? "hide (boxer ok)" : (sSev || "—");
+      const sevCol = sSev ? severityColor(sSev) : COLOR_PASS;
       summary.innerHTML =
-        `<b>Round summary:</b> `
+        `<b>Round score:</b> `
+        + `${pill(`${scoreStr} / 100`, sevCol)} `
+        + `${pill(sevLabel, sevCol)} `
+        + `<span class="muted">over ${sN} evaluable punch${sN === 1 ? "" : "es"}</span>`
+        + `<br><span class="muted">Tier counts:</span> `
         + `${pill(`${counts.pass} pass`, COLOR_PASS)} `
+        + `${pill(`${counts.warn} warn`, COLOR_WARN)} `
         + `${pill(`${counts.fail} fail`, COLOR_FAIL)} `
         + `${pill(`${counts.skip} skip`, COLOR_SKIP)} `
         + `· ${agreeStr}`;
@@ -743,12 +855,15 @@ function rebuildSidebar(state) {
   const noiseZone = Number.isFinite(p.min_abs_ratio) && p.min_abs_ratio > cfg.noiseRatioMin;
   const mRatioStr = Number.isFinite(p.min_abs_ratio) ? p.min_abs_ratio.toFixed(3) : "—";
 
-  // Verdict line.
+  // Verdict line. GT is binary pass/fail; warn collapses to fail for ✓/✗.
   const predCol = colorFor(p.predicted);
+  const predBinary = p.predicted === "pass" ? "pass"
+                   : (p.predicted === "warn" || p.predicted === "fail") ? "fail"
+                   : null;
   const verdictLine = `<span style="color:${predCol}">predicted:</span> ${pill(p.predicted, predCol)}`
     + (p.label
         ? ` · <span class="muted">GT:</span> ${pill(p.label, colorFor(p.label))}`
-          + (p.label === p.predicted
+          + (predBinary && p.label === predBinary
               ? ` <span style="color:${COLOR_PASS}">✓</span>`
               : ` <span style="color:${COLOR_FAIL}">✗</span>`)
         : ` · <span class="muted">no GT</span>`);
@@ -778,14 +893,19 @@ function rebuildSidebar(state) {
   const pTheta = signedDeg1(p.peak_theta);
   const tTheta = signedDeg1(p.trough_theta);
   const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
-  const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
-  const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
+  const rotCol = noiseZone ? COLOR_SKIP : colorFor(p.predicted);
+  const thrTxt = `<code>&lt;${cfg.minRotationDeg}°</code> fail · `
+               + `<code>${cfg.minRotationDeg}–${cfg.solidRotationDeg}°</code> warn · `
+               + `<code>≥${cfg.solidRotationDeg}°</code> pass`;
+  const scoreStr = Number.isFinite(p.score) ? p.score.toFixed(0) : "—";
   lines.push(
     `<b>2. Rotation (degrees)</b>`,
     `<code>W_est = ${wEstStr}</code> (99th %ile of |signed gap| / torso across video)`,
     `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
     `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
-    `rotation = peak θ − trough θ = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
+    `rotation = peak θ − trough θ = <code style="color:${rotCol}">${rotDeg}</code>`,
+    `score = clamp(rotation / ${cfg.scoreTargetDeg}° × 100, 0, 100) = <code style="color:${rotCol}">${scoreStr} / 100</code>`,
+    `tiers: ${thrTxt}`,
   );
 
   lines.push(
@@ -949,11 +1069,10 @@ function drawHud(ctx, p, s) {
   const pTheta = signedDeg0(p.peak_theta);
   const tTheta = signedDeg0(p.trough_theta);
   const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
+  const scoreStr = Number.isFinite(p.score) ? `${p.score.toFixed(0)}` : "—";
   const peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
-  const metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
-  const metricCol = noiseZone ? COLOR_SKIP
-    : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
-        ? COLOR_PASS : COLOR_FAIL);
+  const metricTxt = `rotation ${rotDeg}  ·  score ${scoreStr}/100`;
+  const metricCol = noiseZone ? COLOR_SKIP : colorFor(p.predicted);
 
   const mRatioStr = Number.isFinite(p.min_abs_ratio) ? p.min_abs_ratio.toFixed(3) : "—";
   const gateTxt = `min|gap|/W ${mRatioStr}  ·  thr ${cfg.noiseRatioMin}`;
@@ -962,8 +1081,12 @@ function drawHud(ctx, p, s) {
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const predTxt  = `pred: ${p.predicted}`;
   const gtTxt    = p.label ? `GT: ${p.label}` : "GT: —";
-  const agreeSym = p.label && p.predicted !== "skip" && p.predicted !== "unclear"
-    ? (p.label === p.predicted ? "  ✓" : "  ✗") : "";
+  // GT is binary pass/fail; warn collapses to fail for the ✓/✗ check.
+  const predBinary = p.predicted === "pass" ? "pass"
+                   : (p.predicted === "warn" || p.predicted === "fail") ? "fail"
+                   : null;
+  const agreeSym = p.label && predBinary
+    ? (p.label === predBinary ? "  ✓" : "  ✗") : "";
 
   const fontPx = 15 * s;
   const lineH  = 22 * s;
@@ -1001,7 +1124,7 @@ function drawHud(ctx, p, s) {
   ctx.fillStyle = p.label ? colorFor(p.label) : "rgba(255,255,255,0.55)";
   ctx.fillText(gtTxt, x0 + padX, y);
   if (agreeSym) {
-    ctx.fillStyle = p.label === p.predicted ? COLOR_PASS : COLOR_FAIL;
+    ctx.fillStyle = p.label === predBinary ? COLOR_PASS : COLOR_FAIL;
     ctx.fillText(agreeSym, x0 + padX + ctx.measureText(gtTxt).width, y);
   }
   ctx.restore();
