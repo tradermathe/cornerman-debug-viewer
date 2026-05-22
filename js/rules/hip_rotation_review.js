@@ -5,19 +5,25 @@
 // prev, M mutes.
 //
 // Signal:
-//   gap[f] = |L_hip − R_hip| / torso_height          (smoothed)
-//   W_est  = quantile(gap, 0.99) across the video    (running max across rounds)
+//   gap[f] = (L_hip.x − R_hip.x) / torso_height                  (signed, smoothed)
+//          - sign flips when the hip line crosses the camera axis, which
+//            lets us measure crossover rotations at full magnitude
+//          - frames with either hip confidence < cfg.minHipConf are NaN'd
+//            so brief occlusions / L-R swaps don't poison the signal
+//   W_est  = quantile(|gap|, 0.99) across the video               (running max across rounds)
 //
 // Per-punch compute:
 //   search window = [start − searchPreSec, end + searchPostSec]
 //                   asymmetric: load-up happens before the labelled start;
 //                   the labelled end already runs past peak rotation.
-//   peak / trough     = max / min of gap inside the window
-//   peak_θ / trough_θ = arcsin(peak / W_est), arcsin(trough / W_est)
-//   rotation_deg      = peak_θ − trough_θ
+//   peak / trough     = max / min of signed gap inside the window
+//   peak_θ / trough_θ = arcsin(peak / W_est), arcsin(trough / W_est)    ∈ [−90°, 90°]
+//   rotation_deg      = peak_θ − trough_θ                              ∈ [0°, 180°]
 //
-// Gate: skip if trough/W_est > noiseRatioMin. Catches "hips parked broadside
-// the whole punch" — gap signal saturated, recovered angle untrustworthy.
+// Gate: skip if min(|gap|)/W_est > noiseRatioMin across the window —
+// catches "hips parked saturated near ±W the whole punch" (arcsin noise
+// floor too high). Crossover rotations pass through zero, so they're
+// never flagged as noise.
 //
 // Verdict: pass if rotation_deg >= minRotationDeg, else fail.
 
@@ -38,13 +44,19 @@ const DEFAULTS = {
   searchPreSec:           0.3,
   searchPostSec:          0.0,
 
-  // Gate: trough/W_est > noiseRatioMin → skip. Catches "hips parked
-  // broadside the whole punch" (gap saturated; can't tell rotation
-  // from noise).
+  // Gate: min(|signed gap|) / W_est > noiseRatioMin → skip. Catches
+  // "hips parked broadside the whole punch" (gap signal saturated near
+  // ±W; can't tell rotation from noise).
   noiseRatioMin:          0.95,
   wEstQuantile:           0.99,
   // Pass threshold on (θ_peak − θ_trough) in degrees.
   minRotationDeg:         15,
+  // Minimum hip-keypoint confidence to include a frame in the gap
+  // signal. Below this on either hip, the frame becomes NaN and the
+  // moving average skips it. Defends against pose-detector L/R swaps
+  // (which become "high-noise frames" the model can't confidently
+  // commit to) corrupting the signed gap signal.
+  minHipConf:             0.30,
 
   // Rule only applies to punches with rotation expectation (jab + body
   // shots excluded — matches hip_rotation.js).
@@ -79,6 +91,21 @@ let cfg = { ...DEFAULTS };
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
+// Format a signed number with explicit sign for display. Helps readers
+// see direction at a glance now that values can be negative.
+function signed3(v) {
+  if (!Number.isFinite(v)) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(3);
+}
+function signedDeg1(v) {
+  if (!Number.isFinite(v)) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(1) + "°";
+}
+function signedDeg0(v) {
+  if (!Number.isFinite(v)) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(0) + "°";
+}
+
 function colorFor(predicted) {
   if (predicted === "pass") return COLOR_PASS;
   if (predicted === "fail") return COLOR_FAIL;
@@ -86,6 +113,9 @@ function colorFor(predicted) {
   return COLOR_UNCLEAR;
 }
 
+// NaN-aware moving average. Frames with NaN (e.g., low-confidence pose
+// gated out) are skipped; the average uses only the valid neighbours in
+// the window. If no valid frames exist in the window, output is NaN.
 function movingAvg(arr, w) {
   if (w <= 1) return arr;
   const n = arr.length;
@@ -93,9 +123,11 @@ function movingAvg(arr, w) {
   const half = Math.floor(w / 2);
   for (let i = 0; i < n; i++) {
     const lo = Math.max(0, i - half), hi = Math.min(n - 1, i + half);
-    let s = 0;
-    for (let k = lo; k <= hi; k++) s += arr[k];
-    out[i] = s / (hi - lo + 1);
+    let s = 0, count = 0;
+    for (let k = lo; k <= hi; k++) {
+      if (Number.isFinite(arr[k])) { s += arr[k]; count++; }
+    }
+    out[i] = count > 0 ? s / count : NaN;
   }
   return out;
 }
@@ -108,25 +140,45 @@ function computeAll(state, cfg) {
   const fps = pose.fps || 30;
   const N = pose.n_frames;
 
-  // gap[f] = |L_hip − R_hip| / torso_height, smoothed.
+  // Signed gap = (L_hip.x − R_hip.x) / torso_height, smoothed. Sign carries
+  // direction: positive means L is to the right of R in image, negative is
+  // swapped. The sign flips when the hip line crosses being aligned with the
+  // camera axis — that's how we detect crossover rotations (load on one
+  // side → drive past perpendicular → end on the other) that unsigned gap
+  // would undercount by reflecting the swing back on itself.
+  //
+  // Frames where either hip's confidence is below cfg.minHipConf become
+  // NaN — the moving average then skips them. This is the defense against
+  // pose-detector L/R swaps, which tend to coincide with low-confidence
+  // moments (occlusion, fast motion blur). A confident swap (rare) still
+  // gets through, but the moving average dampens isolated swaps.
   const gapRaw = new Float32Array(N);
   for (let i = 0; i < N; i++) {
+    const cL = pose.conf[i * 17 + J.L_HIP];
+    const cR = pose.conf[i * 17 + J.R_HIP];
+    if (cL < cfg.minHipConf || cR < cfg.minHipConf) {
+      gapRaw[i] = NaN;
+      continue;
+    }
     const lx = pose.skeleton[(i * 17 + J.L_HIP) * 2];
-    const ly = pose.skeleton[(i * 17 + J.L_HIP) * 2 + 1];
     const rx = pose.skeleton[(i * 17 + J.R_HIP) * 2];
-    const ry = pose.skeleton[(i * 17 + J.R_HIP) * 2 + 1];
     const th = Math.max(1e-6, torsoHeight(pose, i));
-    gapRaw[i] = Math.hypot(lx - rx, ly - ry) / th;
+    gapRaw[i] = (lx - rx) / th;
   }
   const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
   const gap = movingAvg(gapRaw, smoothFrames);
 
   // W_est: per-VIDEO estimate of this boxer's true hip-width / torso-height
-  // ratio. Per-round we take a high quantile of the gap signal (default 99th
-  // percentile) — the max visible gap approaches W·sin(90°) = W. Across rounds
-  // of the same video we take the running max, so the estimate gets stronger
-  // as the user visits more rounds. Stored in module-level wEstByVideo.
-  const localWEst = quantile(gap, cfg.wEstQuantile);
+  // ratio. The signed gap sweeps between −W and +W (over a full rotation),
+  // so the max of |signed gap| approaches W. Per-round we take a high
+  // quantile of |signed gap| (default 99th %ile). Across rounds of the same
+  // video we take the running max, so the estimate gets stronger as the
+  // user visits more rounds.
+  const absGapForW = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    absGapForW[i] = Number.isFinite(gap[i]) ? Math.abs(gap[i]) : NaN;
+  }
+  const localWEst = quantile(absGapForW, cfg.wEstQuantile);
   const stem = state.cacheBasename || null;
   let wEst = localWEst;
   if (stem && Number.isFinite(localWEst)) {
@@ -136,13 +188,13 @@ function computeAll(state, cfg) {
   }
   const wEstFromCache = (stem && wEstByVideo.get(stem) !== localWEst && wEst > localWEst);
 
-  // Frame in THIS round whose gap is closest to W_est — used by the sidebar
-  // snapshot so the user can sanity-check whether it's actually a broadside
-  // frame. Falls back to the round's argmax-gap when W_est came from another
-  // round.
+  // Frame in THIS round whose |gap| is closest to W_est — used by the
+  // sidebar snapshot so the user can sanity-check that it really IS a
+  // broadside-hip frame.
   let wEstFrame = 0, wEstBestDiff = Infinity;
   for (let f = 0; f < gap.length; f++) {
-    const diff = Math.abs(gap[f] - wEst);
+    if (!Number.isFinite(gap[f])) continue;
+    const diff = Math.abs(Math.abs(gap[f]) - wEst);
     if (diff < wEstBestDiff) { wEstBestDiff = diff; wEstFrame = f; }
   }
   const wEstFrameGap = gap[wEstFrame];
@@ -159,30 +211,53 @@ function computeAll(state, cfg) {
     const ss = Math.max(0, sf - preFrames);
     const se = Math.min(N - 1, ef + postFrames);
 
-    let peak = gap[ss], peakAt = ss, trough = gap[ss], troughAt = ss;
+    // Scan the search window for peak (max signed gap), trough (min
+    // signed gap), and the smallest |signed gap| seen — that last one
+    // feeds the noise-zone gate. NaN frames (low pose confidence) are
+    // skipped so a brief occlusion doesn't poison the extremes.
+    let peak = -Infinity, peakAt = ss;
+    let trough = Infinity, troughAt = ss;
+    let minAbs = Infinity;
+    let anyValid = false;
     for (let f = ss; f <= se; f++) {
       const g = gap[f];
+      if (!Number.isFinite(g)) continue;
+      anyValid = true;
       if (g > peak)   { peak = g;   peakAt = f; }
       if (g < trough) { trough = g; troughAt = f; }
+      const ag = Math.abs(g);
+      if (ag < minAbs) minAbs = ag;
     }
+    if (!anyValid) { peak = NaN; trough = NaN; minAbs = NaN; }
 
     const stance = d.stance?.toLowerCase?.() || null;
 
-    // Recover hip-line angles from gap via arcsin(gap/W_est).
-    const peakRatio = wEst > 0 ? Math.min(1, peak / wEst) : NaN;
-    const troughRatio = wEst > 0 ? Math.min(1, trough / wEst) : NaN;
+    // Recover hip-line angles. Signed gap / W_est lives in [−1, 1] so
+    // arcsin returns angles in [−90°, 90°]. peak − trough captures the
+    // full swing INCLUDING crossover rotations (where peak and trough
+    // sit on opposite signs).
+    const peakRatio = wEst > 0 && Number.isFinite(peak)
+      ? Math.max(-1, Math.min(1, peak / wEst)) : NaN;
+    const troughRatio = wEst > 0 && Number.isFinite(trough)
+      ? Math.max(-1, Math.min(1, trough / wEst)) : NaN;
+    const minAbsRatio = wEst > 0 && Number.isFinite(minAbs)
+      ? Math.min(1, minAbs / wEst) : NaN;
     const peakTheta = Number.isFinite(peakRatio) ? Math.asin(peakRatio) * 180 / Math.PI : NaN;
     const troughTheta = Number.isFinite(troughRatio) ? Math.asin(troughRatio) * 180 / Math.PI : NaN;
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
-    // Single gate: hips parked broadside (gap saturated) → arcsin too
-    // noisy → skip. Otherwise compare rotation in degrees to threshold.
+    // Single gate: min(|signed gap|) / W_est > noiseRatioMin means the
+    // signal stayed near ±W throughout — hips were parked broadside
+    // (saturated) the whole punch. arcsin amplifies noise there, so we
+    // can't trust the recovered angle. Crossover rotations DON'T trigger
+    // this: signed gap passes through zero on its way from +W to −W (or
+    // back), so min(|gap|) ≈ 0, well below the threshold.
     let predicted;
-    if (!Number.isFinite(troughRatio) || !Number.isFinite(rotationDeg)) {
-      predicted = "skip";              // W_est unavailable
-    } else if (troughRatio > cfg.noiseRatioMin) {
-      predicted = "skip";              // sin-flat zone
+    if (!Number.isFinite(minAbsRatio) || !Number.isFinite(rotationDeg)) {
+      predicted = "skip";              // W_est unavailable or no valid frames
+    } else if (minAbsRatio > cfg.noiseRatioMin) {
+      predicted = "skip";              // sin-flat zone (one-sided saturation)
     } else if (rotationDeg >= cfg.minRotationDeg) {
       predicted = "pass";
     } else {
@@ -208,6 +283,7 @@ function computeAll(state, cfg) {
       trough_frame: troughAt,
       peak_ratio: peakRatio,
       trough_ratio: troughRatio,
+      min_abs_ratio: minAbsRatio,
       peak_theta: peakTheta,
       trough_theta: troughTheta,
       rotation_deg: rotationDeg,
@@ -319,13 +395,19 @@ function buildSidebarSkeleton() {
   host.innerHTML = `
     <h2>Hip rotation review</h2>
     <p class="hint">
-      Walk through every cross / hook / uppercut. Per video we estimate
-      <code>W_est</code> (the boxer's true hip/torso ratio at broadside) as
-      the 99th percentile of gap across all rounds. Per punch we recover the
-      hip-line angle <code>θ = arcsin(gap/W_est)</code> at peak and trough
-      and compare the swing to <code>minRotationDeg = ${cfg.minRotationDeg}°</code>.
-      Skip when <code>trough/W_est > ${cfg.noiseRatioMin}</code> (hips parked
-      broadside — arcsin noise floor too high).
+      Walk through every cross / hook / uppercut. Gap is <em>signed</em>
+      (<code>L.x − R.x</code>), so the sign flips when the hip line crosses
+      the camera axis — letting us measure crossover rotations at full
+      magnitude. Per video we estimate <code>W_est</code> (the boxer's true
+      hip/torso ratio at broadside) as the 99th percentile of
+      <code>|signed gap|</code> across all rounds. Per punch we recover the
+      hip-line angle <code>θ = arcsin(gap/W_est) ∈ [−90°, 90°]</code> at
+      peak and trough and compare the swing to
+      <code>minRotationDeg = ${cfg.minRotationDeg}°</code>. Skip when
+      <code>min |gap|/W_est > ${cfg.noiseRatioMin}</code> (hips stayed
+      saturated near ±W throughout — arcsin noise floor too high). Frames
+      where either hip's confidence is below
+      <code>${cfg.minHipConf}</code> are dropped from the signal.
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -448,7 +530,7 @@ function captureWEstSnapshot(state, signals) {
 
     const cachedNote = signals.wEstFromCache ? " (W_est from another round)" : "";
     cap.textContent =
-      `W_est frame: f${frame} · t=${(startSec + frame / fps).toFixed(2)}s · gap=${signals.wEstFrameGap.toFixed(3)}${cachedNote}`;
+      `W_est frame: f${frame} · t=${(startSec + frame / fps).toFixed(2)}s · gap=${signed3(signals.wEstFrameGap)}${cachedNote}`;
   };
 
   // If thumbVideo already at our target (or close), draw immediately.
@@ -612,8 +694,8 @@ function rebuildSidebar(state) {
   const p = punches[activeIdx];
   if (!p) { el.innerHTML = ""; return; }
 
-  const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
-  const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
+  const noiseZone = Number.isFinite(p.min_abs_ratio) && p.min_abs_ratio > cfg.noiseRatioMin;
+  const mRatioStr = Number.isFinite(p.min_abs_ratio) ? p.min_abs_ratio.toFixed(3) : "—";
 
   // Verdict line.
   const predCol = colorFor(p.predicted);
@@ -629,26 +711,26 @@ function rebuildSidebar(state) {
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
     `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (−${cfg.searchPreSec.toFixed(2)}s / +${cfg.searchPostSec.toFixed(2)}s)`,
     "",
-    `<b>1. Gate</b> (trough/W_est vs ${cfg.noiseRatioMin})`,
-    `trough / W_est = <code>${tRatioStr}</code>`
+    `<b>1. Gate</b> (min |gap| / W_est vs ${cfg.noiseRatioMin})`,
+    `min |gap| / W_est = <code>${mRatioStr}</code>`
       + (noiseZone ? ` · ${pill("NOISE ZONE → skip", COLOR_SKIP)}` : ` · ${pill("OK", COLOR_PASS)}`),
     "",
   ];
 
   const wEstStr = Number.isFinite(signals.wEst) ? signals.wEst.toFixed(3) : "—";
-  const pRatio = Number.isFinite(p.peak_ratio) ? p.peak_ratio.toFixed(3) : "—";
-  const tRatio = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
-  const pTheta = Number.isFinite(p.peak_theta) ? p.peak_theta.toFixed(1) + "°" : "—";
-  const tTheta = Number.isFinite(p.trough_theta) ? p.trough_theta.toFixed(1) + "°" : "—";
+  const pRatio = signed3(p.peak_ratio);
+  const tRatio = signed3(p.trough_ratio);
+  const pTheta = signedDeg1(p.peak_theta);
+  const tTheta = signedDeg1(p.trough_theta);
   const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
   const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
   const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
   lines.push(
     `<b>2. Rotation (degrees)</b>`,
-    `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across video)`,
+    `<code>W_est = ${wEstStr}</code> (99th %ile of |signed gap| / torso across video)`,
     `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
     `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
-    `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
+    `rotation = peak θ − trough θ = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
   );
 
   lines.push(
@@ -751,11 +833,11 @@ function drawCanvas(ctx, state) {
 function drawCornerLabels(ctx, p, s) {
   if (!Number.isFinite(p.peak_gap) || !Number.isFinite(p.trough_gap)) return;
   const peakStr = Number.isFinite(p.peak_theta)
-    ? `peak  gap ${p.peak_gap.toFixed(3)} → θ ${p.peak_theta.toFixed(0)}°`
-    : `peak  gap ${p.peak_gap.toFixed(3)}`;
+    ? `peak  gap ${signed3(p.peak_gap)} → θ ${signedDeg0(p.peak_theta)}`
+    : `peak  gap ${signed3(p.peak_gap)}`;
   const troughStr = Number.isFinite(p.trough_theta)
-    ? `trough  gap ${p.trough_gap.toFixed(3)} → θ ${p.trough_theta.toFixed(0)}°`
-    : `trough  gap ${p.trough_gap.toFixed(3)}`;
+    ? `trough  gap ${signed3(p.trough_gap)} → θ ${signedDeg0(p.trough_theta)}`
+    : `trough  gap ${signed3(p.trough_gap)}`;
 
   const fontPx = Math.round(12 * s);
   const lineH  = Math.round(20 * s);
@@ -807,10 +889,10 @@ function drawCornerLabels(ctx, p, s) {
 
 function drawHud(ctx, p, s) {
   const predCol = colorFor(p.predicted);
-  const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
+  const noiseZone = Number.isFinite(p.min_abs_ratio) && p.min_abs_ratio > cfg.noiseRatioMin;
 
-  const pTheta = Number.isFinite(p.peak_theta) ? `${p.peak_theta.toFixed(0)}°` : "—";
-  const tTheta = Number.isFinite(p.trough_theta) ? `${p.trough_theta.toFixed(0)}°` : "—";
+  const pTheta = signedDeg0(p.peak_theta);
+  const tTheta = signedDeg0(p.trough_theta);
   const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
   const peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
   const metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
@@ -818,8 +900,8 @@ function drawHud(ctx, p, s) {
     : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
         ? COLOR_PASS : COLOR_FAIL);
 
-  const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
-  const gateTxt = `trough/W ${tRatioStr}  ·  thr ${cfg.noiseRatioMin}`;
+  const mRatioStr = Number.isFinite(p.min_abs_ratio) ? p.min_abs_ratio.toFixed(3) : "—";
+  const gateTxt = `min|gap|/W ${mRatioStr}  ·  thr ${cfg.noiseRatioMin}`;
   const gateCol = noiseZone ? COLOR_SKIP : COLOR_PASS;
 
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
