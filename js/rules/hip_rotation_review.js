@@ -14,7 +14,11 @@
 // Per-punch compute (no round-level baseline — too unreliable when the boxer
 // moves, switches stance, or chains combos):
 //   * gap[f] smoothed with moving-average over cfg.gapSmoothSeconds
-//   * search window = [start − searchWindowSec, end + searchWindowSec]
+//   * search window = [start − searchPreSec, end + searchPostSec]
+//                     asymmetric: load-up often happens before the labeled
+//                     start, but the labeled end already extends past the
+//                     furthest rotation point (until the hand returns) so
+//                     we don't need padding on the back side.
 //   * peak  = max(gap[search])
 //   * trough = min(gap[search])
 //   * range = peak − trough     ← THE signal: how much the hips swung
@@ -27,7 +31,12 @@ import { STANCE_FITS } from "./orientation_lens.js";
 
 const DEFAULTS = {
   gapSmoothSeconds:       0.083,
-  searchWindowSec:        0.3,        // ±this around punch [start, end]
+  // Asymmetric search padding. Load-up often happens BEFORE the labelled
+  // punch start, so we extend the search window back by searchPreSec to
+  // catch it. The labelled end already runs until the hand returns, which
+  // is past the furthest rotation point — so we don't pad after.
+  searchPreSec:           0.3,
+  searchPostSec:          0.0,
   // Verdict threshold on (max gap − min gap) inside the search window.
   // Range, not delta-from-round-median: we don't trust the round median
   // when boxers move, switch guards, or chain combos. Local swing IS the
@@ -177,13 +186,14 @@ function computeAll(state, cfg) {
   const detections = (state.labels?.detections || [])
     .filter(d => cfg.appliesTo.has(d.punch_type));
 
-  const searchFrames = Math.max(2, Math.round(cfg.searchWindowSec * fps));
+  const preFrames = Math.max(0, Math.round(cfg.searchPreSec * fps));
+  const postFrames = Math.max(0, Math.round(cfg.searchPostSec * fps));
 
   const out = detections.map(d => {
     const sf = Math.max(0, d.start_frame);
     const ef = Math.min(N - 1, d.end_frame);
-    const ss = Math.max(0, sf - searchFrames);
-    const se = Math.min(N - 1, ef + searchFrames);
+    const ss = Math.max(0, sf - preFrames);
+    const se = Math.min(N - 1, ef + postFrames);
 
     let peak = gap[ss], peakAt = ss, trough = gap[ss], troughAt = ss;
     for (let f = ss; f <= se; f++) {
@@ -277,9 +287,10 @@ function seekToPunch(idx, state) {
   if (idx >= punches.length) idx = punches.length - 1;
   const p = punches[idx];
   activeIdx = idx;
-  // Loop the FULL search window (label window + ±searchWindowSec padding)
-  // so the user actually sees the frames the verdict was computed over —
-  // including the wind-up and follow-through where peak/trough can sit.
+  // Loop the FULL search window (label window + asymmetric padding:
+  // searchPreSec before, searchPostSec after) so the user actually sees
+  // the frames the verdict was computed over — including any wind-up
+  // that sits before the labelled start.
   loopWindow = { start_frame: p.search_start, end_frame: p.search_end };
   if (videoEl && state.fps) {
     videoEl.currentTime = (state.start_sec || 0) + p.search_start / state.fps;
@@ -538,7 +549,7 @@ function rebuildSidebar(state) {
 
   const lines = [
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
-    `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (±${cfg.searchWindowSec.toFixed(2)}s)`,
+    `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (−${cfg.searchPreSec.toFixed(2)}s / +${cfg.searchPostSec.toFixed(2)}s)`,
     "",
     `<b>1. Orientation gate</b>`,
     orientLine,
@@ -745,7 +756,7 @@ export const HipRotationReviewRule = {
     rebuildPunches(state);
     // If the user scrubbed away from the active punch, hop to whichever
     // rotation-applicable punch the cursor is now inside. Compares against
-    // the search window (label window + ±searchWindowSec padding) since
+    // the search window (label window + asymmetric pre/post padding) since
     // that's what the loop plays. Small extra tolerance handles the race
     // between the viewer's frame update and the snap-back handler.
     const ACTIVE_TOLERANCE_FRAMES = 5;

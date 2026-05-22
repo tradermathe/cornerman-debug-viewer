@@ -930,6 +930,13 @@ els.scrubber.addEventListener("input", e => seekToFrame(parseInt(e.target.value)
 els.speedSel.addEventListener("change", () => {
   els.video.playbackRate = parseFloat(els.speedSel.value);
 });
+// Setting els.video.src (new video OR new round) resets playbackRate to 1.0,
+// but the speed dropdown UI still shows whatever the user last picked. Re-apply
+// the selected rate every time metadata loads so the displayed speed matches
+// reality.
+els.video.addEventListener("loadedmetadata", () => {
+  els.video.playbackRate = parseFloat(els.speedSel.value);
+});
 
 document.addEventListener("keydown", e => {
   if (els.viewer.hidden) return;
