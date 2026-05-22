@@ -26,8 +26,14 @@
 //                 pass if range ≥ min_range
 //                 fail otherwise
 
-import { J, torsoHeight } from "../skeleton.js";
+import { J, torsoHeight, drawSkeleton } from "../skeleton.js";
 import { STANCE_FITS } from "./orientation_lens.js";
+
+// W_est is per-VIDEO, not per-round. As the user visits more rounds of the
+// same video we take the running max so the estimate gets more accurate (the
+// max best approximates the boxer's true hip width at broadside). Module-
+// level so it survives lens remounts and round-switches.
+const wEstByVideo = new Map();   // videoStem → number
 
 const DEFAULTS = {
   gapSmoothSeconds:       0.083,
@@ -200,11 +206,31 @@ function computeAll(state, cfg) {
   const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
   const gap = movingAvg(gapRaw, smoothFrames);
 
-  // W_est: round-level estimate of this boxer's true hip-width / torso-height
-  // ratio. Take a high quantile of the gap signal (default 99th percentile)
-  // since the maximum visible gap across many frames approaches W·sin(90°) = W.
-  // Used by ratio mode only, but cheap to compute either way.
-  const wEst = quantile(gap, cfg.wEstQuantile);
+  // W_est: per-VIDEO estimate of this boxer's true hip-width / torso-height
+  // ratio. Per-round we take a high quantile of the gap signal (default 99th
+  // percentile) — the max visible gap approaches W·sin(90°) = W. Across rounds
+  // of the same video we take the running max, so the estimate gets stronger
+  // as the user visits more rounds. Stored in module-level wEstByVideo.
+  const localWEst = quantile(gap, cfg.wEstQuantile);
+  const stem = state.cacheBasename || null;
+  let wEst = localWEst;
+  if (stem && Number.isFinite(localWEst)) {
+    const cached = wEstByVideo.get(stem);
+    wEst = (cached != null && cached > localWEst) ? cached : localWEst;
+    wEstByVideo.set(stem, wEst);
+  }
+  const wEstFromCache = (stem && wEstByVideo.get(stem) !== localWEst && wEst > localWEst);
+
+  // Frame in THIS round whose gap is closest to W_est — used by the sidebar
+  // snapshot so the user can sanity-check whether it's actually a broadside
+  // frame. Falls back to the round's argmax-gap when W_est came from another
+  // round.
+  let wEstFrame = 0, wEstBestDiff = Infinity;
+  for (let f = 0; f < gap.length; f++) {
+    const diff = Math.abs(gap[f] - wEst);
+    if (diff < wEstBestDiff) { wEstBestDiff = diff; wEstFrame = f; }
+  }
+  const wEstFrameGap = gap[wEstFrame];
 
   const detections = (state.labels?.detections || [])
     .filter(d => cfg.appliesTo.has(d.punch_type));
@@ -305,7 +331,7 @@ function computeAll(state, cfg) {
     };
   });
 
-  return { gap, punches: out, fps, wEst };
+  return { gap, punches: out, fps, wEst, wEstFrame, wEstFrameGap, wEstFromCache };
 }
 
 // 99th percentile (or whichever quantile) of a Float32Array, ignoring
@@ -429,11 +455,16 @@ function buildSidebarSkeleton() {
       <button id="hrr-mute" class="orient-btn-action secondary" style="padding:6px 10px;">mute (M)</button>
       <span id="hrr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
     </div>
-    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:0 0 14px;">
+    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:0 0 8px;">
       <span style="color:#888; font-size:12px;">mode:</span>
       <button id="hrr-mode-range" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">range</button>
       <button id="hrr-mode-ratio" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">ratio (W_est)</button>
       <span id="hrr-w-est" style="margin-left:6px; color:#888; font-size:12px; font-family:ui-monospace,monospace;"></span>
+    </div>
+    <div id="hrr-w-snapshot-wrap" style="margin:0 0 14px; display:none;">
+      <canvas id="hrr-w-snapshot" width="240" height="160"
+              style="display:block; background:#111; border:1px solid #2a2a2a; border-radius:4px;"></canvas>
+      <div id="hrr-w-snapshot-cap" style="margin-top:4px; font-size:11px; color:#888; font-family:ui-monospace,monospace;"></div>
     </div>
     <div id="hrr-state" class="hint" style="line-height:1.7;"></div>
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
@@ -455,6 +486,97 @@ function buildSidebarSkeleton() {
   updateMuteButton();
   updateModeButtons();
   renderPunchTable();
+}
+
+// Capture the W_est candidate frame (video frame at signals.wEstFrame plus
+// the skeleton at that frame) into the sidebar snapshot canvas so the user
+// can sanity-check that the frame W_est was sampled from really IS a
+// broadside-hip frame. Uses the viewer's shared thumb-video element to seek
+// without disturbing main playback — same trick the scrubber-hover preview
+// in viewer.js uses. The seek is async; we re-trigger when state changes.
+let lastSnapshotKey = null;   // dedupe by (stem, frame) to avoid re-seek loops
+function captureWEstSnapshot(state, signals) {
+  if (!host || !signals || !state.pose) return;
+  const wrap = host.querySelector("#hrr-w-snapshot-wrap");
+  const canvas = host.querySelector("#hrr-w-snapshot");
+  const cap = host.querySelector("#hrr-w-snapshot-cap");
+  if (!wrap || !canvas || !cap) return;
+  if (!Number.isFinite(signals.wEst) || !Number.isFinite(signals.wEstFrame)) {
+    wrap.style.display = "none"; return;
+  }
+  wrap.style.display = "block";
+
+  const thumbVideo = document.getElementById("thumb-video");
+  if (!thumbVideo || !thumbVideo.src) {
+    cap.textContent = "video not loaded";
+    return;
+  }
+  const frame = signals.wEstFrame;
+  const stem = state.cacheBasename || "";
+  const key = `${stem}:${state.cacheRound}:${frame}`;
+  if (key === lastSnapshotKey) return;
+  lastSnapshotKey = key;
+
+  const fps = state.fps || state.pose.fps || 30;
+  const startSec = state.start_sec || 0;
+  const targetTime = startSec + (frame + 0.5) / fps;
+
+  const draw = () => {
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    const vw = thumbVideo.videoWidth || state.pose.width || 16;
+    const vh = thumbVideo.videoHeight || state.pose.height || 9;
+    const scale = Math.min(W / vw, H / vh);
+    const dw = vw * scale, dh = vh * scale;
+    const dx = (W - dw) / 2, dy = (H - dh) / 2;
+    ctx.fillStyle = "#111";
+    ctx.fillRect(0, 0, W, H);
+    try { ctx.drawImage(thumbVideo, dx, dy, dw, dh); } catch { /* not ready */ }
+    ctx.save();
+    ctx.translate(dx, dy);
+    ctx.scale(scale, scale);
+    drawSkeleton(ctx, state.pose, frame, {
+      boneColor: "rgba(255,255,255,0.45)",
+      boneWidth: 2,
+      jointRadius: 3,
+    });
+    // Emphasised hip line in amber — the actual segment whose length IS W_est.
+    const lc = state.pose.conf[frame * 17 + J.L_HIP];
+    const rc = state.pose.conf[frame * 17 + J.R_HIP];
+    if (lc >= 0.05 && rc >= 0.05) {
+      const lx = state.pose.skeleton[(frame * 17 + J.L_HIP) * 2];
+      const ly = state.pose.skeleton[(frame * 17 + J.L_HIP) * 2 + 1];
+      const rx = state.pose.skeleton[(frame * 17 + J.R_HIP) * 2];
+      const ry = state.pose.skeleton[(frame * 17 + J.R_HIP) * 2 + 1];
+      ctx.strokeStyle = COLOR_HIP_PEAK;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(lx, ly); ctx.lineTo(rx, ry);
+      ctx.stroke();
+      ctx.fillStyle = COLOR_HIP_PEAK;
+      ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(rx, ry, 4, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+
+    const cachedNote = signals.wEstFromCache ? " (W_est from another round)" : "";
+    cap.textContent =
+      `W_est frame: f${frame} · t=${(startSec + frame / fps).toFixed(2)}s · gap=${signals.wEstFrameGap.toFixed(3)}${cachedNote}`;
+  };
+
+  // If thumbVideo already at our target (or close), draw immediately.
+  if (Math.abs(thumbVideo.currentTime - targetTime) < 0.05 && thumbVideo.readyState >= 2) {
+    draw();
+    return;
+  }
+  // Otherwise seek and draw on completion. Use a one-shot listener so we
+  // don't interfere with the scrubber-hover thumbnail's seeked handler.
+  const onSeeked = () => {
+    thumbVideo.removeEventListener("seeked", onSeeked);
+    draw();
+  };
+  thumbVideo.addEventListener("seeked", onSeeked);
+  thumbVideo.currentTime = targetTime;
 }
 
 function setMode(newMode) {
@@ -601,6 +723,7 @@ function rebuildSidebar(state) {
 
   updateActiveRow();
   updateModeButtons();
+  captureWEstSnapshot(state, signals);
 
   const counter = host.querySelector("#hrr-counter");
   if (counter) {
@@ -980,5 +1103,6 @@ export const HipRotationReviewRule = {
     timeupdateHandler = null;
     keydownHandler = null;
     loopWindow = null;
+    lastSnapshotKey = null;
   },
 };
