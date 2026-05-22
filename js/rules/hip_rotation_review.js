@@ -376,16 +376,40 @@ function installTimeupdateLoop(state) {
 }
 
 function installKeyHandlers(state) {
-  if (keydownHandler) document.removeEventListener("keydown", keydownHandler);
+  // Use the CAPTURE phase so we run before the viewer's bubble-phase
+  // keydown listener. This lets us block out-of-loop arrow/bracket steps
+  // before seekToFrame ever fires.
+  if (keydownHandler) document.removeEventListener("keydown", keydownHandler, true);
   keydownHandler = (e) => {
     if (state.rule?.id !== "hip_rotation_review") return;
     const tag = e.target?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA") return;
-    if (e.key === "n" || e.key === "N") { e.preventDefault(); seekToPunch(activeIdx + 1, state); }
-    else if (e.key === "p" || e.key === "P") { e.preventDefault(); seekToPunch(activeIdx - 1, state); }
-    else if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); }
+
+    if (e.key === "n" || e.key === "N") { e.preventDefault(); seekToPunch(activeIdx + 1, state); return; }
+    if (e.key === "p" || e.key === "P") { e.preventDefault(); seekToPunch(activeIdx - 1, state); return; }
+    if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); return; }
+
+    // Frame-stepping clamp: when the cursor sits inside the active loop
+    // window, arrows / brackets can't push it past the loop boundaries.
+    // Outside the loop (user scrubbed away manually), keys behave normally.
+    if (!loopWindow) return;
+    let delta = 0;
+    if      (e.key === "ArrowLeft")  delta = -1;
+    else if (e.key === "ArrowRight") delta = +1;
+    else if (e.key === "[")          delta = -10;
+    else if (e.key === "]")          delta = +10;
+    else return;
+
+    const f = state.frame;
+    if (f < loopWindow.start_frame || f > loopWindow.end_frame) return;
+    const target = f + delta;
+    if (target < loopWindow.start_frame || target > loopWindow.end_frame) {
+      // Block the viewer's handler so the cursor doesn't escape the loop.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
   };
-  document.addEventListener("keydown", keydownHandler);
+  document.addEventListener("keydown", keydownHandler, true);
 }
 
 // ─── sidebar ──────────────────────────────────────────────────────────────
@@ -1015,7 +1039,7 @@ export const HipRotationReviewRule = {
       videoEl.removeEventListener("timeupdate", timeupdateHandler);
     }
     if (keydownHandler) {
-      document.removeEventListener("keydown", keydownHandler);
+      document.removeEventListener("keydown", keydownHandler, true);
     }
     timeupdateHandler = null;
     keydownHandler = null;
