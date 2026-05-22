@@ -29,8 +29,12 @@ const DEFAULTS = {
   searchWindowSec:        0.4,
   minDelta:               0.05,
   orientationGate:        true,
-  orientationMinAbsDeg:   60,
-  orientationMaxAbsDeg:   150,
+  // Tight gate: only score punches where the boxer is genuinely broadside
+  // to the camera. Outside this band, hip rotation can't be reliably read
+  // from 2D — we'd rather skip than guess. Calibrate empirically against
+  // labels; [75°, 105°] is the starting precision-favouring choice.
+  orientationMinAbsDeg:   75,
+  orientationMaxAbsDeg:   105,
   // Rule only applies to punches with rotation expectation (jab + body shots
   // excluded — matches hip_rotation.js).
   appliesTo: new Set([
