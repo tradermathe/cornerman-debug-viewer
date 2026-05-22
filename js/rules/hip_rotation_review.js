@@ -1,6 +1,6 @@
 // Hip rotation review — walk through every labelled rotation-applicable punch
-// (cross/hook/uppercut, head/body), apply the orientation gate, and review the
-// gap-delta verdict side by side with the canvas overlay. Mirrors
+// (cross/hook/uppercut, head/body), apply the orientation gate, and read off
+// how much the hips swung during the punch window. Mirrors
 // straights_review.js: one punch at a time, video loops within [start, end],
 // N/P keys (or buttons) step to next/prev.
 //
@@ -8,26 +8,32 @@
 //   gap[f] = |L_hip − R_hip| / torso_height
 // When the boxer is too frontal/back-on (|facing| close to 0° or ±180°), the
 // hip line collapses on the image and rotation creates depth-only motion that
-// doesn't lift the gap. So we predict "skip" outside the sideways band — same
-// gate the arm-extension / straights review uses, same defaults.
+// doesn't lift the gap. We tightly gate to broadside (|facing| ≈ 90°) so the
+// hip line sits on the STEEP wings of sin(θ), where range ≈ rotation amount.
 //
-// Per-punch compute:
+// Per-punch compute (no round-level baseline — too unreliable when the boxer
+// moves, switches stance, or chains combos):
 //   * gap[f] smoothed with moving-average over cfg.gapSmoothSeconds
-//   * baseline = median(gap) across the whole round
-//   * search window = [start − search_window, end + search_window]
-//   * peak_gap   = max(gap[search])
-//   * delta      = peak_gap − baseline
-//   * predicted  = skip if orientation gate fails
-//                  pass if delta ≥ min_delta
-//                  fail otherwise
+//   * search window = [start − searchWindowSec, end + searchWindowSec]
+//   * peak  = max(gap[search])
+//   * trough = min(gap[search])
+//   * range = peak − trough     ← THE signal: how much the hips swung
+//   * predicted = skip if orientation gate fails
+//                 pass if range ≥ min_range
+//                 fail otherwise
 
 import { J, torsoHeight } from "../skeleton.js";
 import { STANCE_FITS } from "./orientation_lens.js";
 
 const DEFAULTS = {
   gapSmoothSeconds:       0.083,
-  searchWindowSec:        0.4,
-  minDelta:               0.05,
+  searchWindowSec:        0.3,        // ±this around punch [start, end]
+  // Verdict threshold on (max gap − min gap) inside the search window.
+  // Range, not delta-from-round-median: we don't trust the round median
+  // when boxers move, switch guards, or chain combos. Local swing IS the
+  // rotation signal — inside the tight orientation gate, sin(θ) is roughly
+  // linear, so range ≈ amount of hip rotation (in projection units).
+  minRange:               0.10,
   orientationGate:        true,
   // Tight gate: only score punches where the boxer is genuinely broadside
   // to the camera. Outside this band, hip rotation can't be reliably read
@@ -59,7 +65,7 @@ let keydownHandler = null;
 let loopWindow = null;
 let activeIdx = -1;
 let punches = [];
-let signals = null;           // {gap, baseline, fps}
+let signals = null;           // {gap, punches, fps}
 let lastDetectionsRef = null;
 let lastStemForReset = null;
 let lastPose = null;
@@ -89,11 +95,6 @@ function movingAvg(arr, w) {
     out[i] = s / (hi - lo + 1);
   }
   return out;
-}
-
-function median(arr) {
-  const s = Array.from(arr).sort((a, b) => a - b);
-  return s.length ? s[Math.floor(s.length / 2)] : 0;
 }
 
 // Window-median ankle-arrow → predicted facing direction (same algorithm
@@ -169,7 +170,6 @@ function computeAll(state, cfg) {
   }
   const smoothFrames = Math.max(1, Math.round(cfg.gapSmoothSeconds * fps));
   const gap = movingAvg(gapRaw, smoothFrames);
-  const baseline = median(gap);
 
   const detections = (state.labels?.detections || [])
     .filter(d => cfg.appliesTo.has(d.punch_type));
@@ -182,13 +182,13 @@ function computeAll(state, cfg) {
     const ss = Math.max(0, sf - searchFrames);
     const se = Math.min(N - 1, ef + searchFrames);
 
-    let peak = gap[ss], peakAt = ss, trough = gap[ss];
+    let peak = gap[ss], peakAt = ss, trough = gap[ss], troughAt = ss;
     for (let f = ss; f <= se; f++) {
       const g = gap[f];
-      if (g > peak)   { peak = g; peakAt = f; }
-      if (g < trough)  trough = g;
+      if (g > peak)   { peak = g;   peakAt = f; }
+      if (g < trough) { trough = g; troughAt = f; }
     }
-    const delta = peak - baseline;
+    const range = peak - trough;
 
     // Orientation gate — window-median predicted facing from ankle arrow.
     const stance = d.stance?.toLowerCase?.() || null;
@@ -203,7 +203,7 @@ function computeAll(state, cfg) {
       predicted = "skip";
     } else if (cfg.orientationGate && !orientationSideways) {
       predicted = "skip";
-    } else if (delta >= cfg.minDelta) {
+    } else if (range >= cfg.minRange) {
       predicted = "pass";
     } else {
       predicted = "fail";
@@ -223,9 +223,10 @@ function computeAll(state, cfg) {
       search_end: se,
       land_frame: peakAt,
       peak_gap: peak,
+      peak_frame: peakAt,
       trough_gap: trough,
-      range_gap: peak - trough,
-      delta,
+      trough_frame: troughAt,
+      range,
       orientation_deg: orientationDeg,
       orientation_sideways: orientationSideways,
       predicted,
@@ -233,7 +234,7 @@ function computeAll(state, cfg) {
     };
   });
 
-  return { gap, baseline, punches: out, fps };
+  return { gap, punches: out, fps };
 }
 
 // ─── data plumbing ────────────────────────────────────────────────────────
@@ -321,7 +322,8 @@ function buildSidebarSkeleton() {
       <b>orientation gate</b> (fighter must be sideways,
       |angle| in <code>[${cfg.orientationMinAbsDeg}°, ${cfg.orientationMaxAbsDeg}°]</code>) —
       too frontal and the hip line collapses on screen, so the rule predicts
-      <i>skip</i>. Otherwise scores <code>peak_gap − baseline ≥ min_delta</code>.
+      <i>skip</i>. Otherwise scores <code>max(gap) − min(gap) ≥ min_range</code>
+      inside the search window — pure local swing, no round-level baseline.
     </p>
     <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
       <button id="hrr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
@@ -331,8 +333,9 @@ function buildSidebarSkeleton() {
     <div id="hrr-state" class="hint" style="line-height:1.7;"></div>
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
-      Loops within the punch window. Baseline / threshold come from the
-      hip-rotation defaults; tweak in <code>hip_rotation_review.js</code>.
+      Loops within the punch window. Threshold (<code>minRange</code>) and
+      search padding come from the defaults; tweak in
+      <code>hip_rotation_review.js</code>.
     </p>
   `;
   host.querySelector("#hrr-prev")?.addEventListener("click",
@@ -382,8 +385,7 @@ function rebuildSidebar(state) {
         + `${pill(`${counts.pass} pass`, COLOR_PASS)} `
         + `${pill(`${counts.fail} fail`, COLOR_FAIL)} `
         + `${pill(`${counts.skip} skip`, COLOR_SKIP)} `
-        + `· ${agreeStr}`
-        + ` · baseline <code>${signals.baseline.toFixed(3)}</code>`;
+        + `· ${agreeStr}`;
     }
   }
 
@@ -416,8 +418,7 @@ function rebuildSidebar(state) {
   }
 
   // 2) Rotation data
-  const deltaCol = (p.delta >= cfg.minDelta) ? COLOR_PASS : COLOR_FAIL;
-  const deltaSign = p.delta >= 0 ? "+" : "";
+  const rangeCol = (p.range >= cfg.minRange) ? COLOR_PASS : COLOR_FAIL;
 
   // 3) Verdict
   const predCol = colorFor(p.predicted);
@@ -431,15 +432,14 @@ function rebuildSidebar(state) {
 
   const lines = [
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
-    `frames <code>${p.start_frame}-${p.end_frame}</code> (${p.end_frame - p.start_frame + 1} frames) · peak@<code>${p.land_frame}</code>`,
+    `frames <code>${p.start_frame}-${p.end_frame}</code> (${p.end_frame - p.start_frame + 1} frames) · search ±<code>${cfg.searchWindowSec.toFixed(2)}s</code>`,
     "",
     `<b>1. Orientation gate</b>`,
     orientLine,
     "",
-    `<b>2. Hip rotation signal</b>`,
-    `peak gap <code>${p.peak_gap.toFixed(3)}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> · range <code>${p.range_gap.toFixed(3)}</code>`,
-    `baseline <code>${signals.baseline.toFixed(3)}</code> (round median)`,
-    `Δ = <code style="color:${deltaCol}">${deltaSign}${p.delta.toFixed(3)}</code> (threshold <code>${cfg.minDelta.toFixed(2)}</code>)`,
+    `<b>2. Hip rotation swing (local)</b>`,
+    `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
+    `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${cfg.minRange.toFixed(2)}</code>)`,
     "",
     `<b>3. Verdict</b>`,
     verdictLine,
@@ -508,9 +508,8 @@ function drawHud(ctx, p, s) {
         : `orientation: ${p.orientation_deg.toFixed(0)}° not sideways ✗`);
   const orientCol = p.orientation_deg == null ? COLOR_UNCLEAR
                    : (p.orientation_sideways ? COLOR_PASS : COLOR_FAIL);
-  const deltaSign = p.delta >= 0 ? "+" : "";
-  const deltaTxt = `Δ gap ${deltaSign}${p.delta.toFixed(3)}  ·  thr ${cfg.minDelta.toFixed(2)}`;
-  const peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  base ${signals.baseline.toFixed(3)}`;
+  const rangeTxt = `range ${p.range.toFixed(3)}  ·  thr ${cfg.minRange.toFixed(2)}`;
+  const peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const predTxt  = `pred: ${p.predicted}`;
   const gtTxt    = p.label ? `GT: ${p.label}` : "GT: —";
@@ -523,7 +522,7 @@ function drawHud(ctx, p, s) {
   const padY   = 10 * s;
   const x0 = 24 * s, y0 = 24 * s;
 
-  const lines = [titleTxt, orientStatus, peakTxt, deltaTxt, predTxt, gtTxt + agreeSym];
+  const lines = [titleTxt, orientStatus, peakTxt, rangeTxt, predTxt, gtTxt + agreeSym];
 
   ctx.save();
   ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
@@ -548,8 +547,8 @@ function drawHud(ctx, p, s) {
   ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(titleTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = orientCol;                ctx.fillText(orientStatus, x0 + padX, y); y += lineH;
   ctx.fillStyle = "rgba(255,255,255,0.78)"; ctx.fillText(peakTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = p.delta >= cfg.minDelta ? COLOR_PASS : COLOR_FAIL;
-  ctx.fillText(deltaTxt, x0 + padX, y); y += lineH;
+  ctx.fillStyle = p.range >= cfg.minRange ? COLOR_PASS : COLOR_FAIL;
+  ctx.fillText(rangeTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = predCol;                  ctx.fillText(predTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = p.label ? colorFor(p.label) : "rgba(255,255,255,0.55)";
   ctx.fillText(gtTxt, x0 + padX, y);
