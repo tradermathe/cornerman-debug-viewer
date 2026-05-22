@@ -12,18 +12,14 @@
 //   search window = [start − searchPreSec, end + searchPostSec]
 //                   asymmetric: load-up happens before the labelled start;
 //                   the labelled end already runs past peak rotation.
-//   peak / trough = max / min of gap inside the window
-//   range         = peak − trough
+//   peak / trough     = max / min of gap inside the window
 //   peak_θ / trough_θ = arcsin(peak / W_est), arcsin(trough / W_est)
-//   rotation_deg  = peak_θ − trough_θ
+//   rotation_deg      = peak_θ − trough_θ
 //
-// Single gate (both modes): skip if trough/W_est > noiseRatioMin. Catches
-// "hips parked broadside the whole punch" — gap signal saturated, neither
-// raw range nor recovered angle is trustworthy.
+// Gate: skip if trough/W_est > noiseRatioMin. Catches "hips parked broadside
+// the whole punch" — gap signal saturated, recovered angle untrustworthy.
 //
-// Pass test depends on mode:
-//   range mode → range >= minRange
-//   ratio mode → rotation_deg >= minRotationDeg
+// Verdict: pass if rotation_deg >= minRotationDeg, else fail.
 
 import { J, torsoHeight, drawSkeleton } from "../skeleton.js";
 
@@ -42,19 +38,12 @@ const DEFAULTS = {
   searchPreSec:           0.3,
   searchPostSec:          0.0,
 
-  // ── Gate ─────────────────────────────────────────────────────────────
-  // The only gate: trough/W_est > noiseRatioMin → skip. Catches "hips
-  // parked broadside the whole punch" (gap signal saturated; can't tell
-  // rotation from noise).
+  // Gate: trough/W_est > noiseRatioMin → skip. Catches "hips parked
+  // broadside the whole punch" (gap saturated; can't tell rotation
+  // from noise).
   noiseRatioMin:          0.95,
   wEstQuantile:           0.99,
-
-  // ── Mode toggle ──────────────────────────────────────────────────────
-  // "range" = pass if (max gap − min gap) ≥ minRange. Unitless.
-  // "ratio" = recover hip-line angle θ = arcsin(gap/W_est) per frame,
-  //           pass if (θ_peak − θ_trough) ≥ minRotationDeg. In degrees.
-  mode:                   "range",  // "range" | "ratio"
-  minRange:               0.10,
+  // Pass threshold on (θ_peak − θ_trough) in degrees.
   minRotationDeg:         15,
 
   // Rule only applies to punches with rotation expectation (jab + body
@@ -176,12 +165,10 @@ function computeAll(state, cfg) {
       if (g > peak)   { peak = g;   peakAt = f; }
       if (g < trough) { trough = g; troughAt = f; }
     }
-    const range = peak - trough;
 
     const stance = d.stance?.toLowerCase?.() || null;
 
-    // Ratio-mode derived quantities. Always computed so the UI can show
-    // them; only USED for the verdict when cfg.mode === "ratio".
+    // Recover hip-line angles from gap via arcsin(gap/W_est).
     const peakRatio = wEst > 0 ? Math.min(1, peak / wEst) : NaN;
     const troughRatio = wEst > 0 ? Math.min(1, trough / wEst) : NaN;
     const peakTheta = Number.isFinite(peakRatio) ? Math.asin(peakRatio) * 180 / Math.PI : NaN;
@@ -189,32 +176,17 @@ function computeAll(state, cfg) {
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
-    // Single gate: trough/W_est > noiseRatioMin means the gap stayed
-    // saturated throughout the punch (hips parked broadside) — neither
-    // raw range nor recovered angle is trustworthy there. Outside that
-    // zone, each mode applies its own threshold:
-    //   range mode → range vs minRange
-    //   ratio mode → rotationDeg vs minRotationDeg
-    const noiseZone = Number.isFinite(troughRatio) && troughRatio > cfg.noiseRatioMin;
+    // Single gate: hips parked broadside (gap saturated) → arcsin too
+    // noisy → skip. Otherwise compare rotation in degrees to threshold.
     let predicted;
-    if (cfg.mode === "ratio") {
-      if (!Number.isFinite(troughRatio) || !Number.isFinite(rotationDeg)) {
-        predicted = "skip";          // W_est unavailable, can't measure
-      } else if (noiseZone) {
-        predicted = "skip";          // sin-flat zone, arcsin too noisy
-      } else if (rotationDeg >= cfg.minRotationDeg) {
-        predicted = "pass";
-      } else {
-        predicted = "fail";
-      }
+    if (!Number.isFinite(troughRatio) || !Number.isFinite(rotationDeg)) {
+      predicted = "skip";              // W_est unavailable
+    } else if (troughRatio > cfg.noiseRatioMin) {
+      predicted = "skip";              // sin-flat zone
+    } else if (rotationDeg >= cfg.minRotationDeg) {
+      predicted = "pass";
     } else {
-      if (noiseZone) {
-        predicted = "skip";          // saturated gap signal, range untrustworthy
-      } else if (range >= cfg.minRange) {
-        predicted = "pass";
-      } else {
-        predicted = "fail";
-      }
+      predicted = "fail";
     }
 
     const label = d.rule_hip_rotation === "pass" || d.rule_hip_rotation === "fail"
@@ -234,7 +206,6 @@ function computeAll(state, cfg) {
       peak_frame: peakAt,
       trough_gap: trough,
       trough_frame: troughAt,
-      range,
       peak_ratio: peakRatio,
       trough_ratio: troughRatio,
       peak_theta: peakTheta,
@@ -348,12 +319,13 @@ function buildSidebarSkeleton() {
   host.innerHTML = `
     <h2>Hip rotation review</h2>
     <p class="hint">
-      Walk through every cross / hook / uppercut. Both modes gate on the
-      noise zone (skip if <code>trough/W_est > ${cfg.noiseRatioMin}</code>,
-      i.e. hips parked broadside).
-      <b>range</b> compares gap swing to <code>minRange = ${cfg.minRange.toFixed(2)}</code>.
-      <b>ratio</b> recovers hip-line angle via <code>arcsin(gap/W_est)</code>
-      and compares rotation in degrees to <code>minRotationDeg = ${cfg.minRotationDeg}°</code>.
+      Walk through every cross / hook / uppercut. Per video we estimate
+      <code>W_est</code> (the boxer's true hip/torso ratio at broadside) as
+      the 99th percentile of gap across all rounds. Per punch we recover the
+      hip-line angle <code>θ = arcsin(gap/W_est)</code> at peak and trough
+      and compare the swing to <code>minRotationDeg = ${cfg.minRotationDeg}°</code>.
+      Skip when <code>trough/W_est > ${cfg.noiseRatioMin}</code> (hips parked
+      broadside — arcsin noise floor too high).
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -368,11 +340,8 @@ function buildSidebarSkeleton() {
       <button id="hrr-mute" class="orient-btn-action secondary" style="padding:6px 10px;">mute (M)</button>
       <span id="hrr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
     </div>
-    <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:0 0 8px;">
-      <span style="color:#888; font-size:12px;">mode:</span>
-      <button id="hrr-mode-range" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">range</button>
-      <button id="hrr-mode-ratio" class="orient-btn-action secondary" style="padding:4px 10px; font-size:12px;">ratio (W_est)</button>
-      <span id="hrr-w-est" style="margin-left:6px; color:#888; font-size:12px; font-family:ui-monospace,monospace;"></span>
+    <div style="margin:0 0 8px; font-size:12px; color:#888; font-family:ui-monospace,monospace;">
+      <span id="hrr-w-est"></span>
     </div>
     <div id="hrr-w-snapshot-wrap" style="margin:0 0 14px; display:none;">
       <canvas id="hrr-w-snapshot" width="240" height="160"
@@ -384,8 +353,7 @@ function buildSidebarSkeleton() {
     <div id="hrr-table-wrap" style="margin-top:10px; max-height:360px; overflow-y:auto;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
       Loops within the punch window. Thresholds
-      (<code>minRange=${cfg.minRange.toFixed(2)}</code>,
-      <code>minRotationDeg=${cfg.minRotationDeg}°</code>,
+      (<code>minRotationDeg=${cfg.minRotationDeg}°</code>,
       <code>noiseRatioMin=${cfg.noiseRatioMin}</code>) and search padding
       come from the defaults; tweak in <code>hip_rotation_review.js</code>.
     </p>
@@ -395,11 +363,16 @@ function buildSidebarSkeleton() {
   host.querySelector("#hrr-next")?.addEventListener("click",
     () => seekToPunch(activeIdx + 1, latestState));
   host.querySelector("#hrr-mute")?.addEventListener("click", toggleMute);
-  host.querySelector("#hrr-mode-range")?.addEventListener("click", () => setMode("range"));
-  host.querySelector("#hrr-mode-ratio")?.addEventListener("click", () => setMode("ratio"));
   updateMuteButton();
-  updateModeButtons();
+  updateWEstReadout();
   renderPunchTable();
+}
+
+function updateWEstReadout() {
+  const el = host?.querySelector("#hrr-w-est");
+  if (el && signals && Number.isFinite(signals.wEst)) {
+    el.textContent = `W_est = ${signals.wEst.toFixed(3)} (hip/torso, 99th %ile across video)`;
+  }
 }
 
 // Capture the W_est candidate frame (video frame at signals.wEstFrame plus
@@ -493,42 +466,6 @@ function captureWEstSnapshot(state, signals) {
   thumbVideo.currentTime = targetTime;
 }
 
-function setMode(newMode) {
-  if (cfg.mode === newMode) return;
-  cfg.mode = newMode;
-  // Re-score every punch under the new mode.
-  if (latestState) {
-    lastPose = null;  // force computeAll to re-run
-    rebuildPunches(latestState);
-  }
-  updateModeButtons();
-}
-
-function updateModeButtons() {
-  const rangeBtn = host?.querySelector("#hrr-mode-range");
-  const ratioBtn = host?.querySelector("#hrr-mode-ratio");
-  if (!rangeBtn || !ratioBtn) return;
-  const active = cfg.mode || "range";
-  for (const [btn, name] of [[rangeBtn, "range"], [ratioBtn, "ratio"]]) {
-    if (name === active) {
-      btn.style.background = "rgba(255,210,74,0.18)";
-      btn.style.borderColor = COLOR_HIP_PEAK;
-      btn.style.color = COLOR_HIP_PEAK;
-      btn.style.fontWeight = "700";
-    } else {
-      btn.style.background = "";
-      btn.style.borderColor = "";
-      btn.style.color = "";
-      btn.style.fontWeight = "normal";
-    }
-  }
-  // Refresh W_est readout.
-  const wEl = host?.querySelector("#hrr-w-est");
-  if (wEl && signals && Number.isFinite(signals.wEst)) {
-    wEl.textContent = `W_est = ${signals.wEst.toFixed(3)} (hip/torso)`;
-  }
-}
-
 // Build the per-punch summary table. Called once after the skeleton is
 // up, and again whenever the punches array changes (from rebuildPunches).
 function renderPunchTable() {
@@ -537,16 +474,11 @@ function renderPunchTable() {
   if (!container) return;
   if (!punches.length) { container.innerHTML = ""; return; }
 
-  const isRatio = cfg.mode === "ratio";
-  const metricCol = isRatio ? "rotation" : "range";
-
   const rows = punches.map((p, i) => {
     const predCol = colorFor(p.predicted);
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
-    const metricStr = isRatio
-      ? (Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—")
-      : p.range.toFixed(3);
+    const metricStr = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
@@ -563,7 +495,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; text-align:right; font-weight:600;">#</th>
           <th style="padding:4px 6px; font-weight:600;">t</th>
           <th style="padding:4px 6px; font-weight:600;">type</th>
-          <th style="padding:4px 6px; text-align:right; font-weight:600;">${metricCol}</th>
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">rotation</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
         </tr>
       </thead>
@@ -630,7 +562,7 @@ function rebuildSidebar(state) {
   if (!host.querySelector("#hrr-state")) buildSidebarSkeleton();
 
   updateActiveRow();
-  updateModeButtons();
+  updateWEstReadout();
   captureWEstSnapshot(state, signals);
 
   const counter = host.querySelector("#hrr-counter");
@@ -703,30 +635,21 @@ function rebuildSidebar(state) {
     "",
   ];
 
-  if (cfg.mode === "ratio") {
-    const wEstStr = Number.isFinite(signals.wEst) ? signals.wEst.toFixed(3) : "—";
-    const pRatio = Number.isFinite(p.peak_ratio) ? p.peak_ratio.toFixed(3) : "—";
-    const tRatio = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
-    const pTheta = Number.isFinite(p.peak_theta) ? p.peak_theta.toFixed(1) + "°" : "—";
-    const tTheta = Number.isFinite(p.trough_theta) ? p.trough_theta.toFixed(1) + "°" : "—";
-    const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
-    const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
-    const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
-    lines.push(
-      `<b>2. Rotation (degrees)</b>`,
-      `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across video)`,
-      `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
-      `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
-      `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
-    );
-  } else {
-    const rangeCol = (p.range >= cfg.minRange) ? COLOR_PASS : COLOR_FAIL;
-    lines.push(
-      `<b>2. Range (unitless)</b>`,
-      `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
-      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${cfg.minRange.toFixed(2)}</code>)`,
-    );
-  }
+  const wEstStr = Number.isFinite(signals.wEst) ? signals.wEst.toFixed(3) : "—";
+  const pRatio = Number.isFinite(p.peak_ratio) ? p.peak_ratio.toFixed(3) : "—";
+  const tRatio = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
+  const pTheta = Number.isFinite(p.peak_theta) ? p.peak_theta.toFixed(1) + "°" : "—";
+  const tTheta = Number.isFinite(p.trough_theta) ? p.trough_theta.toFixed(1) + "°" : "—";
+  const rotDeg = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
+  const rotPass = Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg;
+  const rotCol = noiseZone ? COLOR_SKIP : (rotPass ? COLOR_PASS : COLOR_FAIL);
+  lines.push(
+    `<b>2. Rotation (degrees)</b>`,
+    `<code>W_est = ${wEstStr}</code> (99th %ile of gap/torso across video)`,
+    `peak <code>${pRatio}</code> = sin(<code>${pTheta}</code>) @frame <code>${p.peak_frame}</code>`,
+    `trough <code>${tRatio}</code> = sin(<code>${tTheta}</code>) @frame <code>${p.trough_frame}</code>`,
+    `rotation = <code style="color:${rotCol}">${rotDeg}</code> (threshold <code>${cfg.minRotationDeg}°</code>)`,
+  );
 
   lines.push(
     "",
@@ -794,15 +717,12 @@ function drawCanvas(ctx, state) {
   const pose = state.pose;
 
   // Ghost hip lines at the two extreme frames inside the search window —
-  // these are the two frames whose gap difference IS the range we're
-  // testing. Drawn semi-transparent / dashed so they sit behind the
-  // current-frame line. Labels show gap value, and (in ratio mode) the
+  // peak and trough of the gap signal. Labels show gap value and the
   // implied angle θ recovered via arcsin(gap/W_est).
-  const ratioMode = cfg.mode === "ratio";
-  const troughLabel = ratioMode && Number.isFinite(p.trough_theta)
+  const troughLabel = Number.isFinite(p.trough_theta)
     ? `trough · ${p.trough_gap.toFixed(3)} → ${p.trough_theta.toFixed(0)}°`
     : `trough · ${p.trough_gap.toFixed(3)}`;
-  const peakLabel = ratioMode && Number.isFinite(p.peak_theta)
+  const peakLabel = Number.isFinite(p.peak_theta)
     ? `peak · ${p.peak_gap.toFixed(3)} → ${p.peak_theta.toFixed(0)}°`
     : `peak · ${p.peak_gap.toFixed(3)}`;
   drawHipLine(ctx, pose, p.trough_frame, s, {
@@ -831,26 +751,16 @@ function drawCanvas(ctx, state) {
 
 function drawHud(ctx, p, s) {
   const predCol = colorFor(p.predicted);
-  const ratioMode = cfg.mode === "ratio";
   const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
 
-  // Mode-specific peak/trough + metric lines.
-  let peakTxt, metricTxt, metricCol;
-  if (ratioMode) {
-    const pTheta = Number.isFinite(p.peak_theta) ? `${p.peak_theta.toFixed(0)}°` : "—";
-    const tTheta = Number.isFinite(p.trough_theta) ? `${p.trough_theta.toFixed(0)}°` : "—";
-    const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
-    peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
-    metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
-    metricCol = noiseZone ? COLOR_SKIP
-      : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
-          ? COLOR_PASS : COLOR_FAIL);
-  } else {
-    peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
-    metricTxt = `range ${p.range.toFixed(3)}  ·  thr ${cfg.minRange.toFixed(2)}`;
-    metricCol = noiseZone ? COLOR_SKIP
-      : (p.range >= cfg.minRange ? COLOR_PASS : COLOR_FAIL);
-  }
+  const pTheta = Number.isFinite(p.peak_theta) ? `${p.peak_theta.toFixed(0)}°` : "—";
+  const tTheta = Number.isFinite(p.trough_theta) ? `${p.trough_theta.toFixed(0)}°` : "—";
+  const rotDeg = Number.isFinite(p.rotation_deg) ? `${p.rotation_deg.toFixed(1)}°` : "—";
+  const peakTxt = `peak θ ${pTheta}  ·  trough θ ${tTheta}`;
+  const metricTxt = `rotation ${rotDeg}  ·  thr ${cfg.minRotationDeg}°`;
+  const metricCol = noiseZone ? COLOR_SKIP
+    : (Number.isFinite(p.rotation_deg) && p.rotation_deg >= cfg.minRotationDeg
+        ? COLOR_PASS : COLOR_FAIL);
 
   const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
   const gateTxt = `trough/W ${tRatioStr}  ·  thr ${cfg.noiseRatioMin}`;
