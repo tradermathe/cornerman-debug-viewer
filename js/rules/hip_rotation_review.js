@@ -37,20 +37,23 @@ const DEFAULTS = {
   // is past the furthest rotation point — so we don't pad after.
   searchPreSec:           0.3,
   searchPostSec:          0.0,
-  // Verdict threshold on (max gap − min gap) inside the search window.
-  // Range, not delta-from-round-median: we don't trust the round median
-  // when boxers move, switch guards, or chain combos. Local swing IS the
-  // rotation signal — inside the tight orientation gate, sin(θ) is roughly
-  // linear, so range ≈ amount of hip rotation (in projection units).
-  minRange:               0.10,
   orientationGate:        true,
-  // Orientation gate: only score punches where the boxer is roughly broadside
-  // to the camera. Outside this band, hip rotation can't be reliably read
-  // from 2D — we'd rather skip than guess. [60°, 120°] is a moderate band:
-  // wide enough to catch most fight-camera angles, tight enough to keep
-  // the hip line on the steep wings of sin(θ).
-  orientationMinAbsDeg:   60,
-  orientationMaxAbsDeg:   120,
+  // Tiered orientation gate. INNER band = boxer broadside to camera, hip
+  // line on the steep wings of sin(θ) — the cleanest regime. OUTER band =
+  // boxer angled toward / away from camera, hip line closer to sin's peak
+  // where each degree of rotation moves the gap less. Empirically the
+  // metric still works in the outer band, just with a different (usually
+  // smaller) range value for the same rotation amount. Set per-band
+  // thresholds independently. Punches outside both bands → skip.
+  orientationInnerMinAbsDeg: 60,
+  orientationInnerMaxAbsDeg: 120,
+  orientationOuterMinAbsDeg: 30,
+  orientationOuterMaxAbsDeg: 150,
+  // Verdict thresholds on (max gap − min gap) inside the search window.
+  // Range, not delta-from-round-median: we don't trust the round median
+  // when boxers move, switch guards, or chain combos.
+  minRangeInner:          0.10,
+  minRangeOuter:          0.10,    // tune from the table verdicts
   // Rule only applies to punches with rotation expectation (jab + body shots
   // excluded — matches hip_rotation.js).
   appliesTo: new Set([
@@ -206,17 +209,26 @@ function computeAll(state, cfg) {
     // Orientation gate — window-median predicted facing from ankle arrow.
     const stance = d.stance?.toLowerCase?.() || null;
     const orientationDeg = medianPredictedFacing(pose, sf, ef, stance);
-    const orientationSideways = orientationDeg != null && (() => {
+    // Classify into a facing band. "inner" = broadside (steep wings of sin).
+    // "outer" = angled toward/away from camera (closer to sin peak).
+    // null = outside both bands → skip.
+    let band = null;
+    if (orientationDeg != null) {
       const a = Math.abs(orientationDeg);
-      return a >= cfg.orientationMinAbsDeg && a <= cfg.orientationMaxAbsDeg;
-    })();
+      if (a >= cfg.orientationInnerMinAbsDeg && a <= cfg.orientationInnerMaxAbsDeg) {
+        band = "inner";
+      } else if (a >= cfg.orientationOuterMinAbsDeg && a <= cfg.orientationOuterMaxAbsDeg) {
+        band = "outer";
+      }
+    }
+    const threshold = band === "inner" ? cfg.minRangeInner
+                    : band === "outer" ? cfg.minRangeOuter
+                    : null;
 
     let predicted;
-    if (cfg.orientationGate && orientationDeg == null) {
+    if (cfg.orientationGate && (orientationDeg == null || band == null)) {
       predicted = "skip";
-    } else if (cfg.orientationGate && !orientationSideways) {
-      predicted = "skip";
-    } else if (range >= cfg.minRange) {
+    } else if (range >= threshold) {
       predicted = "pass";
     } else {
       predicted = "fail";
@@ -241,7 +253,8 @@ function computeAll(state, cfg) {
       trough_frame: troughAt,
       range,
       orientation_deg: orientationDeg,
-      orientation_sideways: orientationSideways,
+      band,
+      threshold,
       predicted,
       label,
     };
@@ -337,12 +350,13 @@ function buildSidebarSkeleton() {
   host.innerHTML = `
     <h2>Hip rotation review</h2>
     <p class="hint">
-      Walk through every cross / hook / uppercut. Each punch first checks the
-      <b>orientation gate</b> (fighter must be sideways,
-      |angle| in <code>[${cfg.orientationMinAbsDeg}°, ${cfg.orientationMaxAbsDeg}°]</code>) —
-      too frontal and the hip line collapses on screen, so the rule predicts
-      <i>skip</i>. Otherwise scores <code>max(gap) − min(gap) ≥ min_range</code>
-      inside the search window — pure local swing, no round-level baseline.
+      Walk through every cross / hook / uppercut. Each punch is classified by
+      the orientation gate into one of two bands:
+      <b>inner</b> (broadside, <code>|facing| ∈ [${cfg.orientationInnerMinAbsDeg}°, ${cfg.orientationInnerMaxAbsDeg}°]</code>) or
+      <b>outer</b> (camera-directed, <code>[${cfg.orientationOuterMinAbsDeg}°-${cfg.orientationInnerMinAbsDeg}°] ∪ [${cfg.orientationInnerMaxAbsDeg}°-${cfg.orientationOuterMaxAbsDeg}°]</code>).
+      Outside both bands → <i>skip</i>. Inside, the verdict is
+      <code>max(gap) − min(gap) ≥ minRange</code> (per-band threshold) — pure
+      local swing, no round-level baseline.
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -361,9 +375,10 @@ function buildSidebarSkeleton() {
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
     <div id="hrr-table-wrap" style="margin-top:10px; max-height:360px; overflow-y:auto;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
-      Loops within the punch window. Threshold (<code>minRange</code>) and
-      search padding come from the defaults; tweak in
-      <code>hip_rotation_review.js</code>.
+      Loops within the punch window. Per-band thresholds
+      (<code>minRangeInner=${cfg.minRangeInner.toFixed(2)}</code>,
+      <code>minRangeOuter=${cfg.minRangeOuter.toFixed(2)}</code>) and search
+      padding come from the defaults; tweak in <code>hip_rotation_review.js</code>.
     </p>
   `;
   host.querySelector("#hrr-prev")?.addEventListener("click",
@@ -388,10 +403,15 @@ function renderPunchTable() {
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
     const rangeStr = p.range.toFixed(3);
+    const bandStr = p.band || "—";
+    const bandCol = p.band === "inner" ? COLOR_PASS
+                  : p.band === "outer" ? COLOR_SKIP
+                  : "#888";
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
       <td style="padding:4px 6px;">${typeStr}</td>
+      <td style="padding:4px 6px; font-size:11px; color:${bandCol};">${bandStr}</td>
       <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${rangeStr}</td>
       <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
     </tr>`;
@@ -404,6 +424,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; text-align:right; font-weight:600;">#</th>
           <th style="padding:4px 6px; font-weight:600;">t</th>
           <th style="padding:4px 6px; font-weight:600;">type</th>
+          <th style="padding:4px 6px; font-weight:600;">band</th>
           <th style="padding:4px 6px; text-align:right; font-weight:600;">range</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
         </tr>
@@ -526,16 +547,16 @@ function rebuildSidebar(state) {
     orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> <code>—</code> · ${pill("UNKNOWN", COLOR_UNCLEAR)}`;
   } else {
     const a = Math.abs(oDeg);
-    const status = p.orientation_sideways
-      ? pill("SIDEWAYS ✓", COLOR_PASS)
-      : pill("NOT SIDEWAYS ✗", COLOR_FAIL);
+    const status = p.band === "inner" ? pill("INNER ✓", COLOR_PASS)
+                 : p.band === "outer" ? pill("OUTER ✓", COLOR_SKIP)
+                 : pill("OUT OF GATE ✗", COLOR_FAIL);
     orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> `
-      + `<code>${oDeg.toFixed(1)}°</code> · |a|=<code>${a.toFixed(1)}°</code> `
-      + `· gate [${cfg.orientationMinAbsDeg}°, ${cfg.orientationMaxAbsDeg}°] · ${status}`;
+      + `<code>${oDeg.toFixed(1)}°</code> · |a|=<code>${a.toFixed(1)}°</code> · ${status}`;
   }
 
-  // 2) Rotation data
-  const rangeCol = (p.range >= cfg.minRange) ? COLOR_PASS : COLOR_FAIL;
+  // 2) Rotation data — uses the per-band threshold attached to the punch.
+  const rangeCol = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
+  const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
 
   // 3) Verdict
   const predCol = colorFor(p.predicted);
@@ -556,7 +577,7 @@ function rebuildSidebar(state) {
     "",
     `<b>2. Hip rotation swing (local)</b>`,
     `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
-    `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${cfg.minRange.toFixed(2)}</code>)`,
+    `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (${p.band || "—"} band threshold <code>${thrStr}</code>)`,
     "",
     `<b>3. Verdict</b>`,
     verdictLine,
@@ -667,14 +688,16 @@ function drawCanvas(ctx, state) {
 
 function drawHud(ctx, p, s) {
   const predCol = colorFor(p.predicted);
+  const bandTag = p.band ? `[${p.band}]` : "[out]";
   const orientStatus = p.orientation_deg == null
     ? "orientation: —"
-    : (p.orientation_sideways
-        ? `orientation: ${p.orientation_deg.toFixed(0)}° sideways ✓`
-        : `orientation: ${p.orientation_deg.toFixed(0)}° not sideways ✗`);
+    : `orientation: ${p.orientation_deg.toFixed(0)}° ${bandTag}`;
   const orientCol = p.orientation_deg == null ? COLOR_UNCLEAR
-                   : (p.orientation_sideways ? COLOR_PASS : COLOR_FAIL);
-  const rangeTxt = `range ${p.range.toFixed(3)}  ·  thr ${cfg.minRange.toFixed(2)}`;
+                   : p.band === "inner" ? COLOR_PASS
+                   : p.band === "outer" ? COLOR_SKIP
+                   : COLOR_FAIL;
+  const thrStr = p.threshold != null ? p.threshold.toFixed(2) : "—";
+  const rangeTxt = `range ${p.range.toFixed(3)}  ·  thr ${thrStr}`;
   const peakTxt = `peak ${p.peak_gap.toFixed(3)}  ·  trough ${p.trough_gap.toFixed(3)}`;
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const predTxt  = `pred: ${p.predicted}`;
@@ -713,7 +736,7 @@ function drawHud(ctx, p, s) {
   ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(titleTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = orientCol;                ctx.fillText(orientStatus, x0 + padX, y); y += lineH;
   ctx.fillStyle = "rgba(255,255,255,0.78)"; ctx.fillText(peakTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = p.range >= cfg.minRange ? COLOR_PASS : COLOR_FAIL;
+  ctx.fillStyle = (p.threshold != null && p.range >= p.threshold) ? COLOR_PASS : COLOR_FAIL;
   ctx.fillText(rangeTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = predCol;                  ctx.fillText(predTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = p.label ? colorFor(p.label) : "rgba(255,255,255,0.55)";
