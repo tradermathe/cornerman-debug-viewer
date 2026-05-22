@@ -55,15 +55,17 @@ const DEFAULTS = {
   orientationInnerMaxAbsDeg: 120,
   orientationOuterMinAbsDeg: 30,
   orientationOuterMaxAbsDeg: 150,
-  // Verdict thresholds on (max gap − min gap) inside the search window.
+  // Verdict threshold on (max gap − min gap) inside the search window.
   // Range, not delta-from-round-median: we don't trust the round median
-  // when boxers move, switch guards, or chain combos.
-  minRangeInner:          0.10,
-  minRangeOuter:          0.10,    // tune from the table verdicts
+  // when boxers move, switch guards, or chain combos. Single threshold
+  // since W-based gating now handles the sin-flat regime directly — no
+  // need for a per-band split.
+  minRange:               0.10,
 
   // ── Mode toggle ────────────────────────────────────────────────────
-  // "range" = compare raw range (max gap − min gap) against minRangeInner /
-  //           minRangeOuter per band. Default — works for all videos.
+  // "range" = compare raw range (max gap − min gap) against a single
+  //           minRange threshold; gating handled by W-based noise-zone
+  //           check, same as ratio mode. Default — works for all videos.
   // "ratio" = use W_est (99th percentile of gap across the round, ≈ this
   //           boxer's true hip-width / torso-height ratio) to convert gap
   //           into an implied hip-rotation angle in degrees. Skip punches
@@ -267,9 +269,9 @@ function computeAll(state, cfg) {
         band = "outer";
       }
     }
-    const threshold = band === "inner" ? cfg.minRangeInner
-                    : band === "outer" ? cfg.minRangeOuter
-                    : null;
+    // threshold is now a single value, used only by range mode. Kept on the
+    // punch object so the sidebar/table can display it consistently.
+    const threshold = cfg.minRange;
 
     // Ratio-mode derived quantities. Always computed so the UI can show
     // them; only USED for the verdict when cfg.mode === "ratio".
@@ -280,28 +282,30 @@ function computeAll(state, cfg) {
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
-    // Gating differs by mode.
-    //   range mode: orientation gate is load-bearing (no W_est-based check
-    //               exists in range mode, so the orientation gate is the
-    //               only defence against the sin-flat failure region).
-    //   ratio mode: noise-zone gate (trough/W_est > noiseRatioMin) is the
-    //               direct measurement of "are we in the sin-flat region",
-    //               so it replaces the orientation gate. The band is still
-    //               computed but only used as informational display.
+    // Unified gating: both modes use the W-based noise-zone check.
+    // trough/W_est > noiseRatioMin means the gap stayed saturated throughout
+    // the punch (hips parked broadside) — neither raw range nor recovered
+    // angle is trustworthy there. Outside that zone, each mode applies its
+    // own threshold:
+    //   range mode → range vs minRange
+    //   ratio mode → rotationDeg vs minRotationDeg
+    // The orientation `band` is still computed and shown as context but no
+    // longer gates anything in either mode.
+    const noiseZone = Number.isFinite(troughRatio) && troughRatio > cfg.noiseRatioMin;
     let predicted;
     if (cfg.mode === "ratio") {
       if (!Number.isFinite(troughRatio) || !Number.isFinite(rotationDeg)) {
         predicted = "skip";          // W_est unavailable, can't measure
-      } else if (troughRatio > cfg.noiseRatioMin) {
-        predicted = "skip";          // hips parked broadside, arcsin too noisy
+      } else if (noiseZone) {
+        predicted = "skip";          // sin-flat zone, arcsin too noisy
       } else if (rotationDeg >= cfg.minRotationDeg) {
         predicted = "pass";
       } else {
         predicted = "fail";
       }
     } else {
-      if (cfg.orientationGate && (orientationDeg == null || band == null)) {
-        predicted = "skip";          // outside orientation band → can't trust gap
+      if (noiseZone) {
+        predicted = "skip";          // saturated gap signal, range untrustworthy
       } else if (range >= threshold) {
         predicted = "pass";
       } else {
@@ -443,15 +447,14 @@ function buildSidebarSkeleton() {
   host.innerHTML = `
     <h2>Hip rotation review</h2>
     <p class="hint">
-      Walk through every cross / hook / uppercut. Two verdict modes:
-      <b>range</b> uses the orientation gate (inner band
-      <code>[${cfg.orientationInnerMinAbsDeg}°, ${cfg.orientationInnerMaxAbsDeg}°]</code>,
-      outer band
-      <code>[${cfg.orientationOuterMinAbsDeg}°-${cfg.orientationInnerMinAbsDeg}°] ∪ [${cfg.orientationInnerMaxAbsDeg}°-${cfg.orientationOuterMaxAbsDeg}°]</code>)
-      and per-band <code>minRange</code> thresholds on gap swing.
-      <b>ratio</b> uses W_est to recover hip-line angle in degrees and skips
-      only the noise zone (trough/W > <code>${cfg.noiseRatioMin}</code>) — the
-      orientation gate is shown for info but not used.
+      Walk through every cross / hook / uppercut. Both modes gate on the
+      noise zone (skip if <code>trough/W_est > ${cfg.noiseRatioMin}</code>,
+      i.e. hips parked broadside).
+      <b>range</b> compares gap swing to <code>minRange = ${cfg.minRange.toFixed(2)}</code>.
+      <b>ratio</b> recovers hip-line angle via <code>arcsin(gap/W_est)</code>
+      and compares rotation in degrees to <code>minRotationDeg = ${cfg.minRotationDeg}°</code>.
+      The orientation band (inner / outer / out) is shown as context but
+      no longer gates anything.
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -481,10 +484,11 @@ function buildSidebarSkeleton() {
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
     <div id="hrr-table-wrap" style="margin-top:10px; max-height:360px; overflow-y:auto;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
-      Loops within the punch window. Per-band thresholds
-      (<code>minRangeInner=${cfg.minRangeInner.toFixed(2)}</code>,
-      <code>minRangeOuter=${cfg.minRangeOuter.toFixed(2)}</code>) and search
-      padding come from the defaults; tweak in <code>hip_rotation_review.js</code>.
+      Loops within the punch window. Thresholds
+      (<code>minRange=${cfg.minRange.toFixed(2)}</code>,
+      <code>minRotationDeg=${cfg.minRotationDeg}°</code>,
+      <code>noiseRatioMin=${cfg.noiseRatioMin}</code>) and search padding
+      come from the defaults; tweak in <code>hip_rotation_review.js</code>.
     </p>
   `;
   host.querySelector("#hrr-prev")?.addEventListener("click",
@@ -850,11 +854,17 @@ function rebuildSidebar(state) {
         + (noiseZone ? ` · ${pill("NOISE ZONE", COLOR_SKIP)} trough/W > ${cfg.noiseRatioMin}` : ""),
     );
   } else {
-    // Range-mode signal display (original).
+    // Range-mode signal display. W-gating (noise-zone check) now applies
+    // in range mode too — surface the trough/W ratio so the user can see
+    // when a skip was triggered by the W-gate.
+    const tRatioStr = Number.isFinite(p.trough_ratio) ? p.trough_ratio.toFixed(3) : "—";
+    const noiseZone = Number.isFinite(p.trough_ratio) && p.trough_ratio > cfg.noiseRatioMin;
     lines.push(
       `<b>2. Hip rotation swing (local)</b>`,
       `peak gap <code>${p.peak_gap.toFixed(3)}</code> @frame <code>${p.peak_frame}</code> · trough <code>${p.trough_gap.toFixed(3)}</code> @frame <code>${p.trough_frame}</code>`,
-      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (${p.band || "—"} band threshold <code>${thrStr}</code>)`,
+      `trough / W_est = <code>${tRatioStr}</code>`
+        + (noiseZone ? ` · ${pill("NOISE ZONE", COLOR_SKIP)} > ${cfg.noiseRatioMin}` : ""),
+      `range = peak − trough = <code style="color:${rangeCol}">${p.range.toFixed(3)}</code> (threshold <code>${thrStr}</code>)`,
     );
   }
 
