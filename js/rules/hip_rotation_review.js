@@ -717,21 +717,15 @@ function drawCanvas(ctx, state) {
   const pose = state.pose;
 
   // Ghost hip lines at the two extreme frames inside the search window —
-  // peak and trough of the gap signal. Labels show gap value and the
-  // implied angle θ recovered via arcsin(gap/W_est).
-  const troughLabel = Number.isFinite(p.trough_theta)
-    ? `trough · ${p.trough_gap.toFixed(3)} → ${p.trough_theta.toFixed(0)}°`
-    : `trough · ${p.trough_gap.toFixed(3)}`;
-  const peakLabel = Number.isFinite(p.peak_theta)
-    ? `peak · ${p.peak_gap.toFixed(3)} → ${p.peak_theta.toFixed(0)}°`
-    : `peak · ${p.peak_gap.toFixed(3)}`;
+  // peak and trough of the gap signal. Drawn without inline labels (they
+  // overlap each other when the two ghost lines are close together);
+  // their gap/θ values are shown in the corner legend instead.
   drawHipLine(ctx, pose, p.trough_frame, s, {
     color: COLOR_HIP_TROUGH,
     alpha: 0.55,
     lineWidth: 2.5 * s,
     dotRadius: 4 * s,
     dashed: true,
-    label: troughLabel,
   });
   drawHipLine(ctx, pose, p.peak_frame, s, {
     color: COLOR_HIP_PEAK,
@@ -739,14 +733,76 @@ function drawCanvas(ctx, state) {
     lineWidth: 2.5 * s,
     dotRadius: 4 * s,
     dashed: true,
-    label: peakLabel,
   });
 
   // Current-frame hip line (purple, solid, full opacity) — drawn last so
   // it stays on top.
   drawHipLine(ctx, pose, f, s);
 
+  // Corner legend for the peak/trough ghost lines (top-right).
+  drawCornerLabels(ctx, p, s);
+
   drawHud(ctx, p, s);
+}
+
+// Top-right corner legend showing peak and trough gap → θ. Replaces the
+// inline midpoint labels which overlapped when the two ghost hip lines
+// sat close to each other.
+function drawCornerLabels(ctx, p, s) {
+  if (!Number.isFinite(p.peak_gap) || !Number.isFinite(p.trough_gap)) return;
+  const peakStr = Number.isFinite(p.peak_theta)
+    ? `peak  gap ${p.peak_gap.toFixed(3)} → θ ${p.peak_theta.toFixed(0)}°`
+    : `peak  gap ${p.peak_gap.toFixed(3)}`;
+  const troughStr = Number.isFinite(p.trough_theta)
+    ? `trough  gap ${p.trough_gap.toFixed(3)} → θ ${p.trough_theta.toFixed(0)}°`
+    : `trough  gap ${p.trough_gap.toFixed(3)}`;
+
+  const fontPx = Math.round(12 * s);
+  const lineH  = Math.round(20 * s);
+  const padX   = 10 * s;
+  const padY   = 8 * s;
+  const margin = 24 * s;
+  const swatch = 8 * s;
+  const swatchGap = 6 * s;
+
+  ctx.save();
+  ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
+  const peakW = ctx.measureText(peakStr).width;
+  const troughW = ctx.measureText(troughStr).width;
+  const textW = Math.max(peakW, troughW);
+  const w = textW + 2 * padX + swatch + swatchGap;
+  const h = padY * 2 + lineH * 2 - (lineH - fontPx);
+  const x0 = ctx.canvas.width - w - margin;
+  const y0 = margin;
+
+  // Background pill.
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  const r = 10 * s;
+  ctx.beginPath();
+  ctx.moveTo(x0 + r, y0);
+  ctx.arcTo(x0 + w, y0,     x0 + w, y0 + h, r);
+  ctx.arcTo(x0 + w, y0 + h, x0,     y0 + h, r);
+  ctx.arcTo(x0,     y0 + h, x0,     y0,     r);
+  ctx.arcTo(x0,     y0,     x0 + w, y0,     r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1 * s;
+  ctx.stroke();
+
+  ctx.textBaseline = "alphabetic";
+  let y = y0 + padY + fontPx;
+
+  ctx.fillStyle = COLOR_HIP_PEAK;
+  ctx.fillRect(x0 + padX, y - fontPx + 2 * s, swatch, fontPx - 3 * s);
+  ctx.fillText(peakStr, x0 + padX + swatch + swatchGap, y);
+  y += lineH;
+
+  ctx.fillStyle = COLOR_HIP_TROUGH;
+  ctx.fillRect(x0 + padX, y - fontPx + 2 * s, swatch, fontPx - 3 * s);
+  ctx.fillText(troughStr, x0 + padX + swatch + swatchGap, y);
+
+  ctx.restore();
 }
 
 function drawHud(ctx, p, s) {
