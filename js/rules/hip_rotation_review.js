@@ -313,6 +313,7 @@ function installKeyHandlers(state) {
     if (tag === "INPUT" || tag === "TEXTAREA") return;
     if (e.key === "n" || e.key === "N") { e.preventDefault(); seekToPunch(activeIdx + 1, state); }
     else if (e.key === "p" || e.key === "P") { e.preventDefault(); seekToPunch(activeIdx - 1, state); }
+    else if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); }
   };
   document.addEventListener("keydown", keydownHandler);
 }
@@ -341,6 +342,7 @@ function buildSidebarSkeleton() {
     <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 14px;">
       <button id="hrr-prev" class="orient-btn-action secondary" style="padding:6px 10px;">⏮ prev (P)</button>
       <button id="hrr-next" class="orient-btn-action secondary" style="padding:6px 10px;">next (N) ⏭</button>
+      <button id="hrr-mute" class="orient-btn-action secondary" style="padding:6px 10px;">mute (M)</button>
       <span id="hrr-counter" style="margin-left:6px; color:#888; font-size:12px;"></span>
     </div>
     <div id="hrr-state" class="hint" style="line-height:1.7;"></div>
@@ -355,6 +357,20 @@ function buildSidebarSkeleton() {
     () => seekToPunch(activeIdx - 1, latestState));
   host.querySelector("#hrr-next")?.addEventListener("click",
     () => seekToPunch(activeIdx + 1, latestState));
+  host.querySelector("#hrr-mute")?.addEventListener("click", toggleMute);
+  updateMuteButton();
+}
+
+function toggleMute() {
+  if (!videoEl) return;
+  videoEl.muted = !videoEl.muted;
+  updateMuteButton();
+}
+
+function updateMuteButton() {
+  const btn = host?.querySelector("#hrr-mute");
+  if (!btn || !videoEl) return;
+  btn.textContent = videoEl.muted ? "unmute (M)" : "mute (M)";
 }
 
 function pill(text, color) {
