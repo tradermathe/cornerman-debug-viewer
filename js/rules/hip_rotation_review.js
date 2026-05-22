@@ -982,6 +982,13 @@ export const HipRotationReviewRule = {
   id: "hip_rotation_review",
   label: "Hip rotation review (loop)",
 
+  // Apple Vision is the production pose source — it's what the iOS app
+  // runs and what the model is calibrated against. YOLO is for parity
+  // tooling, not for verdicts. Refuse rounds that only have YOLO.
+  requires(slot) {
+    return !!slot?.vision;
+  },
+
   skeletonStyle() {
     return {
       boneColor: "rgba(255,255,255,0.22)",
