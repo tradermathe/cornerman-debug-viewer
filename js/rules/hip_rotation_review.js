@@ -280,24 +280,33 @@ function computeAll(state, cfg) {
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
+    // Gating differs by mode.
+    //   range mode: orientation gate is load-bearing (no W_est-based check
+    //               exists in range mode, so the orientation gate is the
+    //               only defence against the sin-flat failure region).
+    //   ratio mode: noise-zone gate (trough/W_est > noiseRatioMin) is the
+    //               direct measurement of "are we in the sin-flat region",
+    //               so it replaces the orientation gate. The band is still
+    //               computed but only used as informational display.
     let predicted;
-    if (cfg.orientationGate && (orientationDeg == null || band == null)) {
-      predicted = "skip";
-    } else if (cfg.mode === "ratio") {
-      // Ratio-mode: skip if hips parked at broadside (arcsin too noisy),
-      // else compare implied rotation angle (in degrees) to minRotationDeg.
-      if (Number.isFinite(troughRatio) && troughRatio > cfg.noiseRatioMin) {
-        predicted = "skip";
-      } else if (Number.isFinite(rotationDeg) && rotationDeg >= cfg.minRotationDeg) {
+    if (cfg.mode === "ratio") {
+      if (!Number.isFinite(troughRatio) || !Number.isFinite(rotationDeg)) {
+        predicted = "skip";          // W_est unavailable, can't measure
+      } else if (troughRatio > cfg.noiseRatioMin) {
+        predicted = "skip";          // hips parked broadside, arcsin too noisy
+      } else if (rotationDeg >= cfg.minRotationDeg) {
         predicted = "pass";
       } else {
         predicted = "fail";
       }
-    } else if (range >= threshold) {
-      // Range-mode: original peak-trough vs per-band threshold.
-      predicted = "pass";
     } else {
-      predicted = "fail";
+      if (cfg.orientationGate && (orientationDeg == null || band == null)) {
+        predicted = "skip";          // outside orientation band → can't trust gap
+      } else if (range >= threshold) {
+        predicted = "pass";
+      } else {
+        predicted = "fail";
+      }
     }
 
     const label = d.rule_hip_rotation === "pass" || d.rule_hip_rotation === "fail"
@@ -434,13 +443,15 @@ function buildSidebarSkeleton() {
   host.innerHTML = `
     <h2>Hip rotation review</h2>
     <p class="hint">
-      Walk through every cross / hook / uppercut. Each punch is classified by
-      the orientation gate into one of two bands:
-      <b>inner</b> (broadside, <code>|facing| ∈ [${cfg.orientationInnerMinAbsDeg}°, ${cfg.orientationInnerMaxAbsDeg}°]</code>) or
-      <b>outer</b> (camera-directed, <code>[${cfg.orientationOuterMinAbsDeg}°-${cfg.orientationInnerMinAbsDeg}°] ∪ [${cfg.orientationInnerMaxAbsDeg}°-${cfg.orientationOuterMaxAbsDeg}°]</code>).
-      Outside both bands → <i>skip</i>. Inside, the verdict is
-      <code>max(gap) − min(gap) ≥ minRange</code> (per-band threshold) — pure
-      local swing, no round-level baseline.
+      Walk through every cross / hook / uppercut. Two verdict modes:
+      <b>range</b> uses the orientation gate (inner band
+      <code>[${cfg.orientationInnerMinAbsDeg}°, ${cfg.orientationInnerMaxAbsDeg}°]</code>,
+      outer band
+      <code>[${cfg.orientationOuterMinAbsDeg}°-${cfg.orientationInnerMinAbsDeg}°] ∪ [${cfg.orientationInnerMaxAbsDeg}°-${cfg.orientationOuterMaxAbsDeg}°]</code>)
+      and per-band <code>minRange</code> thresholds on gap swing.
+      <b>ratio</b> uses W_est to recover hip-line angle in degrees and skips
+      only the noise zone (trough/W > <code>${cfg.noiseRatioMin}</code>) — the
+      orientation gate is shown for info but not used.
     </p>
     <p class="hint" style="margin-top:6px">
       Canvas overlay:
@@ -772,16 +783,26 @@ function rebuildSidebar(state) {
   const p = punches[activeIdx];
   if (!p) { el.innerHTML = ""; return; }
 
-  // 1) Orientation block
+  // 1) Orientation block. Ratio mode shows the band as info-only (the
+  // noise-zone gate is what actually skips); range mode shows ✓/✗ pills
+  // because the orientation gate is load-bearing there.
   const oDeg = p.orientation_deg;
+  const ratioMode = cfg.mode === "ratio";
   let orientLine;
   if (oDeg == null) {
     orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> <code>—</code> · ${pill("UNKNOWN", COLOR_UNCLEAR)}`;
   } else {
     const a = Math.abs(oDeg);
-    const status = p.band === "inner" ? pill("INNER ✓", COLOR_PASS)
-                 : p.band === "outer" ? pill("OUTER ✓", COLOR_SKIP)
-                 : pill("OUT OF GATE ✗", COLOR_FAIL);
+    let status;
+    if (ratioMode) {
+      status = p.band === "inner" ? pill("inner (info)", COLOR_PASS)
+             : p.band === "outer" ? pill("outer (info)", COLOR_SKIP)
+             : pill("out of band (info)", COLOR_UNCLEAR);
+    } else {
+      status = p.band === "inner" ? pill("INNER ✓", COLOR_PASS)
+             : p.band === "outer" ? pill("OUTER ✓", COLOR_SKIP)
+             : pill("OUT OF GATE ✗", COLOR_FAIL);
+    }
     orientLine = `<span style="color:${COLOR_PRED}">orientation:</span> `
       + `<code>${oDeg.toFixed(1)}°</code> · |a|=<code>${a.toFixed(1)}°</code> · ${status}`;
   }
