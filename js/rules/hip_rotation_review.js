@@ -267,6 +267,7 @@ function rebuildPunches(state) {
   } else if (activeIdx >= next.length) {
     activeIdx = next.length - 1;
   }
+  renderPunchTable();  // punches changed → rebuild the table once
   rebuildSidebar(state);
 }
 
@@ -347,6 +348,7 @@ function buildSidebarSkeleton() {
     </div>
     <div id="hrr-state" class="hint" style="line-height:1.7;"></div>
     <div id="hrr-summary" class="hint" style="margin-top:14px; padding-top:10px; border-top:1px solid #2a2a2a;"></div>
+    <div id="hrr-table-wrap" style="margin-top:10px; max-height:360px; overflow-y:auto;"></div>
     <p class="hint" style="margin-top:14px; font-size:11px;">
       Loops within the punch window. Threshold (<code>minRange</code>) and
       search padding come from the defaults; tweak in
@@ -359,6 +361,79 @@ function buildSidebarSkeleton() {
     () => seekToPunch(activeIdx + 1, latestState));
   host.querySelector("#hrr-mute")?.addEventListener("click", toggleMute);
   updateMuteButton();
+  renderPunchTable();
+}
+
+// Build the per-punch summary table. Called once after the skeleton is
+// up, and again whenever the punches array changes (from rebuildPunches).
+function renderPunchTable() {
+  if (!host) return;
+  const container = host.querySelector("#hrr-table-wrap");
+  if (!container) return;
+  if (!punches.length) { container.innerHTML = ""; return; }
+
+  const rows = punches.map((p, i) => {
+    const predCol = colorFor(p.predicted);
+    const typeStr = (p.punch_type || "?").replace(/_/g, " ");
+    const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
+    const rangeStr = p.range.toFixed(3);
+    return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
+      <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
+      <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
+      <td style="padding:4px 6px;">${typeStr}</td>
+      <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${rangeStr}</td>
+      <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
+    </tr>`;
+  }).join("");
+
+  container.innerHTML = `
+    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+      <thead>
+        <tr style="text-align:left; color:#888; border-bottom:1px solid #2a2a2a;">
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">#</th>
+          <th style="padding:4px 6px; font-weight:600;">t</th>
+          <th style="padding:4px 6px; font-weight:600;">type</th>
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">range</th>
+          <th style="padding:4px 6px; font-weight:600;">verdict</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  container.querySelectorAll("tr[data-idx]").forEach(tr => {
+    tr.style.cursor = "pointer";
+    tr.addEventListener("click", () => {
+      const idx = parseInt(tr.getAttribute("data-idx"), 10);
+      seekToPunch(idx, latestState);
+    });
+    tr.addEventListener("mouseenter", () => {
+      const idx = parseInt(tr.getAttribute("data-idx"), 10);
+      if (idx !== activeIdx) tr.style.background = "rgba(255,255,255,0.04)";
+    });
+    tr.addEventListener("mouseleave", () => {
+      const idx = parseInt(tr.getAttribute("data-idx"), 10);
+      if (idx !== activeIdx) tr.style.background = "";
+    });
+  });
+
+  updateActiveRow();
+}
+
+// Highlight the row matching activeIdx. Cheap — just toggles styles, no
+// re-render. Called every rebuildSidebar tick.
+function updateActiveRow() {
+  if (!host) return;
+  host.querySelectorAll("tr[data-idx]").forEach(tr => {
+    const idx = parseInt(tr.getAttribute("data-idx"), 10);
+    if (idx === activeIdx) {
+      tr.style.background = "rgba(255,210,74,0.14)";
+      tr.style.fontWeight = "600";
+    } else {
+      tr.style.background = "";
+      tr.style.fontWeight = "normal";
+    }
+  });
 }
 
 function toggleMute() {
@@ -383,6 +458,8 @@ function rebuildSidebar(state) {
   if (!host) return;
   latestState = state;
   if (!host.querySelector("#hrr-state")) buildSidebarSkeleton();
+
+  updateActiveRow();
 
   const counter = host.querySelector("#hrr-counter");
   if (counter) {
