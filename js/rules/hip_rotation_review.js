@@ -57,6 +57,18 @@ const DEFAULTS = {
   // (which become "high-noise frames" the model can't confidently
   // commit to) corrupting the signed gap signal.
   minHipConf:             0.30,
+  // If fewer than this fraction of the search window has valid gap
+  // data (after the hip-confidence gate above), skip the punch — the
+  // surviving frames probably don't sample the full motion and the
+  // recovered rotation will be misleading. Empirically:
+  //   <30% validity → 86% are fails with median ~0° rotation (spurious)
+  //   <50% validity → 50%+ fails, mostly spurious
+  //   <70% validity → 2× more fail-skips than pass-skips at this gate
+  //                   (still mostly catching bad-data fails, costs ~5%)
+  //   <80% validity → ~1.4× ratio, gate starts losing legit verdicts
+  // 0.70 sits at the knee where each new skip is still mostly catching
+  // bad data, not erasing real ones.
+  minValidFrac:           0.7,
 
   // Rule only applies to punches with rotation expectation (jab + body
   // shots excluded — matches hip_rotation.js).
@@ -214,21 +226,24 @@ function computeAll(state, cfg) {
     // Scan the search window for peak (max signed gap), trough (min
     // signed gap), and the smallest |signed gap| seen — that last one
     // feeds the noise-zone gate. NaN frames (low pose confidence) are
-    // skipped so a brief occlusion doesn't poison the extremes.
+    // skipped so a brief occlusion doesn't poison the extremes. Also
+    // tally validity for the low-validity gate below.
     let peak = -Infinity, peakAt = ss;
     let trough = Infinity, troughAt = ss;
     let minAbs = Infinity;
-    let anyValid = false;
+    let nValid = 0;
+    const nWindow = se - ss + 1;
     for (let f = ss; f <= se; f++) {
       const g = gap[f];
       if (!Number.isFinite(g)) continue;
-      anyValid = true;
+      nValid++;
       if (g > peak)   { peak = g;   peakAt = f; }
       if (g < trough) { trough = g; troughAt = f; }
       const ag = Math.abs(g);
       if (ag < minAbs) minAbs = ag;
     }
-    if (!anyValid) { peak = NaN; trough = NaN; minAbs = NaN; }
+    if (nValid === 0) { peak = NaN; trough = NaN; minAbs = NaN; }
+    const validFrac = nWindow > 0 ? nValid / nWindow : 0;
 
     const stance = d.stance?.toLowerCase?.() || null;
 
@@ -247,15 +262,19 @@ function computeAll(state, cfg) {
     const rotationDeg = Number.isFinite(peakTheta) && Number.isFinite(troughTheta)
       ? peakTheta - troughTheta : NaN;
 
-    // Single gate: min(|signed gap|) / W_est > noiseRatioMin means the
-    // signal stayed near ±W throughout — hips were parked broadside
-    // (saturated) the whole punch. arcsin amplifies noise there, so we
+    // Gates: (1) low-validity → too few frames had valid pose data,
+    // the surviving frames probably miss part of the motion (e.g. the
+    // drive phase blurs the hips, confidence drops, and we end up
+    // sampling only the loaded phase). (2) noise-zone — |signed gap|
+    // stayed saturated near ±W throughout, arcsin too noisy.
     // can't trust the recovered angle. Crossover rotations DON'T trigger
     // this: signed gap passes through zero on its way from +W to −W (or
     // back), so min(|gap|) ≈ 0, well below the threshold.
     let predicted;
     if (!Number.isFinite(minAbsRatio) || !Number.isFinite(rotationDeg)) {
       predicted = "skip";              // W_est unavailable or no valid frames
+    } else if (validFrac < cfg.minValidFrac) {
+      predicted = "skip";              // too sparse — likely missing the drive
     } else if (minAbsRatio > cfg.noiseRatioMin) {
       predicted = "skip";              // sin-flat zone (one-sided saturation)
     } else if (rotationDeg >= cfg.minRotationDeg) {
@@ -281,6 +300,9 @@ function computeAll(state, cfg) {
       peak_frame: peakAt,
       trough_gap: trough,
       trough_frame: troughAt,
+      n_valid: nValid,
+      n_window: nWindow,
+      valid_frac: validFrac,
       peak_ratio: peakRatio,
       trough_ratio: troughRatio,
       min_abs_ratio: minAbsRatio,
@@ -731,13 +753,22 @@ function rebuildSidebar(state) {
               : ` <span style="color:${COLOR_FAIL}">✗</span>`)
         : ` · <span class="muted">no GT</span>`);
 
+  const validFrac = Number.isFinite(p.valid_frac) ? p.valid_frac : 0;
+  const lowValid = validFrac < cfg.minValidFrac;
+  const validStr = `${p.n_valid}/${p.n_window} (${(100*validFrac).toFixed(0)}%)`;
+
   const lines = [
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
     `label window <code>${p.start_frame}-${p.end_frame}</code> · search (looped) <code>${p.search_start}-${p.search_end}</code> (−${cfg.searchPreSec.toFixed(2)}s / +${cfg.searchPostSec.toFixed(2)}s)`,
     "",
-    `<b>1. Gate</b> (min |gap| / W_est vs ${cfg.noiseRatioMin})`,
+    `<b>1. Gates</b>`,
+    `valid frames = <code>${validStr}</code>`
+      + (lowValid
+          ? ` · ${pill("LOW VALIDITY → skip", COLOR_SKIP)} (thr ${(cfg.minValidFrac*100).toFixed(0)}%)`
+          : ` · ${pill("OK", COLOR_PASS)}`),
     `min |gap| / W_est = <code>${mRatioStr}</code>`
-      + (noiseZone ? ` · ${pill("NOISE ZONE → skip", COLOR_SKIP)}` : ` · ${pill("OK", COLOR_PASS)}`),
+      + (noiseZone ? ` · ${pill("NOISE ZONE → skip", COLOR_SKIP)} (thr ${cfg.noiseRatioMin})`
+                   : ` · ${pill("OK", COLOR_PASS)}`),
     "",
   ];
 
