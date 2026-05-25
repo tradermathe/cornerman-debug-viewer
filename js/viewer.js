@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-21.9";
+const BUILD = "2026-05-25.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -61,14 +61,16 @@ const els = {
 // drive.toFile() on values when it's actually time to load.
 // Survives across video picks within one page session.
 //
-// Engine slots: `yolo`, `vision`, `vision3d`, `glove` are recognized by
-// filename. `vision_combined` is a synthetic tag we apply when a `_vision_`
-// file lives inside a folder whose name starts with `pose_cache_v` — that's
-// the "Apple Vision skeleton with glove-model wrists baked in" cache built
-// by glove_wrist_cache_build.ipynb §8. Filename pattern collides with raw
-// vision; the parent-folder hint is what disambiguates.
-const ENGINE_TAGS = ["yolo", "vision", "vision3d", "glove", "vision_combined"];
-const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "vision_combined"];
+// Engine slots: `yolo`, `vision`, `vision3d`, `glove`, `vision_glove` are
+// recognized by filename. `vision_combined` is a synthetic tag we apply when
+// a `_vision_` file lives inside a folder whose name starts with `pose_cache_v`
+// (the older "Apple Vision skeleton with glove-model wrists baked in" cache
+// built by glove_wrist_cache_build.ipynb §8). `vision_glove` is the v6 cache
+// (pose_cache_v6/, files named `<stem>_vision_glove_r<N>`) — same shape but
+// the filename advertises the combination, and the meta carries per-round
+// glove-presence info consumed by the round_v6 lens.
+const ENGINE_TAGS = ["yolo", "vision", "vision3d", "glove", "vision_combined", "vision_glove"];
+const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "vision_combined", "vision_glove"];
 const COMBINED_DIR_RE = /^pose_cache_v/i;
 function classifyEngine(engine, parentDir) {
   if (engine === "vision" && parentDir && COMBINED_DIR_RE.test(parentDir)) {
@@ -289,7 +291,7 @@ function populateDriveVideoSelect() {
 // per-rule code change.
 function slotMatchesActiveLens(slot) {
   const req = state.rule?.requires;
-  if (!req) return !!(slot?.yolo || slot?.vision);
+  if (!req) return !!(slot?.yolo || slot?.vision || slot?.vision_glove);
   try { return !!req(slot); }
   catch { return false; }
 }
@@ -354,8 +356,10 @@ function onCacheFolder(e) {
     // with optional `_cam.npy` (per-frame cameraOriginMatrix) and `_proj.npy`
     // (image-space projection via pointInImage) sidecars alongside the usual
     // `_meta.json`. `_punches` only applies to 2D engines.
+    // Longer tokens first — `vision_glove` would otherwise be eaten as
+    // `vision` with a base ending in `_vision`.
     const m = f.name.match(
-      /^(.+?)_(yolo|vision|vision3d)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
+      /^(.+?)_(vision_glove|vision3d|vision|yolo|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, rawEngine, roundStr, suffix, ext] = m;
@@ -414,7 +418,7 @@ function onCacheClear() {
 
 function refreshCacheStatus() {
   const nVideos = cacheIndex?.size || 0;
-  let nRounds = 0, nYolo = 0, nVision = 0, nVision3D = 0, nCombined = 0;
+  let nRounds = 0, nYolo = 0, nVision = 0, nVision3D = 0, nCombined = 0, nV6 = 0;
   for (const rounds of cacheIndex?.values() || []) {
     for (const slot of rounds.values()) {
       nRounds++;
@@ -422,6 +426,7 @@ function refreshCacheStatus() {
       if (slot.vision)           nVision++;
       if (slot.vision3d)         nVision3D++;
       if (slot.vision_combined)  nCombined++;
+      if (slot.vision_glove)     nV6++;
     }
   }
   if (nRounds) {
@@ -430,6 +435,7 @@ function refreshCacheStatus() {
     if (nVision)    parts.push(`${nVision} Apple Vision`);
     if (nVision3D)  parts.push(`${nVision3D} Vision 3D`);
     if (nCombined)  parts.push(`${nCombined} Vision+glove`);
+    if (nV6)        parts.push(`${nV6} v6`);
     els.cacheStatus.textContent =
       `— ${nRounds} rounds across ${nVideos} videos (${parts.join(" + ")})`;
     if (els.cacheSection) els.cacheSection.open = false;
@@ -484,6 +490,7 @@ function loadVideoOnly(videoFile, errMessage) {
       state.pose = null;
       state.poseSecondary = null;
       state.poseCombined = null;
+      state.poseV6 = null;
       state.pose3d = null;
       state.n_frames = 0;
       state.frame = 0;
@@ -532,13 +539,16 @@ function onManualPose() {
 }
 
 function loadFromIndex(videoFile, slot) {
-  // `slot` may have `yolo` and/or `vision`. Primary pose is APPLE VISION
-  // when present — it's what the production iOS app runs on, and its
-  // clean `conf = 0` for non-detected joints is what the facing-direction
-  // lens (and any rule that consults face-confidence asymmetry) needs.
-  // YOLO is loaded as the secondary so the engine-compare lens still has
-  // both. If only one engine exists, that one is primary.
-  const primary = slot.vision || slot.yolo;
+  // `slot` may have `yolo`, `vision`, and/or `vision_glove`. Primary pose
+  // is APPLE VISION when present — it's what the production iOS app runs
+  // on, and its clean `conf = 0` for non-detected joints is what the
+  // facing-direction lens (and any rule that consults face-confidence
+  // asymmetry) needs. YOLO is loaded as the secondary so the engine-compare
+  // lens still has both. If neither raw engine exists but the v6 cache does
+  // (someone synced only pose_cache_v6/), fall back to it so the viewer
+  // still has a skeleton to render — the v6 cache is shape-compatible with
+  // raw vision.
+  const primary = slot.vision || slot.yolo || slot.vision_glove;
   const secondary = (slot.vision && slot.yolo) ? slot.yolo : null;
   const status =
     `Loading ${videoFile.name}${secondary ? " (vision + yolo)" : ""}…`;
@@ -559,9 +569,15 @@ function loadFromIndex(videoFile, slot) {
       // Vision when both engines are present (see the slot-pick above),
       // so when there's both we know primary = vision and secondary = yolo;
       // otherwise primary is whichever single engine exists for this round.
-      const primaryEngine = (slot.vision && primary === slot.vision)
-        ? "apple_vision_2d"
-        : "yolo_pose";
+      // If the v6 cache was the only thing in the slot, the meta records
+      // the actual engine (`apple_vision_2d` for ungloved or
+      // `apple_vision_2d+glove_v6` for gloved) — use it verbatim.
+      let primaryEngine;
+      if (slot.vision && primary === slot.vision)            primaryEngine = "apple_vision_2d";
+      else if (slot.yolo && primary === slot.yolo)           primaryEngine = "yolo_pose";
+      else if (slot.vision_glove && primary === slot.vision_glove)
+        primaryEngine = posePrimary.meta?.engine || "apple_vision_2d+glove_v6";
+      else                                                    primaryEngine = "unknown";
       posePrimary.engine = primaryEngine;
       let poseSecondary = null;
       if (secondary) {
@@ -633,16 +649,35 @@ function loadFromIndex(videoFile, slot) {
           console.warn("combined pose load failed:", err.message);
         }
       }
+      // Optional: v6 cache (pose_cache_v6/). Production-shape Apple Vision
+      // skeleton with glove wrists baked in for gloved rounds. The round_v6
+      // lens reads this directly so it doesn't redo the substitution; engine
+      // / presence / wrist_replaced flags live in the meta JSON.
+      let poseV6 = null;
+      if (slot.vision_glove) {
+        try {
+          const vgNpy  = await drive.toFile(slot.vision_glove.npy);
+          const vgMeta = await drive.toFile(slot.vision_glove.meta);
+          poseV6 = await loadPose([vgNpy, vgMeta], size);
+          // Reflect whichever engine the meta records — pure Vision for
+          // ungloved rounds, vision+glove for gloved rounds.
+          poseV6.engine = poseV6.meta?.engine || "apple_vision_2d+glove_v6";
+        } catch (err) {
+          console.warn("v6 pose load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches, pose3d, poseCombined);
+      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6);
 
       // Expose cache identity on state so lenses that key by (stem, round, frame)
       // — e.g. orientation_lens looking up orientation GT labels — can find it
       // without re-parsing filenames themselves. Round comes from the `_rN`
       // suffix; cacheBasename is the source-video stem (suffix stripped).
+      // Longer engine tokens first so `_vision_glove_` doesn't get truncated
+      // at `_vision_`.
       const npyName = primary.npy.name;
       state.cacheBasename = stripCacheSuffix(npyName);
-      const rndMatch = /_(?:yolo|vision)_r(\d+)\.npy$/i.exec(npyName);
+      const rndMatch = /_(?:vision_glove|vision|yolo)_r(\d+)\.npy$/i.exec(npyName);
       state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
 
       // Live GT labels: derive a basename from the cache filename, then hit
@@ -696,7 +731,7 @@ function loadFromFiles(videoFile, poseFiles) {
       // need (stem, round, frame) work in the manual-picker path too.
       if (npyFile) {
         state.cacheBasename = stripCacheSuffix(npyFile.name);
-        const rndMatch = /_(?:yolo|vision)_r(\d+)\.npy$/i.exec(npyFile.name);
+        const rndMatch = /_(?:vision_glove|vision|yolo)_r(\d+)\.npy$/i.exec(npyFile.name);
         state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
       }
       // Live GT labels.
@@ -761,10 +796,12 @@ function stripCacheSuffix(fileName) {
   return fileName
     .replace(/\.npy$/i, "")
     // Strip any recognised cache-shape tail. Engines are
-    // yolo/vision/vision3d/glove/vision_combined per ENGINE_TAGS;
+    // yolo/vision/vision3d/glove/vision_combined/vision_glove per ENGINE_TAGS;
     // anything else falls through and we hand the raw stem to the
-    // auto-matcher's fuzzy logic.
-    .replace(/_(yolo|vision3d|vision_combined|vision|glove)_r\d+$/i, "");
+    // auto-matcher's fuzzy logic. Longer tokens listed first so
+    // `_vision_glove_` matches as a unit instead of being truncated to
+    // `_vision_`.
+    .replace(/_(vision_glove|vision_combined|vision3d|vision|yolo|glove)_r\d+$/i, "");
 }
 
 // Fire a best-effort live-label fetch. Doesn't block UI. On success, sets
@@ -804,10 +841,11 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.poseCombined = poseCombined;     // optional vision+glove combined cache
+  state.poseV6 = poseV6;                 // optional pose_cache_v6 (vision+glove_v6)
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()

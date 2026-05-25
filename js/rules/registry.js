@@ -27,9 +27,11 @@ import { OrientationLensRule } from "./orientation_lens.js";
 import { PunchDirectionReviewRule } from "./punch_direction_review.js";
 import { StraightsReviewRule } from "./straights_review.js";
 import { AngleChangeRule } from "./angle_change.js";
+import { RoundV6Rule } from "./round_v6.js";
 
 export const RULES = [
   OverviewRule,
+  RoundV6Rule,
   GuardDropRule,
   ArmExtensionRule,
   PunchDirectionRule,
