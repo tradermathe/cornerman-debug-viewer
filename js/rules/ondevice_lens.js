@@ -175,8 +175,16 @@ function renderSidebar(state) {
     ? `<br>round range: <code>${fmt(angMin, 1)}°</code> → <code>${fmt(angMax, 1)}°</code> <span class="muted">(span ${(angMax - angMin).toFixed(1)}°)</span>`
     : "";
   el.innerHTML = `
-    <h3 style="margin:6px 0; font-size:14px">Orientation</h3>
-    <div style="font-size:13px; line-height:1.6">
+    <h3 style="margin:6px 0; font-size:14px">
+      Orientation
+      <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:#c97a08; color:#000; font-size:10px; font-weight:700; text-transform:uppercase; margin-left:6px">DEPRECATED</span>
+    </h3>
+    <p class="hint" style="font-size:11px; color:#c97a08; margin:4px 0 8px">
+      Failed first-pass LogReg model — kept flowing so the pipeline stays
+      green, but DO NOT trust these numbers. Replacement: ankle-direction
+      + per-stance fit (see "Orientation lens (ankle arrow)").
+    </p>
+    <div style="font-size:13px; line-height:1.6; opacity:0.7">
       <strong>frame ${f}:</strong> angle <code>${fmt(angle, 1)}°</code>, conf <code>${fmt(conf, 2)}</code><br>
       round mean: <code>${fmt(meanAngle, 1)}°</code>
       <span class="muted">(${validFrames} / ${N} valid frames, ${(100 * validFrames / Math.max(1, N)).toFixed(1)}%)</span>
