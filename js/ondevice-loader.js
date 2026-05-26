@@ -107,10 +107,22 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
   const orient = payload.orientation || {};
   const orientation = {
     version: orient.version || "v1",
+    deprecated: orient.deprecated === true,
     validFrames: Number(orient.valid_frames ?? 0),
     angles: orient.angles_b64 ? base64ToFloat32(orient.angles_b64) : new Float32Array(nFrames),
     confidences: orient.confidences_b64 ? base64ToFloat32(orient.confidences_b64) : new Float32Array(nFrames),
   };
+
+  // Trusted ankle-direction + per-stance fit orientation. Always present
+  // on sidecars written from 2026-05-26 onwards; null on older sessions.
+  const ank = payload.ankle_orientation || null;
+  const ankleOrientation = ank ? {
+    version: ank.version || "v1",
+    stance: ank.stance || "orthodox",
+    validFrames: Number(ank.valid_frames ?? 0),
+    angles: ank.angles_b64 ? base64ToFloat32(ank.angles_b64) : new Float32Array(nFrames),
+    confidences: ank.confidences_b64 ? base64ToFloat32(ank.confidences_b64) : new Float32Array(nFrames),
+  } : null;
 
   const rulesIn = payload.rules || {};
   const rules = {};
@@ -134,7 +146,8 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
   return {
     n_frames: nFrames,
     fps: Number(payload.fps),
-    orientation,
+    orientation,        // deprecated LogReg — kept for comparison
+    ankleOrientation,   // trusted ankle+correction (may be null on old sessions)
     rules,
     raw: payload, // for debugging
   };
