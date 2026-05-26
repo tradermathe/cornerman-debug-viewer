@@ -49,6 +49,10 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // `_glove_r…` would fail to match.
 const CACHE_FILE_RE =
   /^(.+?)_(vision_glove|vision3d|vision|yolo|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
+// Punch-classifier predictions dump (one file per training run, schema in
+// js/rules/punch_classifier.js). Walker captures these and exposes them as
+// `state.predictionFiles` so the lens auto-loads without a file picker.
+const PREDICTIONS_FILE_RE = /^predictions_.*\.json$/i;
 const COMBINED_DIR_RE = /^pose_cache_v/i;
 function classifyEngine(engine, _parentDirName) {
   // `vision_glove` and `vision_combined` are filename-distinguished now (the
@@ -177,6 +181,9 @@ export async function forget() {
 export async function walk(rootHandle) {
   const videos = new Map();
   const cacheIndex = new Map();
+  // Keyed by filename so the lens can surface every found file if it wants;
+  // viewer.js picks one (most-recently-modified) by default.
+  const predictions = new Map();
 
   async function visit(dirHandle) {
     for await (const entry of dirHandle.values()) {
@@ -187,6 +194,10 @@ export async function walk(rootHandle) {
       const name = entry.name;
       if (VIDEO_EXTENSIONS.test(name)) {
         videos.set(name, entry);
+        continue;
+      }
+      if (PREDICTIONS_FILE_RE.test(name)) {
+        predictions.set(name, entry);
         continue;
       }
       if (name.endsWith(".bak.npy")) continue;
@@ -243,7 +254,7 @@ export async function walk(rootHandle) {
     if (rounds.size === 0) cacheIndex.delete(base);
   }
 
-  return { videos, cacheIndex };
+  return { videos, cacheIndex, predictions };
 }
 
 // Materialize a slot value into a File. Lets viewer.js stay agnostic about

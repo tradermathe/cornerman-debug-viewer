@@ -8,11 +8,16 @@
 // (cacheBasename, round_index) pair the viewer already maintains.
 //
 // Input: ONE JSON file containing every round's per-frame GT + predictions.
-// Drop it into the lens's file picker; the lens auto-scopes to the round
-// matching state.cacheBasename + state.cacheRound. The round dropdown stays
-// editable so you can manually pick a different round if the auto-match is
-// wrong (e.g. cache stem includes `_h264` and the notebook used the raw mp4
-// name).
+// Auto-loaded from any file named `predictions_*.json` anywhere in the
+// connected Drive folder (or in a manual cache-folder pick); manual file
+// picker is kept as an override. The lens auto-scopes to the round matching
+// state.cacheBasename + state.cacheRound. The round dropdown stays editable
+// so you can manually pick a different round if the auto-match is wrong
+// (e.g. cache stem includes `_h264` and the notebook used the raw mp4 name).
+//
+// If multiple `predictions_*.json` files exist (different training runs),
+// the auto-load picker shows all of them sorted newest-first; the lens
+// defaults to the most-recently-modified one.
 //
 // JSON schema (v1):
 //   {
@@ -120,8 +125,12 @@ export const PunchClassifierRule = {
     lastPose = state.pose;
     lastCacheKey = cacheKey(state);
     wireFilePicker(state);
+    wireAutoLoad(state);
     wireRoundPicker(state);
     refreshScope(state);
+    // Kick off auto-load from state.predictionFiles (if any). Async; will
+    // populate `dump` and refresh on completion.
+    tryAutoLoad(state);
   },
 
   update(state) {
@@ -153,10 +162,17 @@ function template() {
       loaded video + round.</p>
 
     <h3>Predictions JSON</h3>
-    <label class="folder-pick">
-      <input type="file" id="pc-file" accept="application/json,.json">
-      <span class="muted small" id="pc-file-status">no file loaded</span>
-    </label>
+    <div id="pc-auto-row" hidden style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <select id="pc-auto-select" style="flex:1;min-width:0;background:var(--bg-elev);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit"></select>
+      <span class="muted small">auto-loaded from Drive</span>
+    </div>
+    <details class="manual-fallback">
+      <summary id="pc-manual-summary">Override with a manual file</summary>
+      <label class="folder-pick">
+        <input type="file" id="pc-file" accept="application/json,.json">
+        <span class="muted small" id="pc-file-status">no file loaded</span>
+      </label>
+    </details>
 
     <h3>Round</h3>
     <select id="pc-round" disabled>
@@ -246,6 +262,105 @@ function wireFilePicker(state) {
 function setStatus(text) {
   const el = host.querySelector("#pc-file-status");
   if (el) el.textContent = text;
+}
+
+// Auto-load wiring: state.predictionFiles is a Map<filename, File | handle>
+// populated by viewer.js from the Drive walker and the manual cache-folder
+// picker. The lens shows a dropdown of every found file and defaults to the
+// most-recently-modified one. The manual file picker stays as an override.
+function wireAutoLoad(state) {
+  const sel = host.querySelector("#pc-auto-select");
+  if (!sel) return;
+  sel.addEventListener("change", async () => {
+    const name = sel.value;
+    if (!name) return;
+    await loadAutoFile(state, name);
+  });
+}
+
+async function tryAutoLoad(state) {
+  const files = state?.predictionFiles;
+  const row = host.querySelector("#pc-auto-row");
+  const sel = host.querySelector("#pc-auto-select");
+  const summary = host.querySelector("#pc-manual-summary");
+  if (!files || files.size === 0) {
+    if (row) row.hidden = true;
+    if (summary) summary.textContent = "Load a predictions JSON";
+    return;
+  }
+  // Materialize to {name, file} so we can compare mtimes. drive.toFile()
+  // works for both raw Files and FileSystemFileHandles.
+  const items = [];
+  for (const [name, value] of files) {
+    let file;
+    if (value instanceof File) file = value;
+    else if (typeof value?.getFile === "function") {
+      try { file = await value.getFile(); }
+      catch { continue; }
+    } else continue;
+    items.push({ name, file });
+  }
+  if (!items.length) {
+    if (row) row.hidden = true;
+    return;
+  }
+  // Newest first.
+  items.sort((a, b) => (b.file.lastModified || 0) - (a.file.lastModified || 0));
+  if (row) row.hidden = false;
+  if (sel) {
+    sel.innerHTML = "";
+    for (const it of items) {
+      const o = document.createElement("option");
+      o.value = it.name;
+      const t = it.file.lastModified
+        ? new Date(it.file.lastModified).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })
+        : "?";
+      o.textContent = `${it.name} · ${t}`;
+      sel.appendChild(o);
+    }
+    sel.value = items[0].name;
+  }
+  if (summary) summary.textContent = "Override with a manual file";
+  await loadAutoFile(state, items[0].name, items.map(it => [it.name, it.file]));
+}
+
+// Load (or reload) a specific auto-found file by name. The `materializedHint`
+// is an optional pre-materialized [name, File] list from tryAutoLoad so we
+// don't have to re-call getFile() if we already did once.
+async function loadAutoFile(state, name, materializedHint) {
+  const files = state?.predictionFiles;
+  if (!files || !files.has(name)) return;
+  let file = null;
+  if (materializedHint) {
+    const hit = materializedHint.find(([n]) => n === name);
+    if (hit) file = hit[1];
+  }
+  if (!file) {
+    const value = files.get(name);
+    if (value instanceof File) file = value;
+    else if (typeof value?.getFile === "function") {
+      try { file = await value.getFile(); } catch { return; }
+    }
+  }
+  if (!file) return;
+  setStatus(`auto: reading ${file.name}…`);
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    if (!parsed || !Array.isArray(parsed.rounds)) {
+      throw new Error("JSON is missing a `rounds` array");
+    }
+    dump = parsed;
+    setStatus(`auto · ${file.name} · ${dump.rounds.length} rounds · ` +
+      `model ${dump.model || "?"} · exported ${dump.exported_at || "?"}`);
+    populateRoundPicker();
+    refreshScope(state);
+  } catch (err) {
+    dump = null;
+    setStatus(`auto-load error: ${err.message}`);
+    populateRoundPicker();
+    refreshScope(state);
+  }
 }
 
 function wireRoundPicker(state) {

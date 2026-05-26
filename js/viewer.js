@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-26.2";
+const BUILD = "2026-05-26.3";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -85,6 +85,13 @@ let cacheIndex = null;
 // connected; consulted to populate the video dropdown.
 let driveVideos = null;
 let driveHandle = null;
+
+// Punch-classifier predictions dumps found anywhere in the Drive folder or
+// the manual cache-folder pick. Keyed by filename, value is a File OR
+// FileSystemFileHandle (same dual-shape trick the cache index uses). Exposed
+// to lenses via `state.predictionFiles` so the punch_classifier lens can
+// auto-load without a manual file picker.
+let predictionFiles = new Map();
 
 // Monotonically increasing token. Bumped on every load attempt so an in-flight
 // load can detect that a newer pick has superseded it and bail out before
@@ -205,18 +212,20 @@ async function onDriveDisconnect() {
   // its own entries we don't want to drop. For now we don't distinguish, so
   // clearing the whole index is the safe behaviour; pick again to rebuild.
   cacheIndex = null;
+  predictionFiles = new Map();
   await drive.forget();
   populateDriveVideoSelect();
   populateRoundSelect(null);
   refreshCacheStatus();
   setDriveStatus("idle");
+  notifyPredictionFilesChanged();
 }
 
 async function refreshDriveFolder() {
   if (!driveHandle) return;
   setDriveStatus("scanning", driveHandle.name);
   try {
-    const { videos, cacheIndex: idx } = await drive.walk(driveHandle);
+    const { videos, cacheIndex: idx, predictions } = await drive.walk(driveHandle);
     driveVideos = videos;
     // Merge Drive-sourced entries on top of anything from the manual picker —
     // Drive wins (more likely fresh).
@@ -226,9 +235,16 @@ async function refreshDriveFolder() {
       const merged = cacheIndex.get(base);
       for (const [round, slot] of rounds) merged.set(round, slot);
     }
+    // Replace any prior Drive-sourced predictions; merge with anything the
+    // manual cache-folder picker may have added (those are File objects,
+    // Drive's are handles — both work via drive.toFile()).
+    if (predictions) {
+      for (const [name, handle] of predictions) predictionFiles.set(name, handle);
+    }
     populateDriveVideoSelect();
     refreshCacheStatus();
     setDriveStatus("connected", driveHandle.name);
+    notifyPredictionFilesChanged();
   } catch (err) {
     console.error("Drive folder walk failed:", err);
     setDriveStatus("denied", driveHandle.name);
@@ -344,7 +360,13 @@ async function onDriveVideoPick() {
 function onCacheFolder(e) {
   const files = Array.from(e.target.files || []);
   if (!cacheIndex) cacheIndex = new Map();
+  let predictionsTouched = false;
   for (const f of files) {
+    if (/^predictions_.*\.json$/i.test(f.name)) {
+      predictionFiles.set(f.name, f);
+      predictionsTouched = true;
+      continue;
+    }
     if (f.name.endsWith(".bak.npy")) continue;
     // Three sibling patterns we recognize per round + engine:
     //   <base>_<engine>_r<N>.npy           — pose data
@@ -405,8 +427,20 @@ function onCacheFolder(e) {
   // broken).
   els.cacheFolder.value = "";
 
+  if (predictionsTouched) notifyPredictionFilesChanged();
+
   // Re-evaluate any already-picked video against the updated index.
   if (els.videoFile.files[0]) onVideoPick();
+}
+
+// Push the latest prediction-file map onto state and re-mount the active
+// lens if it cares. Lens reads state.predictionFiles inside mount().
+function notifyPredictionFilesChanged() {
+  state.predictionFiles = predictionFiles;
+  if (state.pose && state.rule) {
+    state.rule.mount(els.ruleHost, state);
+    redraw();
+  }
 }
 
 function onCacheClear() {
@@ -850,6 +884,7 @@ function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCo
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()
   state.orientationLabels = null;        // populated by orientation lens on demand
+  state.predictionFiles = predictionFiles; // punch-classifier dumps from Drive / cache folder
   state.fps = pose.fps;
   state.n_frames = pose.n_frames;
   state.start_sec = pose.start_sec || 0;
