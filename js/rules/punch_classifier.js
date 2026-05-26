@@ -162,10 +162,15 @@ function template() {
       loaded video + round.</p>
 
     <h3>Predictions JSON</h3>
-    <div id="pc-auto-row" hidden style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+    <div id="pc-auto-row" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <select id="pc-auto-select" style="flex:1;min-width:0;background:var(--bg-elev);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font:inherit"></select>
       <span class="muted small">auto-loaded from Drive</span>
     </div>
+    <p id="pc-auto-empty" class="hint" style="margin:0 0 6px">
+      No <code>predictions_*.json</code> found in your Drive folder yet —
+      run the notebook export snippet (see "Notebook export snippet" at the
+      bottom of this panel) and the file will appear here automatically.
+    </p>
     <details class="manual-fallback">
       <summary id="pc-manual-summary">Override with a manual file</summary>
       <label class="folder-pick">
@@ -282,12 +287,14 @@ async function tryAutoLoad(state) {
   const files = state?.predictionFiles;
   const row = host.querySelector("#pc-auto-row");
   const sel = host.querySelector("#pc-auto-select");
+  const empty = host.querySelector("#pc-auto-empty");
   const summary = host.querySelector("#pc-manual-summary");
-  if (!files || files.size === 0) {
-    if (row) row.hidden = true;
+  const setEmpty = () => {
+    if (row)     row.style.display = "none";
+    if (empty)   empty.style.display = "";
     if (summary) summary.textContent = "Load a predictions JSON";
-    return;
-  }
+  };
+  if (!files || files.size === 0) { setEmpty(); return; }
   // Materialize to {name, file} so we can compare mtimes. drive.toFile()
   // works for both raw Files and FileSystemFileHandles.
   const items = [];
@@ -300,13 +307,11 @@ async function tryAutoLoad(state) {
     } else continue;
     items.push({ name, file });
   }
-  if (!items.length) {
-    if (row) row.hidden = true;
-    return;
-  }
+  if (!items.length) { setEmpty(); return; }
   // Newest first.
   items.sort((a, b) => (b.file.lastModified || 0) - (a.file.lastModified || 0));
-  if (row) row.hidden = false;
+  if (row)   row.style.display = "flex";
+  if (empty) empty.style.display = "none";
   if (sel) {
     sel.innerHTML = "";
     for (const it of items) {
