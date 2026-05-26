@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-26.7";
+const BUILD = "2026-05-26.8";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -664,6 +664,9 @@ async function onFirebaseListRecent() {
     for (const s of sessions) {
       const opt = document.createElement("option");
       opt.value = s.sessionId;
+      // Stash the available rounds so onFirebaseRecentPick can default the
+      // round input to a value that actually exists for this session.
+      opt.dataset.rounds = JSON.stringify(s.rounds);
       const rounds = s.rounds.length ? `r${s.rounds.join(",")}` : "(no rounds)";
       opt.textContent = `${s.sessionId} (${rounds})`;
       els.fbRecent.appendChild(opt);
@@ -679,13 +682,18 @@ async function onFirebaseListRecent() {
 }
 
 function onFirebaseRecentPick() {
-  const sessionId = els.fbRecent.value;
+  const sel = els.fbRecent;
+  const sessionId = sel.value;
   if (!sessionId) return;
   els.fbSessionId.value = sessionId;
-  // Auto-trigger load if a round number is set (default 0 fits most sessions).
-  if (!Number.isNaN(parseInt(els.fbRound.value, 10))) {
-    onFirebaseLoad();
+  // Default the round to the first one this session actually has — sessions
+  // that started at round 1 (or higher) would 404 if we left the input at 0.
+  const opt = sel.options[sel.selectedIndex];
+  const rounds = opt?.dataset?.rounds ? JSON.parse(opt.dataset.rounds) : [];
+  if (rounds.length > 0) {
+    els.fbRound.value = String(rounds[0]);
   }
+  onFirebaseLoad();
 }
 
 function loadFromIndex(videoFile, slot) {

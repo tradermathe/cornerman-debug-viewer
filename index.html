@@ -75,19 +75,19 @@
         the <em>On-device analysis (from phone)</em> lens to render the
         sidecar's exact per-frame numbers.
       </p>
-      <div class="folder-pick" style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end">
-        <label style="flex:2 1 200px">
-          <span>Session id</span>
-          <input type="text" id="fb-session-id" placeholder="e.g. 20260526_143052_abc">
-        </label>
-        <label style="flex:1 1 80px">
-          <span>Round</span>
-          <input type="number" id="fb-round" min="0" value="0" style="width:60px">
-        </label>
+      <label class="folder-pick">
+        <span>Session id</span>
+        <input type="text" id="fb-session-id" placeholder="e.g. session_1779803489515" style="max-width:380px">
+      </label>
+      <label class="folder-pick">
+        <span>Round</span>
+        <input type="number" id="fb-round" min="0" value="0" style="width:80px">
+      </label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px">
         <button type="button" id="fb-load">Load</button>
         <button type="button" id="fb-list-recent" class="muted small">Recent…</button>
       </div>
-      <select id="fb-recent-sessions" hidden style="margin-top:8px; width:100%">
+      <select id="fb-recent-sessions" hidden style="margin-top:8px; max-width:600px">
         <option value="">— pick a recent session —</option>
       </select>
     </details>
