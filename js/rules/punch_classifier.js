@@ -124,6 +124,7 @@ export const PunchClassifierRule = {
     host.innerHTML = template();
     lastPose = state.pose;
     lastCacheKey = cacheKey(state);
+    mountStageTimeline();
     wireFilePicker(state);
     wireAutoLoad(state);
     wireRoundPicker(state);
@@ -142,7 +143,7 @@ export const PunchClassifierRule = {
       refreshScope(state);
     }
     if (!activeRound || !signals) return;
-    drawTimeline(host.querySelector("#pc-timeline"), signals, state.frame);
+    drawTimeline(document.getElementById("pc-timeline"), signals, state.frame);
     renderHud(state);
   },
 
@@ -196,11 +197,10 @@ function template() {
     <p class="hint" id="pc-stat-line"></p>
 
     <h3>Timeline</h3>
-    <canvas id="pc-timeline" width="340" height="120"></canvas>
-    <p class="hint">4 tracks: GT-lead, Pred-lead, GT-rear, Pred-rear. Green =
-      GT hit · red striped = GT miss · orange/purple = Pred correct
-      (straight / hook+uppercut family) · same hue hatched = false alarm ·
-      magenta = mistype. Click the timeline to seek.</p>
+    <p class="hint">Below the video: 4 tracks (GT-lead, Pred-lead, GT-rear,
+      Pred-rear). Green = GT hit · red striped = GT miss · orange/purple =
+      Pred correct (straight / hook+uppercut family) · same hue hatched =
+      false alarm · magenta = mistype. Click the timeline to seek.</p>
 
     <details class="manual-fallback">
       <summary>Notebook export snippet</summary>
@@ -595,6 +595,48 @@ function quickStats(round) {
   };
 }
 
+// ── Stage-extras timeline ──────────────────────────────────────────────────
+// The 4-track timeline lives BELOW the video (in #stage-extras) rather than
+// in the side panel so it spans the full stage width — aligns naturally
+// with the playback scrubber and reads cleanly on long rounds. viewer.js
+// clears #stage-extras on every lens switch, so we re-inject on mount.
+
+function mountStageTimeline() {
+  const slot = document.getElementById("stage-extras");
+  if (!slot) return;
+  slot.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.id = "pc-timeline-wrap";
+  wrap.style.cssText = "margin-top:12px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px";
+  const label = document.createElement("div");
+  label.className = "muted small";
+  label.style.cssText = "margin-bottom:6px";
+  label.textContent = "Punch classifier — GT vs Pred timeline (click to seek)";
+  wrap.appendChild(label);
+  const canvas = document.createElement("canvas");
+  canvas.id = "pc-timeline";
+  canvas.style.cssText = "display:block;width:100%;height:120px";
+  // Internal pixel size gets resized to match CSS width on first draw.
+  canvas.width = 800;
+  canvas.height = 120;
+  wrap.appendChild(canvas);
+  slot.appendChild(wrap);
+
+  // Click-to-seek. The canvas is recreated on every mount, so the listener
+  // doesn't persist across lens switches and we wire it fresh here.
+  canvas.addEventListener("click", e => {
+    if (!signals) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;     // CSS pixels — draw also uses CSS pixels.
+    // Mirror drawTimeline's xmap (labelW = 64, right pad = 4).
+    const labelW = 64;
+    const W = rect.width;
+    const ratio = (cx - labelW) / Math.max(1, W - labelW - 4);
+    const f = Math.round(ratio * (signals.n_frames - 1));
+    seekHack(Math.max(0, Math.min(signals.n_frames - 1, f)));
+  });
+}
+
 // ── Rendering ──────────────────────────────────────────────────────────────
 
 function renderStats() {
@@ -709,12 +751,22 @@ function findEvent(events, frame) {
 
 // ── Timeline ───────────────────────────────────────────────────────────────
 
-let timelineWired = false;
-
 function drawTimeline(canvas, sig, frame) {
   if (!canvas) return;
+  // Sync canvas internal pixels to its CSS box so the render stays sharp
+  // at any stage width. devicePixelRatio multiplier so retina displays
+  // don't look fuzzy.
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const cssW = Math.max(1, canvas.getBoundingClientRect().width);
+  const cssH = Math.max(1, canvas.getBoundingClientRect().height);
+  const targetW = Math.round(cssW * dpr);
+  const targetH = Math.round(cssH * dpr);
+  if (canvas.width !== targetW)  canvas.width  = targetW;
+  if (canvas.height !== targetH) canvas.height = targetH;
   const ctx = canvas.getContext("2d");
-  const W = canvas.width, H = canvas.height;
+  // Draw in CSS pixels so coordinate math below stays simple.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
   ctx.clearRect(0, 0, W, H);
   if (!sig) return;
 
@@ -725,8 +777,8 @@ function drawTimeline(canvas, sig, frame) {
     { events: sig.rear.gt,   isGt: true,  label: "GT rear",   classNames: sig.rearClassNames },
     { events: sig.rear.pred, isGt: false, label: "Pred rear", classNames: sig.rearClassNames },
   ];
-  const labelW = 56;
-  const trackH = 16;
+  const labelW = 64;
+  const trackH = Math.max(16, Math.floor((H - 16) / 4) - 4);
   const gap = 4;
   const trackTop = 4;
   const N = sig.n_frames;
@@ -755,19 +807,6 @@ function drawTimeline(canvas, sig, frame) {
   ctx.strokeStyle = COLORS.playhead;
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(ph, 0); ctx.lineTo(ph, H); ctx.stroke();
-
-  // One-time wire click-to-seek.
-  if (!timelineWired) {
-    canvas.addEventListener("click", e => {
-      if (!signals) return;
-      const rect = canvas.getBoundingClientRect();
-      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const ratio = (cx - labelW) / Math.max(1, W - labelW - 4);
-      const f = Math.round(ratio * (signals.n_frames - 1));
-      seekHack(Math.max(0, Math.min(signals.n_frames - 1, f)));
-    });
-    timelineWired = true;
-  }
 }
 
 function drawEventBar(ctx, x, y, w, h, ev, isGt) {

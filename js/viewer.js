@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-26.4";
+const BUILD = "2026-05-26.5";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -52,6 +52,7 @@ const els = {
   thumbTip:    document.getElementById("thumb-tooltip"),
   thumbCanvas: document.getElementById("thumb-canvas"),
   thumbLabel:  document.getElementById("thumb-label"),
+  stageExtras: document.getElementById("stage-extras"),
 };
 
 // Cache index built from the folder picker (or the Drive folder walker):
@@ -978,6 +979,10 @@ function setRule(id) {
   if (!rule) return;
   state.rule = rule;
   els.ruleHost.innerHTML = "";
+  // Clear the stage-wide extras slot so a lens that added a full-width
+  // canvas (e.g. punch_classifier's timeline) doesn't leak into the next
+  // lens. Lenses that want it back put their elements back in mount().
+  if (els.stageExtras) els.stageExtras.innerHTML = "";
   rule.mount(els.ruleHost, state);
   // Lens may change which videos/rounds are valid — refresh the dropdowns
   // so they reflect the new lens's requirements. We do NOT auto-swap the

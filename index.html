@@ -109,6 +109,10 @@
         </div>
         <div id="frame-label" class="muted"></div>
         <div id="meta" class="muted small"></div>
+        <!-- Lens-scoped slot for full-width extras (e.g. punch-classifier
+             timeline). Cleared on every lens switch by setRule(). Lenses
+             that want stage-wide real estate query this by id. -->
+        <div id="stage-extras"></div>
       </div>
 
       <aside id="side">
