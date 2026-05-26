@@ -99,6 +99,16 @@ const COLORS = {
   rowBg:         "#1d222b",
 };
 
+// Notebook applies `EVAL_MIN_EVENT = 4` to pred events (cell 17's
+// `extract_typed_events_filtered`) — anything shorter is dropped as
+// noise. Mirror that default so the lens's stats line up with the
+// notebook by default; user can drop the slider to 1 to see all
+// flickers (useful for diagnosing class-confusion within a single
+// real punch). GT events are NEVER filtered — they come from labels,
+// not threshold flicker.
+const DEFAULTS = { minEventFrames: 4 };
+let cfg = { ...DEFAULTS };
+
 const CLASS_NAMES_FALLBACK = {
   lead: ["idle","jab_head","jab_body","lead_hook_head","lead_hook_body","lead_uppercut_head","lead_uppercut_body"],
   rear: ["idle","cross_head","cross_body","rear_hook_head","rear_hook_body","rear_uppercut_head","rear_uppercut_body"],
@@ -128,6 +138,7 @@ export const PunchClassifierRule = {
     wireFilePicker(state);
     wireAutoLoad(state);
     wireRoundPicker(state);
+    wireMinEventSlider(state);
     refreshScope(state);
     // Kick off auto-load from state.predictionFiles (if any). Async; will
     // populate `dump` and refresh on completion.
@@ -185,6 +196,15 @@ function template() {
       <option value="">— load a predictions JSON —</option>
     </select>
     <p class="hint" id="pc-round-hint"></p>
+
+    <h3>Filters</h3>
+    <label class="slider">
+      <span>min_event = <output id="pc-min-event-out">${cfg.minEventFrames}</output> frames</span>
+      <input type="range" id="pc-min-event" min="1" max="20" step="1" value="${cfg.minEventFrames}">
+      <span class="muted small">Drop pred events shorter than this. <code>4</code> matches the notebook's
+        <code>EVAL_MIN_EVENT</code>. Slide to <code>1</code> to see every flicker (handy for
+        diagnosing class-confusion within a real punch). GT events are never filtered.</span>
+    </label>
 
     <h3>Round stats</h3>
     <div class="metric-grid">
@@ -378,8 +398,23 @@ function wireRoundPicker(state) {
     signals = activeRound ? deriveSignals(activeRound, dump) : null;
     renderStats();
     renderHud(state);
-    drawTimeline(host.querySelector("#pc-timeline"), signals, state.frame);
+    drawTimeline(document.getElementById("pc-timeline"), signals, state.frame);
     // Force a viewer redraw so the canvas HUD updates immediately.
+    if (typeof window !== "undefined" && window.__viewerRedraw) window.__viewerRedraw();
+  });
+}
+
+function wireMinEventSlider(state) {
+  const input = host.querySelector("#pc-min-event");
+  const out   = host.querySelector("#pc-min-event-out");
+  if (!input || !out) return;
+  input.addEventListener("input", () => {
+    cfg.minEventFrames = parseInt(input.value, 10) || 1;
+    out.textContent = cfg.minEventFrames;
+    // Re-derive on the current round (pred filter changes the tag counts too).
+    if (activeRound) signals = deriveSignals(activeRound, dump);
+    renderStats();
+    drawTimeline(document.getElementById("pc-timeline"), signals, state.frame);
     if (typeof window !== "undefined" && window.__viewerRedraw) window.__viewerRedraw();
   });
 }
@@ -467,8 +502,10 @@ function deriveSignals(round, dumpRoot) {
 
   const leadGt   = runLength(round.lead_truth);
   const rearGt   = runLength(round.rear_truth);
-  const leadPred = runLength(round.lead_pred);
-  const rearPred = runLength(round.rear_pred);
+  // Pred filtered by min_event (default 4, matches notebook EVAL_MIN_EVENT).
+  // GT is never filtered — comes from labels, not threshold flicker.
+  const leadPred = filterShort(runLength(round.lead_pred), cfg.minEventFrames);
+  const rearPred = filterShort(runLength(round.rear_pred), cfg.minEventFrames);
 
   const leadTag = matchAndTag(leadGt, leadPred);
   const rearTag = matchAndTag(rearGt, rearPred);
@@ -518,6 +555,15 @@ function runLength(labels) {
     } else i++;
   }
   return out;
+}
+
+// Drop events shorter than `minFrames` frames. Mirrors the notebook's
+// `extract_typed_events_filtered`, which drops any contiguous-class run
+// with `j - i < min_event`. Event spans frames [start_frame, end_frame]
+// inclusive — length is therefore end_frame - start_frame + 1.
+function filterShort(events, minFrames) {
+  if (!minFrames || minFrames <= 1) return events;
+  return events.filter(e => (e.end_frame - e.start_frame + 1) >= minFrames);
 }
 
 // One-to-one GT↔Pred matching by midpoint-inside-window, sorted by midpoint
@@ -581,8 +627,8 @@ function matchAndTag(gt, pred) {
 function quickStats(round) {
   const leadGt   = runLength(round.lead_truth);
   const rearGt   = runLength(round.rear_truth);
-  const leadPred = runLength(round.lead_pred);
-  const rearPred = runLength(round.rear_pred);
+  const leadPred = filterShort(runLength(round.lead_pred), cfg.minEventFrames);
+  const rearPred = filterShort(runLength(round.rear_pred), cfg.minEventFrames);
   const l = matchAndTag(leadGt, leadPred).stats;
   const r = matchAndTag(rearGt, rearPred).stats;
   const nGt   = l.nGt + r.nGt;
