@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-26.6";
+const BUILD = "2026-05-26.7";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -19,6 +19,8 @@ import { fetchLiveLabels } from "./sheet-labels.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 import * as drive from "./drive-folder.js";
+import * as firebaseSource from "./firebase-source.js";
+import { loadOnDeviceSkeleton, loadOnDeviceAnalysis } from "./ondevice-loader.js";
 
 const els = {
   videoFile:    document.getElementById("video-file"),
@@ -53,6 +55,14 @@ const els = {
   thumbCanvas: document.getElementById("thumb-canvas"),
   thumbLabel:  document.getElementById("thumb-label"),
   stageExtras: document.getElementById("stage-extras"),
+  // Firebase picker (on-device sessions).
+  fbSection:     document.getElementById("firebase-section"),
+  fbSessionId:   document.getElementById("fb-session-id"),
+  fbRound:       document.getElementById("fb-round"),
+  fbLoad:        document.getElementById("fb-load"),
+  fbListRecent:  document.getElementById("fb-list-recent"),
+  fbRecent:      document.getElementById("fb-recent-sessions"),
+  fbStatus:      document.getElementById("fb-status"),
 };
 
 // Cache index built from the folder picker (or the Drive folder walker):
@@ -109,6 +119,7 @@ const state = {
   frame: 0,
   rule: null,    // active rule module
   raf: null,
+  analysis: null, // populated by the Firebase load path; consumed by ondevice_lens
 };
 
 // ── File loading ────────────────────────────────────────────────────────────
@@ -120,6 +131,9 @@ els.poseFile.addEventListener("change", onManualPose);
 if (els.driveConnect)    els.driveConnect.addEventListener("click", onDriveConnect);
 if (els.driveDisconnect) els.driveDisconnect.addEventListener("click", onDriveDisconnect);
 if (els.videoPick)       els.videoPick.addEventListener("change", onDriveVideoPick);
+if (els.fbLoad)          els.fbLoad.addEventListener("click", onFirebaseLoad);
+if (els.fbListRecent)    els.fbListRecent.addEventListener("click", onFirebaseListRecent);
+if (els.fbRecent)        els.fbRecent.addEventListener("change", onFirebaseRecentPick);
 
 // On boot, hide the Drive section entirely if the API isn't there (Safari /
 // Firefox today). Otherwise try to silently restore the last folder handle.
@@ -573,6 +587,107 @@ function onManualPose() {
   loadFromFiles(v, ps);
 }
 
+// ── Firebase (on-device sessions) ───────────────────────────────────────────
+//
+// Parallel data source to Drive/cache folder. Fetches video + skeleton +
+// on-device analysis sidecar from Firebase Storage for a (sessionId,
+// roundNumber) and feeds them into start() like any other load path.
+// State.analysis is set so the on-device lens can render.
+
+async function onFirebaseLoad() {
+  const sessionId = els.fbSessionId.value.trim();
+  const roundN = parseInt(els.fbRound.value, 10);
+  if (!sessionId || Number.isNaN(roundN)) {
+    els.fbStatus.textContent = "— enter a session id and round number";
+    return;
+  }
+
+  els.fbStatus.textContent = `— fetching ${sessionId} r${roundN}…`;
+  els.loadStatus.textContent = `Loading ${sessionId} / round ${roundN} from Firebase…`;
+  const token = ++currentLoadToken;
+
+  try {
+    const blobs = await firebaseSource.fetchRoundBlobs(sessionId, roundN);
+    if (token !== currentLoadToken) return;
+
+    // Wrap the video blob in a File so loadVideo's pattern matches existing
+    // call sites (it only uses the Blob interface, but giving it a name
+    // keeps state.videoFileName meaningful).
+    const videoFile = new File(
+      [blobs.videoBlob],
+      `${sessionId}_r${roundN}.mp4`,
+      { type: "video/mp4" }
+    );
+    await loadVideo(videoFile);
+    if (token !== currentLoadToken) return;
+
+    const pose = await loadOnDeviceSkeleton(blobs.skeletonBlob);
+    if (token !== currentLoadToken) return;
+    pose.engine = pose.engine || "apple_vision_2d";
+
+    let analysis = null;
+    if (blobs.analysisBlob) {
+      try {
+        analysis = await loadOnDeviceAnalysis(blobs.analysisBlob);
+      } catch (err) {
+        console.error("[firebase load] analysis parse failed:", err);
+      }
+    }
+    if (token !== currentLoadToken) return;
+
+    // Identity hints used by some lenses (orientation_lens reads cacheBasename
+    // to pull Sheet labels; on-device lens doesn't need them but we set them
+    // anyway for consistency).
+    state.cacheBasename = sessionId;
+    state.cacheRound = roundN;
+
+    start(pose, null, null, null, null, null, analysis);
+
+    const sidecarNote = analysis
+      ? `with on-device analysis (${Object.keys(analysis.rules).length} rules)`
+      : `no analysis sidecar — record a new round to populate`;
+    els.fbStatus.textContent = `— loaded ${sessionId} r${roundN}, ${sidecarNote}`;
+    els.loadStatus.textContent = "";
+  } catch (err) {
+    if (token !== currentLoadToken) return;
+    console.error("[firebase load]", err);
+    els.fbStatus.textContent = `— error: ${err.message}`;
+    els.loadStatus.textContent = `Firebase load failed: ${err.message}`;
+  }
+}
+
+async function onFirebaseListRecent() {
+  els.fbStatus.textContent = "— fetching session list…";
+  try {
+    const sessions = await firebaseSource.listRecentSessions(20);
+    els.fbRecent.innerHTML = '<option value="">— pick a recent session —</option>';
+    for (const s of sessions) {
+      const opt = document.createElement("option");
+      opt.value = s.sessionId;
+      const rounds = s.rounds.length ? `r${s.rounds.join(",")}` : "(no rounds)";
+      opt.textContent = `${s.sessionId} (${rounds})`;
+      els.fbRecent.appendChild(opt);
+    }
+    els.fbRecent.hidden = sessions.length === 0;
+    els.fbStatus.textContent = sessions.length
+      ? `— ${sessions.length} recent sessions`
+      : `— no sessions found`;
+  } catch (err) {
+    console.error("[firebase list]", err);
+    els.fbStatus.textContent = `— list error: ${err.message}`;
+  }
+}
+
+function onFirebaseRecentPick() {
+  const sessionId = els.fbRecent.value;
+  if (!sessionId) return;
+  els.fbSessionId.value = sessionId;
+  // Auto-trigger load if a round number is set (default 0 fits most sessions).
+  if (!Number.isNaN(parseInt(els.fbRound.value, 10))) {
+    onFirebaseLoad();
+  }
+}
+
 function loadFromIndex(videoFile, slot) {
   // `slot` may have `yolo`, `vision`, and/or `vision_glove`. Primary pose
   // is APPLE VISION when present — it's what the production iOS app runs
@@ -876,13 +991,14 @@ function loadVideo(file) {
   });
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.poseCombined = poseCombined;     // optional vision+glove combined cache
   state.poseV6 = poseV6;                 // optional pose_cache_v6 (vision+glove_v6)
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
+  state.analysis = analysis;             // optional on-device analysis sidecar (Firebase load path)
   state.labels = null;                   // populated asynchronously by tryLiveLabels()
   state.orientationLabels = null;        // populated by orientation lens on demand
   state.predictionFiles = predictionFiles; // punch-classifier dumps from Drive / cache folder

@@ -29,9 +29,11 @@ import { StraightsReviewRule } from "./straights_review.js";
 import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
+import { OnDeviceLensRule } from "./ondevice_lens.js";
 
 export const RULES = [
   OverviewRule,
+  OnDeviceLensRule,
   RoundV6Rule,
   PunchClassifierRule,
   GuardDropRule,
