@@ -28,10 +28,12 @@ import { PunchDirectionReviewRule } from "./punch_direction_review.js";
 import { StraightsReviewRule } from "./straights_review.js";
 import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
+import { PunchClassifierRule } from "./punch_classifier.js";
 
 export const RULES = [
   OverviewRule,
   RoundV6Rule,
+  PunchClassifierRule,
   GuardDropRule,
   ArmExtensionRule,
   PunchDirectionRule,
