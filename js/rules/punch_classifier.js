@@ -126,7 +126,21 @@ export const PunchClassifierRule = {
   label: "Punch classifier (GT vs Pred)",
 
   skeletonStyle() {
-    return { boneColor: "rgba(255,255,255,0.20)", boneWidth: 1.4, jointRadius: 2.5 };
+    // The current shipped 5-class classifier (14j Vision + interp, see
+    // project_classifier_14j_baseline.md) drops the original COCO-17 indices
+    // 13 (L_knee), 14 (R_knee), 15 (L_ankle). To mirror what the model
+    // actually sees, hide those three joints + the edges touching them.
+    // `showImputed` (default true) keeps the magenta ring around any
+    // joint that was NaN in the raw cache and got linear-interpolated by
+    // pose-loader's `interpolateNanTrajectories` — same imputation the
+    // training pipeline applies.
+    return {
+      boneColor: "rgba(255,255,255,0.20)",
+      boneWidth: 1.4,
+      jointRadius: 2.5,
+      hideJoints: new Set([13, 14, 15]),  // L_knee, R_knee, L_ankle
+      showImputed: true,
+    };
   },
 
   mount(_host, state) {

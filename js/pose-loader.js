@@ -6,15 +6,17 @@
 // the loaded video's natural dimensions (so the video must be loaded first).
 //
 // **NaN handling (must match the classifier's training-time view):**
-// v6 strict caches store NaN in (x, y, conf) on frames where the glove
-// detector missed. The training pipeline applies `np.nan_to_num(nan=0.0)`
-// before the model ever sees the data, which turns those NaN positions
-// into a literal (0, 0) point. The viewer used to silently skip NaN joints
-// (canvas no-op), hiding that the model is actually training on phantom
-// (0,0)-imputed wrists. To debug the classifier honestly the viewer has to
-// mirror exactly what the classifier sees — so we do the same nan_to_num
-// here and expose an `imputed` mask so lenses can highlight which joints
-// were imputed (skeleton.js + punch_classifier lens use it).
+// As of 2026-05-27 the v14j Vision classifier replaced `nan_to_num(nan=0.0)`
+// with linear interpolation of NaN runs (`interpolate_nan_runs` in the
+// training notebook). This pose-loader mirrors that — NaN positions get
+// interpolated between flanking valid frames, with carry-forward /
+// carry-back at clip boundaries. The `imputed` mask flags which joints
+// were originally NaN so lenses can render them with a magenta indicator
+// around their now-interpolated position (skeleton.js handles the
+// rendering).
+//
+// Previous behaviour (nan_to_num→0) is documented in git history for
+// the v6/v17j models that were trained against that policy.
 //
 // Output shape (consumed by the rest of the viewer):
 //   { skeleton: Float32Array(n*17*2),  // (frame, joint, xy) row-major
@@ -80,25 +82,40 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   const sy = normalised ? h : 1;
 
   // Split (N, 17, 3) → flat skeleton (N*17*2) + flat conf (N*17).
-  // Applies nan_to_num(nan=0.0) on every joint to match the classifier's
-  // training-time pipeline. `imputed[i]` records which joints were NaN
-  // pre-imputation so lenses can render them distinctly (otherwise the
-  // model's view of a "phantom wrist at (0,0)" stays invisible).
+  //
+  // **NaN handling (must match the classifier's training-time pipeline):**
+  // As of 2026-05-27, the v14j Vision classifier replaced `nan_to_num(nan=0.0)`
+  // with linear interpolation across NaN runs — see `interpolate_nan_runs`
+  // in the 5-class training notebook. The viewer must mirror that to honor
+  // the "debug must mirror target" principle (memory:
+  // feedback_debug_must_mirror_target.md). NaN runs are interpolated
+  // per-(joint, channel) between flanking valid frames; boundary runs
+  // carry-forward / carry-back.
+  //
+  // `imputed[f*17+j]` flags joints whose original cache value was NaN.
+  // Lenses use it to draw a magenta indicator around the joint at its
+  // INTERPOLATED position (no longer at (0,0)), so the user can see
+  // exactly which joints are inferred vs real-detected.
   const skeleton = new Float32Array(n_frames * N_JOINTS * 2);
   const conf = new Float32Array(n_frames * N_JOINTS);
   const imputed = new Uint8Array(n_frames * N_JOINTS);
   let n_imputed = 0;
+
+  // Pass 1: copy raw data into flat arrays, preserving NaN. Track which
+  // (frame, joint) pairs were NaN so the imputed mask is built from the
+  // RAW data (we'll interpolate next, but we want to remember what was
+  // originally missing).
   for (let f = 0; f < n_frames; f++) {
     for (let j = 0; j < N_JOINTS; j++) {
       const base = (f * 17 + j) * 3;
-      let rx = data[base + 0];
-      let ry = data[base + 1];
-      let rc = data[base + 2];
-      // Single NaN in any of (x, y, conf) treats the whole joint as missing,
-      // mirroring `np.nan_to_num(sk_raw, nan=0.0)` in the training notebook.
+      const rx = data[base + 0];
+      const ry = data[base + 1];
+      const rc = data[base + 2];
+      // `x !== x` is the standard NaN check that works on raw Float32Array
+      // reads without a function call. Faster than Number.isNaN inside this
+      // hot loop.
       const wasNan = (rx !== rx) || (ry !== ry) || (rc !== rc);
       if (wasNan) {
-        rx = 0; ry = 0; rc = 0;
         imputed[f * N_JOINTS + j] = 1;
         n_imputed++;
       }
@@ -107,6 +124,13 @@ async function loadNpy(npyFile, metaFile, videoSize) {
       conf[f * N_JOINTS + j] = rc;
     }
   }
+
+  // Pass 2: interpolate NaN runs in each (joint, channel) trajectory.
+  // Linear interp between flanking valid frames, nearest-valid carry at
+  // clip boundaries. Same algorithm as `interpolate_nan_runs` in the
+  // training notebook (np.interp with clamp-to-endpoint).
+  interpolateNanTrajectories(skeleton, n_frames, N_JOINTS, 2);
+  interpolateNanTrajectories(conf,     n_frames, N_JOINTS, 1);
 
   return {
     skeleton, conf, imputed, n_imputed, fps,
@@ -119,6 +143,62 @@ async function loadNpy(npyFile, metaFile, videoSize) {
     normalised,
     meta,                // parsed _meta.json — lenses read extras (e.g. wrist_run)
   };
+}
+
+// Linear-interpolate NaN runs in a flat (n_frames × n_joints × n_channels)
+// array. Operates per (joint, channel) trajectory: walk the time axis,
+// replace each NaN frame with linear interpolation between the nearest
+// valid frames on either side, or carry-forward / carry-back at clip
+// boundaries. If the whole trajectory is NaN, fill with zeros (shouldn't
+// happen on Vision in practice).
+//
+// Mirrors the training notebook's `interpolate_nan_runs` (which uses
+// np.interp's clamp-to-endpoint behaviour for out-of-range x). The
+// `arr[idx] !== arr[idx]` check is the standard NaN test that works
+// without a function call inside the hot loop.
+function interpolateNanTrajectories(arr, n_frames, n_joints, n_channels) {
+  const stride = n_joints * n_channels;
+  // Reusable buffer for valid frame indices on this trajectory.
+  const valid = new Int32Array(n_frames);
+  for (let j = 0; j < n_joints; j++) {
+    for (let c = 0; c < n_channels; c++) {
+      const off = j * n_channels + c;
+      // First sweep: collect valid frame indices for this trajectory.
+      let v = 0;
+      for (let f = 0; f < n_frames; f++) {
+        const x = arr[f * stride + off];
+        if (x === x) valid[v++] = f;   // x === x is false for NaN
+      }
+      if (v === n_frames) continue;     // no NaN — nothing to do
+      if (v === 0) {
+        // All-NaN trajectory: zero it. Safe fallback so downstream maths
+        // doesn't propagate NaN.
+        for (let f = 0; f < n_frames; f++) arr[f * stride + off] = 0;
+        continue;
+      }
+      // Second sweep: walk frames, interpolate NaN against the precomputed
+      // valid index list. `vi` is a moving pointer into `valid`.
+      let vi = 0;
+      for (let f = 0; f < n_frames; f++) {
+        const idx = f * stride + off;
+        if (arr[idx] === arr[idx]) continue;   // not NaN
+        // Advance vi to the first valid index > f.
+        while (vi < v && valid[vi] <= f) vi++;
+        const nextF = vi < v ? valid[vi] : -1;
+        const prevF = vi > 0 ? valid[vi - 1] : -1;
+        if (prevF >= 0 && nextF >= 0) {
+          const t = (f - prevF) / (nextF - prevF);
+          const pv = arr[prevF * stride + off];
+          const nv = arr[nextF * stride + off];
+          arr[idx] = (1 - t) * pv + t * nv;
+        } else if (prevF >= 0) {
+          arr[idx] = arr[prevF * stride + off];
+        } else {
+          arr[idx] = arr[nextF * stride + off];
+        }
+      }
+    }
+  }
 }
 
 // ── .npy parser ────────────────────────────────────────────────────────────

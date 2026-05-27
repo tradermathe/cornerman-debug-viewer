@@ -126,30 +126,39 @@ export function drawSkeleton(ctx, pose, frame, style = {}) {
     }
   }
 
-  // Imputed joints — render last so the magenta marker sits on top of the
-  // (0,0) corner regardless of whatever else got drawn there. Each marker
-  // is a 14×14 X at the phantom point with a "j:<index>" label, so the
-  // user can see WHICH joints got imputed without parsing pixel coords.
+  // Imputed joints — draw a magenta dashed ring around the joint's
+  // INTERPOLATED position (the classifier sees this same interpolated
+  // value, not a (0,0) phantom). Renders last so the ring sits on top of
+  // the normal joint dot regardless of any prior stroke.
+  //
+  // Previously this drew a magenta X at (0,0) — that was correct under
+  // the old `nan_to_num→0` policy where missing joints WERE at the corner.
+  // The current pipeline interpolates NaN runs (see pose-loader.js), so
+  // the joint is at a plausible kinematic location and the indicator's
+  // job is "this joint was inferred, not directly detected."
   if (showImputed && imputed) {
     ctx.save();
     ctx.strokeStyle = "#e040fb";    // magenta = same hue the punch-classifier lens uses for "mistype"
     ctx.fillStyle   = "#e040fb";
-    ctx.lineWidth = 2;
-    const sz = 7;
-    let row = 0;
-    ctx.font = `${Math.round(jointRadius * 3)}px ui-monospace, "SF Mono", monospace`;
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([3, 2]);
+    const ringRadius = jointRadius * 2.2;
+    const fontPx = Math.max(8, Math.round(jointRadius * 2.5));
+    ctx.font = `${fontPx}px ui-monospace, "SF Mono", monospace`;
     for (let j = 0; j < 17; j++) {
       if (!imputed[frame * 17 + j]) continue;
       if (hideJoints && hideJoints.has(j)) continue;
-      // X marker at (0,0)
+      const x = pose.skeleton[(frame * 17 + j) * 2];
+      const y = pose.skeleton[(frame * 17 + j) * 2 + 1];
+      if (x !== x || y !== y) continue;   // shouldn't happen post-interp, but be safe
+      // Dashed ring at the interpolated position
       ctx.beginPath();
-      ctx.moveTo(-sz, -sz); ctx.lineTo(sz, sz);
-      ctx.moveTo(-sz,  sz); ctx.lineTo(sz, -sz);
+      ctx.arc(x, y, ringRadius, 0, Math.PI * 2);
       ctx.stroke();
-      // Labels stacked vertically next to the X so multiple imputed joints
-      // don't overdraw each other.
-      ctx.fillText(`j${j}`, sz + 4, sz + 2 + row * (jointRadius * 3));
-      row++;
+      // Small "i" label so the user can quickly count imputed joints
+      ctx.setLineDash([]);
+      ctx.fillText(`i`, x + ringRadius + 2, y - 2);
+      ctx.setLineDash([3, 2]);
     }
     ctx.restore();
   }

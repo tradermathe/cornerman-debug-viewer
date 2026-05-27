@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-27.1";
+const BUILD = "2026-05-27.3";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -1299,7 +1299,16 @@ function drawThumb(frame) {
   ctx.restore();
 
   els.thumbLabel.textContent =
-    `f${frame}  ·  t=${(state.start_sec + frame / state.fps).toFixed(2)}s`;
+    `f${frame}  ·  t=${fmtClock(state.start_sec + frame / state.fps)}`;
+}
+
+// Sheet/labeler clock format: MM:SS.sss (zero-padded), matching the
+// `start_sec`/`end_sec` strings in the Box Labeled Data sheet (e.g. `04:27.306`).
+function fmtClock(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return `${String(m).padStart(2, "0")}:${r.toFixed(3).padStart(6, "0")}`;
 }
 
 function positionThumb(cursorX, scrubberTop) {
@@ -1351,5 +1360,5 @@ function redraw() {
     ? "  ·  ⏪ pre-buffer (before round)" : "";
   els.frameLabel.textContent =
     `frame ${state.frame} / ${state.n_frames - 1}   ·   ` +
-    `t=${t_video.toFixed(2)}s${before}`;
+    `t=${fmtClock(t_video)}${before}`;
 }
