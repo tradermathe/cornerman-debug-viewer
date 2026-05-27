@@ -5,9 +5,21 @@
 // Coords in the .npy are normalised to [0, 1]; we de-normalise to pixels using
 // the loaded video's natural dimensions (so the video must be loaded first).
 //
+// **NaN handling (must match the classifier's training-time view):**
+// v6 strict caches store NaN in (x, y, conf) on frames where the glove
+// detector missed. The training pipeline applies `np.nan_to_num(nan=0.0)`
+// before the model ever sees the data, which turns those NaN positions
+// into a literal (0, 0) point. The viewer used to silently skip NaN joints
+// (canvas no-op), hiding that the model is actually training on phantom
+// (0,0)-imputed wrists. To debug the classifier honestly the viewer has to
+// mirror exactly what the classifier sees — so we do the same nan_to_num
+// here and expose an `imputed` mask so lenses can highlight which joints
+// were imputed (skeleton.js + punch_classifier lens use it).
+//
 // Output shape (consumed by the rest of the viewer):
 //   { skeleton: Float32Array(n*17*2),  // (frame, joint, xy) row-major
 //     conf:     Float32Array(n*17),    // (frame, joint)     row-major
+//     imputed:  Uint8Array(n*17),      // 1 = was NaN in cache, now 0,0,0
 //     fps, width, height, n_frames, engine: "yolo_pose", source }
 
 const N_JOINTS = 17;
@@ -68,19 +80,36 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   const sy = normalised ? h : 1;
 
   // Split (N, 17, 3) → flat skeleton (N*17*2) + flat conf (N*17).
+  // Applies nan_to_num(nan=0.0) on every joint to match the classifier's
+  // training-time pipeline. `imputed[i]` records which joints were NaN
+  // pre-imputation so lenses can render them distinctly (otherwise the
+  // model's view of a "phantom wrist at (0,0)" stays invisible).
   const skeleton = new Float32Array(n_frames * N_JOINTS * 2);
   const conf = new Float32Array(n_frames * N_JOINTS);
+  const imputed = new Uint8Array(n_frames * N_JOINTS);
+  let n_imputed = 0;
   for (let f = 0; f < n_frames; f++) {
     for (let j = 0; j < N_JOINTS; j++) {
       const base = (f * 17 + j) * 3;
-      skeleton[(f * N_JOINTS + j) * 2 + 0] = data[base + 0] * sx;
-      skeleton[(f * N_JOINTS + j) * 2 + 1] = data[base + 1] * sy;
-      conf[f * N_JOINTS + j] = data[base + 2];
+      let rx = data[base + 0];
+      let ry = data[base + 1];
+      let rc = data[base + 2];
+      // Single NaN in any of (x, y, conf) treats the whole joint as missing,
+      // mirroring `np.nan_to_num(sk_raw, nan=0.0)` in the training notebook.
+      const wasNan = (rx !== rx) || (ry !== ry) || (rc !== rc);
+      if (wasNan) {
+        rx = 0; ry = 0; rc = 0;
+        imputed[f * N_JOINTS + j] = 1;
+        n_imputed++;
+      }
+      skeleton[(f * N_JOINTS + j) * 2 + 0] = rx * sx;
+      skeleton[(f * N_JOINTS + j) * 2 + 1] = ry * sy;
+      conf[f * N_JOINTS + j] = rc;
     }
   }
 
   return {
-    skeleton, conf, fps,
+    skeleton, conf, imputed, n_imputed, fps,
     start_sec,           // video time of cache frame 0 (incl. pre-buffer)
     round_start_sec,     // video time the official round begins
     pre_buffer_sec,      // round_start_sec - start_sec, for the meta line

@@ -61,6 +61,15 @@ export function confColor(c) {
 
 // Draw the bone skeleton + joint dots. `style` lets a rule panel dim/recolor
 // things without rewriting the renderer (e.g. fade non-relevant joints).
+//
+// `showImputed` (default true): when a joint was NaN in the raw cache and
+// got imputed to (0,0,0) by pose-loader's nan_to_num, draw it as a magenta
+// "X" at (0,0) PLUS a dashed line from its real anchor to that phantom
+// point. This mirrors exactly what the classifier sees (the model is fed
+// (0,0)-imputed wrists with full velocity-spike bone vectors) — debugging
+// the classifier honestly requires seeing the same thing. Lenses that
+// genuinely want the strict-NaN view (rules-engine debug) can opt out by
+// passing `showImputed: false`.
 export function drawSkeleton(ctx, pose, frame, style = {}) {
   const {
     boneColor = "rgba(255,255,255,0.65)",
@@ -70,10 +79,13 @@ export function drawSkeleton(ctx, pose, frame, style = {}) {
     highlightJoints = null,    // Set of joint indices to draw larger
     hideJoints = null,         // Set of joint indices to skip entirely
                                //   (and any edge touching them)
+    showImputed = true,        // render NaN-imputed joints at their phantom (0,0)
   } = style;
 
   ctx.lineWidth = boneWidth;
   ctx.strokeStyle = boneColor;
+
+  const imputed = pose.imputed;   // may be undefined on older pose objects
 
   // Bones — only drawn if both endpoints are above minConf (otherwise they
   // ghost-connect to (0,0) when a joint wasn't detected). Edges that touch
@@ -112,5 +124,33 @@ export function drawSkeleton(ctx, pose, frame, style = {}) {
       ctx.strokeStyle = "rgba(255,255,255,0.9)";
       ctx.stroke();
     }
+  }
+
+  // Imputed joints — render last so the magenta marker sits on top of the
+  // (0,0) corner regardless of whatever else got drawn there. Each marker
+  // is a 14×14 X at the phantom point with a "j:<index>" label, so the
+  // user can see WHICH joints got imputed without parsing pixel coords.
+  if (showImputed && imputed) {
+    ctx.save();
+    ctx.strokeStyle = "#e040fb";    // magenta = same hue the punch-classifier lens uses for "mistype"
+    ctx.fillStyle   = "#e040fb";
+    ctx.lineWidth = 2;
+    const sz = 7;
+    let row = 0;
+    ctx.font = `${Math.round(jointRadius * 3)}px ui-monospace, "SF Mono", monospace`;
+    for (let j = 0; j < 17; j++) {
+      if (!imputed[frame * 17 + j]) continue;
+      if (hideJoints && hideJoints.has(j)) continue;
+      // X marker at (0,0)
+      ctx.beginPath();
+      ctx.moveTo(-sz, -sz); ctx.lineTo(sz, sz);
+      ctx.moveTo(-sz,  sz); ctx.lineTo(sz, -sz);
+      ctx.stroke();
+      // Labels stacked vertically next to the X so multiple imputed joints
+      // don't overdraw each other.
+      ctx.fillText(`j${j}`, sz + 4, sz + 2 + row * (jointRadius * 3));
+      row++;
+    }
+    ctx.restore();
   }
 }
