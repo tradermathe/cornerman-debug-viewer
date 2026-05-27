@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-26.12";
+const BUILD = "2026-05-27.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -44,6 +44,7 @@ const els = {
   prevFrame:   document.getElementById("prev-frame"),
   nextFrame:   document.getElementById("next-frame"),
   playPause:   document.getElementById("play-pause"),
+  muteToggle:  document.getElementById("mute-toggle"),
   speedSel:    document.getElementById("speed"),
   frameLabel:  document.getElementById("frame-label"),
   scrubber:    document.getElementById("scrubber"),
@@ -1128,6 +1129,7 @@ window.__viewerRedraw = () => redraw();
 els.prevFrame.addEventListener("click", () => seekToFrame(state.frame - 1));
 els.nextFrame.addEventListener("click", () => seekToFrame(state.frame + 1));
 els.playPause.addEventListener("click", togglePlay);
+els.muteToggle.addEventListener("click", toggleMute);
 els.scrubber.addEventListener("input", e => seekToFrame(parseInt(e.target.value)));
 els.speedSel.addEventListener("change", () => {
   els.video.playbackRate = parseFloat(els.speedSel.value);
@@ -1149,6 +1151,7 @@ document.addEventListener("keydown", e => {
     case "[":          seekToFrame(state.frame - 10); break;
     case "]":          seekToFrame(state.frame + 10); break;
     case " ":          togglePlay(); e.preventDefault(); break;
+    case "m": case "M": toggleMute(); break;
   }
 });
 
@@ -1219,6 +1222,14 @@ function togglePlay() {
 
 els.video.addEventListener("play",  () => els.playPause.textContent = "⏸");
 els.video.addEventListener("pause", () => els.playPause.textContent = "▶");
+
+function toggleMute() {
+  els.video.muted = !els.video.muted;
+  els.muteToggle.textContent = els.video.muted ? "🔇" : "🔊";
+}
+els.video.addEventListener("volumechange", () => {
+  els.muteToggle.textContent = els.video.muted ? "🔇" : "🔊";
+});
 
 // ── Scrubber hover thumbnail ────────────────────────────────────────────────
 // Hovering the scrubber should preview the frame at that timeline position
