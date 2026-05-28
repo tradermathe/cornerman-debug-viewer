@@ -30,12 +30,14 @@ import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
 import { OnDeviceLensRule } from "./ondevice_lens.js";
+import { AudioImpactLensRule } from "./audio_impact_lens.js";
 
 export const RULES = [
   OverviewRule,
   OnDeviceLensRule,
   RoundV6Rule,
   PunchClassifierRule,
+  AudioImpactLensRule,
   GuardDropRule,
   ArmExtensionRule,
   PunchDirectionRule,
