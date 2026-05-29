@@ -143,12 +143,46 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
     };
   }
 
+  // ST-GCN punch classifier output. Written by iOS sidecar from
+  // `runPunchClassifier` (RoundAnalyzer.swift). Shape mirrors the backend's
+  // `detect_punches()` so this slots into the existing `loadPunches()`
+  // output shape downstream — the viewer can treat firebase-loaded punches
+  // and training-cache-loaded punches identically.
+  const fps = Number(payload.fps);
+  const punchesIn = payload.punches || {};
+  const punches = Array.isArray(punchesIn.detections) ? {
+    source: "ondevice_stgcn",
+    schema_version: 1,
+    fps,
+    detections: punchesIn.detections.map((d, i) => {
+      const start = Number(d.start_time);
+      const end = Number(d.end_time);
+      return {
+        idx: i,
+        timestamp: Number(d.timestamp ?? (start + end) / 2),
+        start_time: start,
+        end_time: end,
+        start_frame: Math.round(start * fps),
+        end_frame: Math.round(end * fps),
+        hand: d.hand || "?",                  // "lead" | "rear"
+        punch_type: d.punch_type || "?",
+        category: d.category || null,         // "jab" | "cross" | "power"
+        n_frames: Number(d.n_frames) || 0,
+      };
+    }),
+    total_punches: Number(punchesIn.total_punches ?? 0),
+    punches_per_minute: Number(punchesIn.punches_per_minute ?? 0),
+    breakdown: punchesIn.punch_breakdown || {},
+    breakdown_detailed: punchesIn.punch_breakdown_detailed || {},
+  } : null;
+
   return {
     n_frames: nFrames,
-    fps: Number(payload.fps),
+    fps,
     orientation,        // deprecated LogReg — kept for comparison
     ankleOrientation,   // trusted ankle+correction (may be null on old sessions)
     rules,
+    punches,            // ST-GCN detections (null when sidecar has no punches block)
     raw: payload, // for debugging
   };
 }

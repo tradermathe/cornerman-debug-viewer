@@ -642,10 +642,17 @@ async function onFirebaseLoad() {
     state.cacheBasename = sessionId;
     state.cacheRound = roundN;
 
-    start(pose, null, null, null, null, null, analysis);
+    // Pull punches out of the analysis sidecar so the existing punch
+    // rendering pipeline (3rd start() arg) lights up for Firebase-loaded
+    // sessions just like it does for training-cache loads.
+    const punches = analysis?.punches ?? null;
+    start(pose, null, punches, null, null, null, analysis);
 
+    const punchNote = punches
+      ? `· ${punches.detections.length} punches`
+      : "";
     const sidecarNote = analysis
-      ? `with on-device analysis (${Object.keys(analysis.rules).length} rules)`
+      ? `with on-device analysis (${Object.keys(analysis.rules).length} rules${punchNote})`
       : `no analysis sidecar — record a new round to populate`;
     els.fbStatus.textContent = `— loaded ${sessionId} r${roundN}, ${sidecarNote}`;
     els.loadStatus.textContent = "";
