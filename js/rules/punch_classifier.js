@@ -1,11 +1,15 @@
 // Punch classifier (GT vs Pred) — visual replacement for the throwaway
-// `eventacc_video_overlay.html` cell in
-// `classifier_7class_kfold_eventacc_17joints_v6.ipynb`. The notebook's HTML
-// fuzzy-matches dropped videos to its embedded prediction set by the first
-// 20 chars of the filename, which silently picks the wrong round when two
-// videos share a prefix — that's the "missynced with the wrong video" bug.
-// Here we route the loaded video → its predictions by the exact
-// (cacheBasename, round_index) pair the viewer already maintains.
+// `eventacc_video_overlay.html` cell in the legacy training notebooks. The
+// current shipped baseline is `classifier_5class_kfold_eventacc_14joints_vision_exp_C_speedjitter.ipynb`
+// (14-joint Vision + interp + speed jitter augmentation, EA 66.4%; see
+// project_classifier_14j_baseline.md for the full headline numbers).
+//
+// The original notebook's HTML overlay fuzzy-matched dropped videos to its
+// embedded prediction set by the first 20 chars of the filename, which
+// silently picked the wrong round when two videos shared a prefix — that's
+// the "missynced with the wrong video" bug. Here we route the loaded video
+// → its predictions by the exact (cacheBasename, round_index) pair the
+// viewer already maintains.
 //
 // Input: ONE JSON file containing every round's per-frame GT + predictions.
 // Auto-loaded from any file named `predictions_*.json` anywhere in the
@@ -24,8 +28,12 @@
 //     "schema_version": 1,
 //     "model": "<checkpoint suffix>",
 //     "exported_at": "<iso>",
-//     "lead_class_names": ["idle", "jab_head", "jab_body", ...],   // 7 entries
-//     "rear_class_names": ["idle", "cross_head", ...],             // 7 entries
+//     "lead_class_names": ["idle", "jab", "lead_hook_head",        // 5 entries
+//                          "lead_uppercut_head", "lead_bodyshot"], //   (5-class current)
+//     "rear_class_names": ["idle", "cross", "rear_hook_head",      // 5 entries
+//                          "rear_uppercut_head", "rear_bodyshot"], //
+//   Length is read from the JSON at runtime, so 7-class predictions still
+//   render correctly if you point the lens at an older predictions file.
 //     "rounds": [
 //       {
 //         "video_stem": "Shadow boxing workout with an app",   // = Path(video_name).stem
@@ -42,8 +50,7 @@
 //     ]
 //   }
 //
-// Notebook export snippet (paste as a new cell after the `predictions...pt`
-// save in cell 9; or run after loading the .pt via cell 16):
+// Notebook export snippet (already wired as cell 29 of the C notebook):
 //
 //   import json, numpy as np
 //   from pathlib import Path
@@ -62,13 +69,13 @@
 //           'rear_truth': np.asarray(e['rear_truth'], dtype=np.int16).tolist(),
 //       })
 //   out = {
-//       'schema_version': 1, 'model': 'classifier_7class_eventacc_17j_vision_v1',
+//       'schema_version': 1, 'model': 'classifier_5class_eventacc_14j_vision_exp_C_speedjitter',
 //       'exported_at': datetime.now(timezone.utc).isoformat(),
 //       'lead_class_names': LEAD_CLASS_NAMES,
 //       'rear_class_names': REAR_CLASS_NAMES,
 //       'rounds': rounds_out,
 //   }
-//   path = '/content/drive/MyDrive/boxing_ai/models/predictions_eventacc_7class_latest.json'
+//   path = '/content/drive/MyDrive/boxing_ai/models/predictions_eventacc_5class_vision_14j_exp_C_speedjitter_latest.json'
 //   Path(path).write_text(json.dumps(out))
 //   print(f'Wrote {len(rounds_out)} rounds → {path}')
 
@@ -78,18 +85,21 @@ const COLORS = {
     straight: "#5fd97a",     // green
     hook:     "#3aa14d",
     uppercut: "#65d27a",
+    body:     "#2d8a3f",     // darker green for body (5-class)
     unknown:  "#5fd97a",
   },
   gtMiss:        "#e85a5a",
   gtMissStripe:  "#7a2424",
 
-  // Pred events — orange (straight family) / purple (hook+uppercut). False
-  // alarms keep the family hue but get a hatched fill; mistypes are bright
-  // magenta to call out wrong-class predictions specifically.
+  // Pred events — orange (straight family) / purple (hooks/uppercuts) /
+  // teal-blue (bodyshot, 5-class only). False alarms keep the family hue
+  // but get a hatched fill; mistypes are bright magenta to call out
+  // wrong-class predictions specifically.
   predFamily: {
     straight: "#f5a23c",
     hook:     "#9b5cf6",
     uppercut: "#bf73ff",
+    body:     "#3ab0c2",
     unknown:  "#f5a23c",
   },
   predMistype:   "#e040fb",
@@ -120,6 +130,12 @@ let activeRound = null;   // round entry currently scoped
 let signals = null;       // derived events + per-round stats
 let lastPose = null;
 let lastCacheKey = null;
+// True iff `dump` was synthesized from state.punches (Firebase on-device
+// flow), not loaded from a predictions JSON. We invalidate it whenever
+// the scope changes so the synth always reflects the active round's
+// detections rather than a stale prior round.
+let dumpFromOnDevice = false;
+let lastPunchesRef = null;
 
 export const PunchClassifierRule = {
   id: "punch_classifier",
@@ -183,9 +199,10 @@ export const PunchClassifierRule = {
 function template() {
   return `
     <h2>Punch classifier — GT vs Pred</h2>
-    <p class="hint">Per-frame ground truth and 7-class classifier output for
-      this round. Drop the predictions JSON below; the lens auto-scopes to the
-      loaded video + round.</p>
+    <p class="hint">Per-frame ground truth and 5-class classifier output for
+      this round (idle / jab|cross / hook_head / uppercut_head / bodyshot).
+      Drop the predictions JSON below; the lens auto-scopes to the loaded
+      video + round.</p>
 
     <h3>Predictions JSON</h3>
     <div id="pc-auto-row" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
@@ -232,9 +249,9 @@ function template() {
 
     <h3>Timeline</h3>
     <p class="hint">Below the video: 4 tracks (GT-lead, Pred-lead, GT-rear,
-      Pred-rear). Green = GT hit · red striped = GT miss · orange/purple =
-      Pred correct (straight / hook+uppercut family) · same hue hatched =
-      false alarm · magenta = mistype. Click the timeline to seek.</p>
+      Pred-rear). Green = GT hit · red striped = GT miss · orange = straight ·
+      purple = hook · brighter purple = uppercut · teal = bodyshot · same hue
+      hatched = false alarm · magenta = mistype. Click to seek.</p>
 
     <details class="manual-fallback">
       <summary>Notebook export snippet</summary>
@@ -258,12 +275,12 @@ for e in all_predictions:
         'rear_truth': np.asarray(e['rear_truth'], dtype=np.int16).tolist(),
     })
 out = {'schema_version': 1,
-       'model': 'classifier_7class_eventacc_17j_vision_v1',
+       'model': 'classifier_5class_eventacc_14j_vision_exp_C_speedjitter',
        'exported_at': datetime.now(timezone.utc).isoformat(),
        'lead_class_names': LEAD_CLASS_NAMES,
        'rear_class_names': REAR_CLASS_NAMES,
        'rounds': rounds_out}
-path = '/content/drive/MyDrive/boxing_ai/models/predictions_eventacc_7class_latest.json'
+path = '/content/drive/MyDrive/boxing_ai/models/predictions_eventacc_5class_vision_14j_exp_C_speedjitter_latest.json'
 Path(path).write_text(json.dumps(out))
 print(f'Wrote {len(rounds_out)} rounds → {path}')</pre>
     </details>
@@ -463,7 +480,92 @@ function cacheKey(state) {
   return `${state.cacheBasename}__r${state.cacheRound}`;
 }
 
+// Synthesize a one-round predictions dump from state.punches.detections.
+// Maps each detection's (hand, punch_type) to the corresponding class
+// index using the iOS classifier's class_names (5-class Exp C). Frames
+// outside detection windows are class 0 (idle), matching the per-frame
+// argmax interpretation the lens expects.
+function synthesizeOnDeviceDump(state) {
+  const ONDEVICE_LEAD = ["idle", "jab", "lead_hook_head", "lead_uppercut_head", "lead_bodyshot"];
+  const ONDEVICE_REAR = ["idle", "cross", "rear_hook_head", "rear_uppercut_head", "rear_bodyshot"];
+  const leadIdx = new Map(ONDEVICE_LEAD.map((n, i) => [n, i]));
+  const rearIdx = new Map(ONDEVICE_REAR.map((n, i) => [n, i]));
+
+  const detections = state.punches.detections;
+  const fps = Number(state.punches.fps) || Number(state.pose?.fps) || 30;
+  const nFrames = Number(state.pose?.n_frames) || 0;
+  if (!nFrames || !detections.length) return null;
+
+  const leadPred = new Array(nFrames).fill(0);
+  const rearPred = new Array(nFrames).fill(0);
+
+  for (const d of detections) {
+    const startF = clampInt(d.start_frame ?? Math.round(d.start_time * fps), 0, nFrames - 1);
+    const endF   = clampInt(d.end_frame ?? Math.round(d.end_time * fps), 0, nFrames);
+    if (endF <= startF) continue;
+    const arr = d.hand === "rear" ? rearPred : leadPred;
+    const map = d.hand === "rear" ? rearIdx : leadIdx;
+    const cls = map.get(d.punch_type) ?? 0;
+    if (cls === 0) continue;
+    for (let f = startF; f < endF; f++) arr[f] = cls;
+  }
+
+  return {
+    schema_version: 1,
+    source: "ondevice_stgcn",
+    model: "ondevice_stgcn (exp_C 14j 5-class)",
+    exported_at: new Date().toISOString(),
+    lead_class_names: ONDEVICE_LEAD,
+    rear_class_names: ONDEVICE_REAR,
+    rounds: [{
+      video_stem: state.cacheBasename || "ondevice",
+      round_index: Number.isFinite(state.cacheRound) ? state.cacheRound : 0,
+      n_frames: nFrames,
+      fps,
+      round_start_sec: 0,
+      lead_pred: leadPred,
+      rear_pred: rearPred,
+      // No ground truth on real footage. All-idle truth arrays render as
+      // empty GT tracks, which is exactly what we want.
+      lead_truth: new Array(nFrames).fill(0),
+      rear_truth: new Array(nFrames).fill(0),
+    }],
+  };
+}
+
+function clampInt(v, lo, hi) {
+  v = Math.round(Number(v) || 0);
+  return Math.max(lo, Math.min(hi, v));
+}
+
 function refreshScope(state) {
+  // Drop a stale synthesized dump when the punches reference changes
+  // (user picked a different Firebase round) so we re-synth below.
+  if (dumpFromOnDevice && state.punches !== lastPunchesRef) {
+    dump = null;
+    dumpFromOnDevice = false;
+  }
+  // Firebase / on-device fallback: when no predictions JSON has been
+  // loaded but the analysis sidecar produced punch detections, build a
+  // one-round synthetic dump so the existing timeline / canvas HUD light
+  // up without requiring a separate predictions_*.json. GT tracks will
+  // be empty (no ground truth for real footage), which renders as
+  // pred-only — exactly what we want to inspect on-device classifier
+  // output.
+  if (!dump && state.punches?.detections?.length && state.pose?.n_frames) {
+    const synth = synthesizeOnDeviceDump(state);
+    if (synth) {
+      dump = synth;
+      dumpFromOnDevice = true;
+      lastPunchesRef = state.punches;
+      setStatus(
+        `on-device · ${state.punches.detections.length} detections · ` +
+          `model ondevice_stgcn (no ground truth)`
+      );
+      populateRoundPicker();
+    }
+  }
+
   if (!dump || !dump.rounds.length) {
     activeRound = null;
     signals = null;
@@ -902,13 +1004,15 @@ function familyColor(typ, palette) {
   return palette[classFamily(typ)] || palette.unknown;
 }
 
-// Map class index → display family. Indices 1/2 (jab/cross variants) are
-// "straight"; 3/4 are "hook"; 5/6 are "uppercut". 0 is idle (returns the
-// "unknown" key, which is unused since idle events never become bars).
+// Map class index → display family. 5-class layout (see
+// project_classifier_14j_baseline.md / notebook cell 6 LEAD_CLASS_NAMES):
+//   0 = idle, 1 = jab|cross (straight), 2 = hook_head, 3 = uppercut_head,
+//   4 = bodyshot. 0 returns "unknown" but idle events never become bars.
 function classFamily(typ) {
-  if (typ === 1 || typ === 2) return "straight";
-  if (typ === 3 || typ === 4) return "hook";
-  if (typ === 5 || typ === 6) return "uppercut";
+  if (typ === 1) return "straight";
+  if (typ === 2) return "hook";
+  if (typ === 3) return "uppercut";
+  if (typ === 4) return "body";
   return "unknown";
 }
 
