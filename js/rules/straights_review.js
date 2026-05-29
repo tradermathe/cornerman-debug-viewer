@@ -418,7 +418,10 @@ export const StraightsReviewRule = {
 
   requires(slot) {
     // Needs pose + glove like arm_extension — we delegate to the same compute.
-    return !!(slot?.vision || slot?.yolo) && !!slot?.glove;
+    // v6 cache alone is sufficient (Vision + glove substitution baked in);
+    // otherwise fall back to raw Vision/YOLO + glove sidecar.
+    return !!slot?.vision_glove
+      || (!!(slot?.vision || slot?.yolo) && !!slot?.glove);
   },
 
   mount(_host, state) {

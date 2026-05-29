@@ -14,9 +14,14 @@
 //   peak       = max(r[f]) inside the punch window
 //   predicted  = peak >= threshold ? "pass" : "fail"
 //
-// Wrist source: the glove detector when present and conf ≥ 0.20, else the
-// pose model wrist (with its own conf gate). Anatomical side maps from
-// (hand, stance) the same way guard_drop / step_punch_sync do.
+// Wrist source: prefer the v6 cache (pose_cache_v6/, Apple Vision skeleton
+// with glove wrists baked in at joints 9/10 for gloved rounds — same model
+// the iOS app runs live). When the v6 meta says wrist_replaced_with_glove,
+// the wrist conf at joints 9/10 IS the glove conf, gated by minGloveConf;
+// otherwise it's the Vision wrist gated by minPoseConf. Legacy raw-glove
+// sidecar (pose.gloveWrists) is still honored as a fallback for rounds
+// that pre-date v6. Anatomical side maps from (hand, stance) the same way
+// guard_drop / step_punch_sync do.
 //
 // Compares predicted vs the labeler's rule_extension verdict when
 // available — same agree/disagree pattern as the hip_rotation lens.
@@ -89,15 +94,22 @@ let cfg = { ...DEFAULTS };
 let signals = null;
 let lastPose = null;
 
+// v6 cache is the canonical wrist source — it bakes in the glove substitution
+// the iOS app does live. Fall back to state.pose for rounds that pre-date v6.
+function pickPose(state) {
+  return state.poseV6 || state.pose;
+}
+
 export const ArmExtensionRule = {
   id: "arm_extension",
   label: "Arm extension (straights)",
 
   requires(slot) {
-    // Needs a pose cache AND a glove sidecar. Without the glove the 2D
-    // wrist is too jittery for the ratio to mean anything — that's the
-    // whole reason this lens exists.
-    return !!(slot?.vision || slot?.yolo) && !!slot?.glove;
+    // v6 cache alone is sufficient — it has Vision + glove substitution baked
+    // in. For legacy rounds without v6, we still accept raw Vision/YOLO +
+    // a glove sidecar so the lens can do the substitution itself.
+    return !!slot?.vision_glove
+      || (!!(slot?.vision || slot?.yolo) && !!slot?.glove);
   },
 
   skeletonStyle() {
@@ -120,7 +132,7 @@ export const ArmExtensionRule = {
     host = _host;
     cfg = { ...DEFAULTS };
     signals = computeAll(state, cfg);
-    lastPose = state.pose;
+    lastPose = pickPose(state);
 
     host.innerHTML = renderTemplate(signals, cfg);
     renderPunchTable();
@@ -364,28 +376,30 @@ export const ArmExtensionRule = {
   },
 
   draw(ctx, state) {
-    if (state.pose !== lastPose) {
+    const pose = pickPose(state);
+    if (pose !== lastPose) {
       // Pose swapped (e.g. compare-mode toggle) — recompute.
       signals = computeAll(state, cfg);
-      lastPose = state.pose;
+      lastPose = pose;
     }
     const s = state.renderScale || 1;
     const f = state.frame;
 
     // Draw both arms with their current ratio overlay.
-    drawArmRatio(ctx, state.pose, f, "L", signals.ratioL[f], cfg, s, signals.bodyAxis);
-    drawArmRatio(ctx, state.pose, f, "R", signals.ratioR[f], cfg, s, signals.bodyAxis);
+    drawArmRatio(ctx, pose, f, "L", signals.ratioL[f], cfg, s, signals.bodyAxis);
+    drawArmRatio(ctx, pose, f, "R", signals.ratioR[f], cfg, s, signals.bodyAxis);
 
     // HUD — when the playhead is inside a labelled punch window, show the
     // GT verdict + our prediction so you can eyeball agreement on-video.
     const active = activePunchAt(signals.punches, f);
-    if (active) drawVerdictHud(ctx, active, s, state.pose);
+    if (active) drawVerdictHud(ctx, active, s, pose);
   },
 
   update(state) {
-    if (state.pose !== lastPose) {
+    const pose = pickPose(state);
+    if (pose !== lastPose) {
       signals = computeAll(state, cfg);
-      lastPose = state.pose;
+      lastPose = pose;
     }
     const f = state.frame;
     setMetric("ae-l-ratio", signals.ratioL[f], cfg);
@@ -410,7 +424,7 @@ export { predictedFacingAt, medianPredictedFacing };
 // ─── compute ───────────────────────────────────────────────────────────────
 
 function computeAll(state, cfg) {
-  const pose = state.pose;
+  const pose = pickPose(state);
   const N = pose.n_frames;
   const fps = pose.fps;
   // Source-video time offset — added to the label's cache-relative
@@ -782,7 +796,8 @@ function armLengthFor(pose, side, cfg, bodyAxis) {
 }
 
 function wristXY(pose, frame, joints, cfg) {
-  // Glove wrist first if the cache attached gloveWrists.
+  // Legacy raw-glove sidecar path — only set on pre-v6 rounds. When present
+  // we honor it for backwards compatibility, but new rounds use v6 below.
   const g = pose.gloveWrists;
   if (g) {
     const [gx, gy] = gloveXY(g, frame, joints.gloveSide);
@@ -791,12 +806,19 @@ function wristXY(pose, frame, joints, cfg) {
       return { x: gx, y: gy, source: "glove" };
     }
   }
-  // Pose fallback.
+  // v6 path (also the legacy pose-only fallback). When the meta says
+  // wrist_replaced_with_glove, joints 9/10 are the glove wrist already and
+  // conf at those indices is the glove conf — gate with minGloveConf and
+  // treat below-threshold as no detection (matches the production contract:
+  // NO Vision fallback when the glove model was running). When the meta
+  // says wrists are pure Vision, use minPoseConf like any other joint.
   const px = pose.skeleton[(frame * 17 + joints.wrist) * 2];
   const py = pose.skeleton[(frame * 17 + joints.wrist) * 2 + 1];
   const pc = pose.conf[frame * 17 + joints.wrist];
-  if (pc < cfg.minPoseConf || !Number.isFinite(px)) return null;
-  return { x: px, y: py, source: "pose" };
+  const isGloveBaked = pose.meta?.wrist_replaced_with_glove === true;
+  const gate = isGloveBaked ? cfg.minGloveConf : cfg.minPoseConf;
+  if (pc < gate || !Number.isFinite(px)) return null;
+  return { x: px, y: py, source: isGloveBaked ? "glove" : "pose" };
 }
 
 // ─── render ────────────────────────────────────────────────────────────────
@@ -948,7 +970,7 @@ function renderTemplate(sig, cfg) {
     <div class="slider-row">
       <input type="range" id="ae-glove-gate" min="0.05" max="0.95" step="0.05" value="${cfg.minGloveConf}" />
       <output id="ae-glove-gate-out">${cfg.minGloveConf.toFixed(2)}</output>
-      <span class="muted small">glove conf — when below, fall back to pose wrist</span>
+      <span class="muted small">glove conf — v6: below = no wrist detection (no Vision fallback); legacy sidecar: below = fall back to pose wrist</span>
     </div>
     <p class="hint muted small" id="ae-gate-status" style="margin:4px 0 0 0">—</p>
 
