@@ -59,6 +59,10 @@ let infoBox = null;        // text element under the canvas
 let confMaskCache = { token: null, mask: null };  // tied to pose identity
 let armReachCache = { token: null, reach: null }; // theoretical max reach per side
 
+const PUNCH_EXT_GATE = 0.75;  // min reach-fraction before we call an arm a punch
+                              // (3D reach caps ~0.8 even on a straight arm, so
+                              //  0.75 ≈ "near full extension"; tune to taste)
+
 export const Vision3DRule = {
   id: "vision_3d",
   label: "Vision 3D skeleton (vs video)",
@@ -215,6 +219,41 @@ export const Vision3DRule = {
         : (dim ? "rgba(159, 223, 255, 0.25)" : "#9fdfff");
       ctx.beginPath(); ctx.arc(xy[j][0], xy[j][1], r, 0, Math.PI * 2); ctx.fill();
     }
+
+    // Predicted punch direction: arrow from shoulder→wrist on the video, plus
+    // a toward/away/across text tag. The on-video arrow foreshortens for
+    // camera-axis punches, so the words carry the depth call.
+    const pd = punchDirection(state, f);
+    if (pd && pd.frac > PUNCH_EXT_GATE) {
+      const Sx = proj[(f * N + pd.s) * 2 + 0], Sy = proj[(f * N + pd.s) * 2 + 1];
+      const Wx = proj[(f * N + pd.w) * 2 + 0], Wy = proj[(f * N + pd.w) * 2 + 1];
+      if ([Sx, Sy, Wx, Wy].every(Number.isFinite)) {
+        const sxp = Sx * W, syp = Sy * H, wxp = Wx * W, wyp = Wy * H;
+        const dx = wxp - sxp, dy = wyp - syp, len = Math.hypot(dx, dy);
+        const col = punchDirColor(pd.azDeg);
+        ctx.lineWidth = 4 * s; ctx.strokeStyle = col; ctx.fillStyle = col;
+        let lx = wxp, ly = wyp;
+        if (len > 1) {
+          const ux = dx / len, uy = dy / len;
+          lx = wxp + ux * 30 * s * Math.min(1.4, pd.frac);
+          ly = wyp + uy * 30 * s * Math.min(1.4, pd.frac);
+          ctx.beginPath(); ctx.moveTo(sxp, syp); ctx.lineTo(lx, ly); ctx.stroke();
+          const ang = Math.atan2(uy, ux), ah = 10 * s;
+          ctx.beginPath(); ctx.moveTo(lx, ly);
+          ctx.lineTo(lx - ah * Math.cos(ang - 0.4), ly - ah * Math.sin(ang - 0.4));
+          ctx.lineTo(lx - ah * Math.cos(ang + 0.4), ly - ah * Math.sin(ang + 0.4));
+          ctx.closePath(); ctx.fill();
+        } else {
+          ctx.beginPath(); ctx.arc(wxp, wyp, 8 * s, 0, Math.PI * 2); ctx.stroke();
+        }
+        ctx.font = `${12 * s}px ui-monospace, monospace`;
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `${pd.hand} ${punchDirLabel(pd.azDeg)} (az ${pd.azDeg.toFixed(0)}°)`,
+          lx + 8 * s, ly - 6 * s,
+        );
+      }
+    }
   },
 };
 
@@ -314,6 +353,9 @@ function drawNow(state) {
   // forward (+Z = boxer's forward, away from the camera in body-frame).
   drawCompass(ctx, v);
 
+  // Bird's-eye punch-direction dial (bottom-right), camera marked at bottom.
+  drawTopDownDial(ctx, punchDirection(state, frame));
+
   updateInfo(state, confMask);
 }
 
@@ -377,6 +419,104 @@ function drawCompass(ctx, v) {
   }
 }
 
+// ── Punch direction (camera-referenced) ─────────────────────────────────────
+// Decompose the extended arm's shoulder→wrist vector against the REAL camera
+// direction (from cameraOriginMatrix), not the body +Z axis — so azimuth is
+// 0° = straight at the camera, ±90° = across the frame, ±180° = away. That
+// toward/away axis is exactly what flat 2D footage foreshortens away.
+function camPosBody(pose3d, f) {
+  if (!pose3d.camMatrices) return null;
+  // Row-major 4x4 translation column = camera position in body-frame metres.
+  const m = f * 16;
+  const c = [pose3d.camMatrices[m + 3], pose3d.camMatrices[m + 7], pose3d.camMatrices[m + 11]];
+  return Number.isFinite(c[0]) ? c : null;
+}
+function jointXYZ3(pose3d, f, j) {
+  const b = (f * 17 + j) * 3;
+  return [pose3d.xyz[b], pose3d.xyz[b + 1], pose3d.xyz[b + 2]];
+}
+function punchDirection(state, f) {
+  const pose3d = state.pose3d;
+  if (!pose3d) return null;
+  const C = camPosBody(pose3d, f);
+  if (!C) return null;
+  const reach = getArmReach(state);
+  // Pick the more-extended arm as "the punch".
+  let best = null;
+  for (const sd of [
+    { hand: "L", s: J3.L_SHOULDER, w: J3.L_WRIST, reach: reach?.L },
+    { hand: "R", s: J3.R_SHOULDER, w: J3.R_WRIST, reach: reach?.R },
+  ]) {
+    const S = jointXYZ3(pose3d, f, sd.s);
+    const Wp = jointXYZ3(pose3d, f, sd.w);
+    if (!Number.isFinite(S[0]) || !Number.isFinite(Wp[0])) continue;
+    const p = [Wp[0] - S[0], Wp[1] - S[1], Wp[2] - S[2]];
+    const ext = Math.hypot(p[0], p[1], p[2]);
+    const frac = sd.reach ? ext / sd.reach : ext;
+    if (!best || frac > best.frac) best = { hand: sd.hand, s: sd.s, w: sd.w, S, p, frac };
+  }
+  if (!best) return null;
+  const S = best.S, p = best.p;
+  // Horizontal toward-camera unit vector (body x/z plane) anchored at the
+  // shoulder, plus its lateral perpendicular.
+  const th = [C[0] - S[0], C[2] - S[2]];
+  const tl = Math.hypot(th[0], th[1]) || 1;
+  const t = [th[0] / tl, th[1] / tl];
+  const r = [t[1], -t[0]];
+  const aTow = p[0] * t[0] + p[2] * t[1];
+  const aLat = p[0] * r[0] + p[2] * r[1];
+  // az: 0 = toward camera, ±90 = across, ±180 = away. toward/away uses the real
+  // camera position (robust); the across-left/right SIGN depends on Apple's
+  // X-handedness (its +Z label is posterior, not anterior) so it may be
+  // mirrored — confirm against one clip and flip aLat's sign if so.
+  const azDeg = Math.atan2(aLat, aTow) * 180 / Math.PI;
+  const elDeg = Math.atan2(p[1], Math.hypot(p[0], p[2])) * 180 / Math.PI;
+  return { hand: best.hand, s: best.s, w: best.w, frac: best.frac, azDeg, elDeg };
+}
+function punchDirLabel(az) {
+  const a = Math.abs(az);
+  if (a <= 35) return "TOWARD camera";
+  if (a >= 145) return "AWAY from camera";
+  return az > 0 ? "ACROSS →" : "ACROSS ←";
+}
+function punchDirColor(az) {
+  const a = Math.abs(az);
+  if (a <= 35) return "#ff6b4a";   // toward
+  if (a >= 145) return "#4aa8ff";  // away
+  return "#7afa9a";                // across
+}
+// Bird's-eye azimuth dial in the side canvas: camera at the bottom, "away" at
+// the top, so a toward-camera punch points down. Makes the depth axis legible
+// where the on-video arrow (foreshortened) can't.
+function drawTopDownDial(ctx, pd) {
+  const R = 34, cx = canvas.width - R - 14, cy = canvas.height - R - 14;
+  ctx.save();
+  ctx.fillStyle = "rgba(11,16,24,0.88)";
+  ctx.strokeStyle = "rgba(95,125,165,0.5)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "rgba(180,200,220,0.8)";
+  ctx.font = "9px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("▲ cam", cx, cy + R - 3);
+  ctx.fillText("away", cx, cy - R + 9);
+  ctx.fillStyle = "#9fdfff";
+  ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+  if (pd && pd.frac > PUNCH_EXT_GATE && Number.isFinite(pd.azDeg)) {
+    const a = pd.azDeg * Math.PI / 180;
+    const tx = cx + Math.sin(a) * (R - 6), ty = cy + Math.cos(a) * (R - 6);
+    const col = punchDirColor(pd.azDeg);
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tx, ty); ctx.stroke();
+    const ang = Math.atan2(ty - cy, tx - cx), ah = 7;
+    ctx.beginPath(); ctx.moveTo(tx, ty);
+    ctx.lineTo(tx - ah * Math.cos(ang - 0.4), ty - ah * Math.sin(ang - 0.4));
+    ctx.lineTo(tx - ah * Math.cos(ang + 0.4), ty - ah * Math.sin(ang + 0.4));
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
 function updateInfo(state, confMask) {
   if (!infoBox) return;
   const pose3d = state.pose3d;
@@ -427,6 +567,10 @@ function updateInfo(state, confMask) {
   const noProj = !pose3d.projection
     ? ` · <span style="color:var(--bad)">no _proj.npy — re-extract for overlay</span>`
     : "";
+  const pd = punchDirection(state, f);
+  const pdLine = pd && pd.frac > PUNCH_EXT_GATE
+    ? `<br>punch <b>${pd.hand}</b>: <span style="color:${punchDirColor(pd.azDeg)}">${punchDirLabel(pd.azDeg)}</span> · az ${pd.azDeg.toFixed(0)}° · el ${pd.elDeg.toFixed(0)}° · ext ${(pd.frac * 100).toFixed(0)}%`
+    : `<br>punch dir: <span class="muted">(no arm extended)</span>`;
   infoBox.innerHTML =
     `frame ${f}   ·   L ext ${fmt(lExt)} m${pct(lPct)}   ·   R ext ${fmt(rExt)} m${pct(rPct)}<br>` +
     (bodyYawDeg !== null
@@ -434,7 +578,7 @@ function updateInfo(state, confMask) {
       : `(no cam matrix)   ·   `) +
     `trusted joints: ${trustedCount}/${totalCount}` +
     (confMask ? ` (2D gate @0.3)` : ` (gate off)`) +
-    noProj;
+    noProj + pdLine;
 }
 
 // Per-arm theoretical max reach = upper arm + forearm bone lengths.
