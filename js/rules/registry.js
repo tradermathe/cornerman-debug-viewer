@@ -31,6 +31,7 @@ import { RoundV6Rule } from "./round_v6.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
 import { OnDeviceLensRule } from "./ondevice_lens.js";
 import { AudioImpactLensRule } from "./audio_impact_lens.js";
+import { ForearmAxialityRule } from "./forearm_axiality.js";
 
 export const RULES = [
   OverviewRule,
@@ -53,5 +54,6 @@ export const RULES = [
   OrientationLensRule,
   PunchDirectionReviewRule,
   StraightsReviewRule,
+  ForearmAxialityRule,
   AngleChangeRule,
 ];
