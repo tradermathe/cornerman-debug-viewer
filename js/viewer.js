@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-05-31.1";
+const BUILD = "2026-06-02.2";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -50,6 +50,9 @@ const els = {
   scrubber:    document.getElementById("scrubber"),
   ruleSel:     document.getElementById("rule-select"),
   ruleHost:    document.getElementById("rule-panel"),
+  videoInfo:   document.getElementById("video-info"),
+  viName:      document.getElementById("vi-name"),
+  viDrive:     document.getElementById("vi-drive"),
   meta:        document.getElementById("meta"),
   thumbVideo:  document.getElementById("thumb-video"),
   thumbTip:    document.getElementById("thumb-tooltip"),
@@ -998,6 +1001,7 @@ function loadVideo(file) {
     if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
     state.videoUrl = URL.createObjectURL(file);
     state.videoFileName = file.name;
+    updateVideoInfo();
     els.video.src = state.videoUrl;
     // The thumb-video shares the source so we can seek-and-snapshot it on
     // scrubber hover without disturbing the main playback.
@@ -1005,6 +1009,22 @@ function loadVideo(file) {
     els.video.onloadedmetadata = () => resolve();
     els.video.onerror = () => reject(new Error("Video failed to load"));
   });
+}
+
+// Surface the current source video's filename plus a Drive *search* link in
+// the side panel. We only have local file handles (File System Access API),
+// not Drive file IDs, so a name-search query is the best deep link we can
+// build without Drive API + OAuth. yt-dlp may have substituted unicode
+// look-alikes (｜ ⧸) into the filename; those round-trip fine through the
+// search query.
+function updateVideoInfo() {
+  if (!els.videoInfo) return;
+  const name = state.videoFileName;
+  if (!name) { els.videoInfo.hidden = true; return; }
+  els.viName.textContent = name;
+  const stem = name.replace(/\.[^.]+$/, "");
+  els.viDrive.href = `https://drive.google.com/drive/search?q=${encodeURIComponent(stem)}`;
+  els.videoInfo.hidden = false;
 }
 
 function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null) {

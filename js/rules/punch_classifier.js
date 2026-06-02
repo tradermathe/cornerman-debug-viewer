@@ -227,6 +227,7 @@ function template() {
       <option value="">— load a predictions JSON —</option>
     </select>
     <p class="hint" id="pc-round-hint"></p>
+    <p class="hint" id="pc-stance" style="margin-top:6px"></p>
 
     <h3>Filters</h3>
     <label class="slider">
@@ -570,6 +571,7 @@ function refreshScope(state) {
     activeRound = null;
     signals = null;
     renderStats();
+    renderStance(state);
     return;
   }
   // Try exact match first, then `<stem>` substring either direction (cache
@@ -607,6 +609,7 @@ function refreshScope(state) {
       : `load a video so the lens can auto-match a round.`;
   }
   renderStats();
+  renderStance(state);
 }
 
 // ── Signal derivation ──────────────────────────────────────────────────────
@@ -822,6 +825,60 @@ function renderStats() {
     `<span class="muted small">` +
     `correct ${s.correct} · missed ${s.missed} · false + ${s.fa} · mistyped ${s.mistyped}` +
     `</span>`);
+}
+
+// Per-round stance, derived exactly like the training notebook (cell 8):
+//   round_punches['stance'].str.strip().str.lower().mode()  → default 'orthodox'
+// state.labels.detections are this round's punch rows from the SAME Sheet,
+// with `stance` already trimmed + lowercased by rowsToDetections. Blank cells
+// arrive as null (the notebook drops NaN before .mode()), so we skip them.
+// Ties break alphabetically to match pandas .mode().iloc[0] (modes come back
+// sorted ascending). Returns null when there's no Sheet match (→ "unknown").
+function sheetStance(state) {
+  const labels = state?.labels;
+  if (!labels || labels.error) return null;
+  const dets = Array.isArray(labels.detections) ? labels.detections : [];
+  const counts = new Map();
+  let withStance = 0;
+  for (const d of dets) {
+    const s = d.stance;          // already trimmed + lowercased, or null
+    if (!s) continue;
+    counts.set(s, (counts.get(s) || 0) + 1);
+    withStance++;
+  }
+  if (counts.size === 0) {
+    return { stance: "orthodox", defaulted: true, withStance: 0, total: dets.length, counts: {} };
+  }
+  let best = null, bestN = -1;
+  for (const s of [...counts.keys()].sort()) {   // ascending → alphabetical tie-break
+    const n = counts.get(s);
+    if (n > bestN) { best = s; bestN = n; }
+  }
+  return { stance: best, defaulted: false, withStance, total: dets.length, counts: Object.fromEntries(counts) };
+}
+
+function renderStance(state) {
+  const el = host.querySelector("#pc-stance");
+  if (!el) return;
+  const info = sheetStance(state);
+  if (!info) {
+    el.innerHTML = `<span class="muted">Stance (Sheet): unknown — no Sheet label match for this round.</span>`;
+    return;
+  }
+  const isSouth = info.stance === "southpaw";
+  const color = isSouth ? "#f5b945" : "var(--good)";
+  let detail;
+  if (info.defaulted) {
+    detail = `default — no <code>stance</code> cell on ${info.total} punch${info.total === 1 ? "" : "es"} this round`;
+  } else {
+    const parts = Object.entries(info.counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${v}`).join(" · ");
+    detail = `mode over ${info.withStance}/${info.total} labelled punches (${parts})`;
+  }
+  el.innerHTML =
+    `Stance (Sheet): <strong style="color:${color}">${info.stance.toUpperCase()}</strong> ` +
+    `<span class="muted small">— ${detail}</span>`;
 }
 
 function renderHud(_state) {

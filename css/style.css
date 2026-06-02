@@ -270,6 +270,33 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   overflow-y: auto;
 }
 
+.video-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.video-info .vi-label {
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.video-info .vi-name {
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+.video-info .vi-drive {
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+  width: fit-content;
+}
+.video-info .vi-drive:hover { text-decoration: underline; }
+
 .rule-pick {
   display: flex;
   align-items: center;
