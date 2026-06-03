@@ -26,6 +26,7 @@ import { PunchClassifierRule } from "./punch_classifier.js";
 import { OnDeviceLensRule } from "./ondevice_lens.js";
 import { AudioImpactLensRule } from "./audio_impact_lens.js";
 import { ForearmAxialityRule } from "./forearm_axiality.js";
+import { PunchPredictionsRule } from "./punch_predictions.js";
 
 export const RULES = [
   OverviewRule,
@@ -43,5 +44,6 @@ export const RULES = [
   HipRotationReviewRule,
   Vision3DRule,
   ForearmAxialityRule,
+  PunchPredictionsRule,
   AngleChangeRule,
 ];
