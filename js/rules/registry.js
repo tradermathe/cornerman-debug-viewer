@@ -19,7 +19,6 @@ import { CombinedCompareRule } from "./combined_compare.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
 import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationReviewRule } from "./hip_rotation_review.js";
-import { FacingDirectionRule } from "./facing_direction.js";
 import { Vision3DRule } from "./vision_3d.js";
 import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
@@ -42,7 +41,6 @@ export const RULES = [
   StepPunchSyncRule,
   StepDetectorRule,
   HipRotationReviewRule,
-  FacingDirectionRule,
   Vision3DRule,
   ForearmAxialityRule,
   AngleChangeRule,
