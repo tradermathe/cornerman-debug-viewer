@@ -23,9 +23,9 @@
 //
 // Per labelled punch (straights only — jab/cross head/body):
 //   peak          = r[f] at the peak (max-reach) frame in the punch window
-//   peak_axiality = forearm axiality at that frame (0 = flat across image /
-//                   sideways, 1 = down the camera axis), median over ±2 frames,
-//                   computed by the forearm-axiality lens (raw Vision skeleton)
+//   peak_axiality = axiality (0 = flat across image / sideways, 1 = down the
+//                   camera axis) from the trained temporal model's held-out
+//                   per-punch prediction, joined by punch_uuid
 //   predicted     = skip (axial) / fail (bent) / pass — see rescorePunch
 //
 // Wrist source: prefer the v6 cache (pose_cache_v6/, Apple Vision skeleton
@@ -42,9 +42,11 @@
 
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
-// Axiality is the sideways-gate: reuse the forearm-axiality lens's exact
-// per-side computation so the gate's numbers match what that lens displays.
-import { computeSide as computeForearmAxiality, APEX_HALF } from "./forearm_axiality.js";
+// Axiality is the sideways gate: the trained temporal model's held-out
+// per-punch prediction (predictions_axiality_*.json, loaded by axiality_model.js
+// and joined by punch_uuid). 0 = flat across the image (side-on), 1 = down the
+// camera axis (foreshortened) — same scale and meaning the gate always used.
+import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 
 const DEFAULTS = {
   threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
@@ -102,6 +104,7 @@ let host;
 let cfg = { ...DEFAULTS };
 let signals = null;
 let lastPose = null;
+let latestState = null;   // live state, for the async model-ready recompute
 
 // v6 cache is the canonical wrist source — it bakes in the glove substitution
 // the iOS app does live. Fall back to state.pose for rounds that pre-date v6.
@@ -140,6 +143,10 @@ export const ArmExtensionRule = {
   mount(_host, state) {
     host = _host;
     cfg = { ...DEFAULTS };
+    latestState = state;
+    // Kick the shared axiality-model loader; onModelReady fires once the
+    // per-punch predictions land and recomputes peak_axiality + the verdicts.
+    ensureAxialityModel(state, onModelReady);
     signals = computeAll(state, cfg);
     lastPose = pickPose(state);
 
@@ -205,16 +212,8 @@ export const ArmExtensionRule = {
 
     // Axiality gate — the only gate. Both the toggle and the slider only move
     // the verdict (peak_axiality is already computed per punch in computeAll),
-    // so they just re-score; no perFrameRatio recompute needed.
-    const updateAxialStatus = () => {
-      const el = host.querySelector("#ae-axial-status");
-      if (!el) return;
-      if (!cfg.axialityGate) { el.textContent = "Disabled — every punch scored on bend regardless of foreshortening."; return; }
-      const N = signals.punches.length;
-      const skipped = signals.punches.filter(p => p.reason === "axial").length;
-      const unknown = signals.punches.filter(p => p.reason === "axial_unknown").length;
-      el.textContent = `${skipped}/${N} punches too head-on (skipped) · ${unknown} with unmeasurable axiality.`;
-    };
+    // so they just re-score; no perFrameRatio recompute needed. updateAxialStatus
+    // is module-level (shared with onModelReady).
     const axialToggle = host.querySelector("#ae-axial-toggle");
     const axialSlider = host.querySelector("#ae-axial-max");
     const axialOut    = host.querySelector("#ae-axial-max-out");
@@ -291,6 +290,7 @@ export const ArmExtensionRule = {
   },
 
   draw(ctx, state) {
+    latestState = state;
     const pose = pickPose(state);
     if (pose !== lastPose) {
       // Pose swapped (e.g. compare-mode toggle) — recompute.
@@ -311,6 +311,8 @@ export const ArmExtensionRule = {
   },
 
   update(state) {
+    latestState = state;
+    ensureAxialityModel(state, onModelReady);
     const pose = pickPose(state);
     if (pose !== lastPose) {
       signals = computeAll(state, cfg);
@@ -321,8 +323,11 @@ export const ArmExtensionRule = {
     setMetric("ae-r-ratio", signals.ratioR[f], cfg);
     setText("ae-l-bend", formatBend(signals.bendL[f]));
     setText("ae-r-bend", formatBend(signals.bendR[f]));
-    setAxial("ae-l-axial", signals.axialityL[f], cfg);
-    setAxial("ae-r-axial", signals.axialityR[f], cfg);
+    // Axiality is now per-punch (the model scores a whole punch, not a frame),
+    // so the inspector shows the active punch's model value on its arm only.
+    const ap = activePunchAt(signals.punches, f);
+    setAxial("ae-l-axial", ap && ap.side === "L" ? ap.peak_axiality : NaN, cfg);
+    setAxial("ae-r-axial", ap && ap.side === "R" ? ap.peak_axiality : NaN, cfg);
     setText("ae-l-source", signals.sourceL[f] || "—");
     setText("ae-r-source", signals.sourceR[f] || "—");
   },
@@ -354,15 +359,6 @@ function computeAll(state, cfg) {
   const { ratio: ratioL, reach: reachL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis, torsoEuclid);
   const { ratio: ratioR, reach: reachR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis, torsoEuclid);
 
-  // Axiality — the sideways gate. Computed on the RAW Vision skeleton so the
-  // numbers match the standalone forearm-axiality lens exactly (it runs on
-  // state.pose with MIN_CONF 0.30 and F0 = 90th-pct ratio). Falls back to the
-  // verdict pose only for legacy rounds with no raw-Vision cache. These are
-  // per-frame arrays; each punch medians them over its peak ± APEX_HALF below.
-  const axPose = state.pose || pose;
-  const axialL = computeForearmAxiality(axPose, "L");
-  const axialR = computeForearmAxiality(axPose, "R");
-
   // Labelled punches — filtered to straights, with optional rule_extension
   // verdict for agreement scoring.
   const detections = (state.labels?.detections || []).filter(d =>
@@ -379,7 +375,6 @@ function computeAll(state, cfg) {
     const reachArr = side === "L" ? reachL : reachR;
     const bendArr  = side === "L" ? bendL : bendR;
     const srcArr   = side === "L" ? sourceL : sourceR;
-    const axArm    = side === "L" ? axialL : axialR;
 
     // Pick the peak frame as the most-extended one in the window — that's
     // the moment of "full extension" that drives the verdict. Prefer max
@@ -402,11 +397,13 @@ function computeAll(state, cfg) {
     const peak = peakValid ? ratioArr[peakFrame] : NaN;
     const peakReach = peakValid ? reachArr[peakFrame] : NaN;
 
-    // Forearm axiality at the peak frame, medianed over ±APEX_HALF (the same
-    // window the forearm-axiality lens aggregates). 0 = forearm flat across
-    // the image (side-on, bend trustworthy), 1 = down the camera axis
-    // (foreshortened). This is the only gate — see rescorePunch.
-    const peak_axiality = peakValid ? medianAxialityAround(axArm, peakFrame) : NaN;
+    // Axiality from the trained temporal model, joined by punch_uuid: held-out
+    // for direction-labeled straights, forward-inferred for the rest (score_all
+    // writes both). 0 = forearm flat across the image (side-on, bend
+    // trustworthy), 1 = down the camera axis (foreshortened). null when the
+    // model has no entry for this punch (no pose cache) → NaN → gated as
+    // axial_unknown. This is the only gate — see rescorePunch.
+    const peak_axiality = axialityForPunch(d.punch_uuid)?.predAxiality ?? NaN;
 
     const label = d.rule_extension === "pass" || d.rule_extension === "fail"
       ? d.rule_extension : null;
@@ -457,25 +454,35 @@ function computeAll(state, cfg) {
 
   return {
     ratioL, ratioR, bendL, bendR,
-    axialityL: axialL.axiality, axialityR: axialR.axiality,
     sourceL, sourceR, punches, fps, bodyAxis,
   };
 }
 
-// Median of valid per-frame axiality over [apex-APEX_HALF, apex+APEX_HALF] —
-// the same window the forearm-axiality lens uses. `ax` is the object returned
-// by computeForearmAxiality ({ axiality, valid, ... }); falls back to the apex
-// value alone when no valid neighbour exists.
-function medianAxialityAround(ax, apex) {
-  const vals = [];
-  for (let f = apex - APEX_HALF; f <= apex + APEX_HALF; f++) {
-    if (f < 0 || f >= ax.axiality.length) continue;
-    if (ax.valid[f] && Number.isFinite(ax.axiality[f])) vals.push(ax.axiality[f]);
-  }
-  if (!vals.length) return Number.isFinite(ax.axiality[apex]) ? ax.axiality[apex] : NaN;
-  vals.sort((a, b) => a - b);
-  const m = vals.length >> 1;
-  return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
+// The axiality sidecar loads async. When it lands, peak_axiality (read from the
+// model in computeAll) must be recomputed, then the table / aggregate / gate
+// status refreshed. ensureAxialityModel's guard makes this fire once; resetting
+// lastPose keeps the next draw from recomputing redundantly.
+function onModelReady() {
+  if (!host || !latestState) return;
+  signals = computeAll(latestState, cfg);
+  lastPose = pickPose(latestState);
+  renderPunchTable();
+  renderAggregate();
+  updateAxialStatus();
+  window.__viewerRedraw?.();
+}
+
+// Gate status line: how many punches the axiality gate skipped as too head-on,
+// and how many the model never scored. Module-level so onModelReady and the
+// gate toggle/slider handlers all share it.
+function updateAxialStatus() {
+  const el = host?.querySelector("#ae-axial-status");
+  if (!el) return;
+  if (!cfg.axialityGate) { el.textContent = "Disabled — every punch scored on bend regardless of foreshortening."; return; }
+  const N = signals.punches.length;
+  const skipped = signals.punches.filter(p => p.reason === "axial").length;
+  const unknown = signals.punches.filter(p => p.reason === "axial_unknown").length;
+  el.textContent = `${skipped}/${N} too head-on (skipped) · ${unknown} not scored by the model.`;
 }
 
 function bodyAxisOffset(pose, cfg) {
@@ -709,14 +716,16 @@ function renderTemplate(sig, cfg) {
     <h3>Axiality gate (sideways only)</h3>
     <p class="hint">
       Bend is read in 2D, so it's only trustworthy when the punch travels
-      across the image plane. Forearm <b>axiality</b> (0 = flat across the
-      image / side-on, 1 = pointing straight down the camera axis) measures
-      that foreshortening — reused from the forearm-axiality lens (raw Vision
-      skeleton, medianed over the peak ±${APEX_HALF} frames). Punches whose peak
-      axiality is <em>above</em> the cut are too head-on to judge and get a
-      <b>skip</b>. The signal is magnitude-only, so one upper cut covers both
-      toward- and away-camera punches; the default ≈0.71 keeps the forearm
-      within ±45° of the image plane.
+      across the image plane. <b>Axiality</b> (0 = flat across the image /
+      side-on, 1 = pointing straight down the camera axis) measures that
+      foreshortening — now the <b>trained temporal model</b>'s held-out
+      per-punch prediction (joined by punch_uuid), not a per-frame geometric
+      estimate. Punches whose predicted axiality is <em>above</em> the cut are
+      too head-on to judge and get a <b>skip</b>. The signal is magnitude-only,
+      so one upper cut covers both toward- and away-camera punches; the default
+      ≈0.71 keeps the forearm within ±45° of the image plane. The model only
+      scores <em>labelled</em> straights it held out, so punches it never scored
+      fall through as <b>not scored</b>.
     </p>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <input type="checkbox" id="ae-axial-toggle" ${cfg.axialityGate ? 'checked' : ''} />
@@ -882,7 +891,7 @@ function renderPunchTable() {
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
           <th title="which gate decided this punch — hover for the numbers that fired it (e.g. r=0.87 < 0.95)">why</th>
           <th>bend</th>
-          <th title="peak forearm axiality (0 = side-on, 1 = down the camera axis) — the gate. Above the cut → skipped as too head-on to judge bend">axiality</th>
+          <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — the gate. Above the cut → skipped as too head-on to judge bend">axiality</th>
           <th title="peak reach = |sh→wr| / euclidean torso at peak frame — context only, no longer a gate (units: torsos)">reach</th>
           <th title="shoulder confidence at peak frame">sh</th>
           <th title="elbow confidence at peak frame">el</th>
@@ -1022,7 +1031,7 @@ function rescorePunch(p, cfg) {
     if (!Number.isFinite(p.peak_axiality)) {
       p.predicted = "skip";
       p.reason = "axial_unknown";
-      p.reason_text = "couldn't measure forearm axiality (elbow/wrist/torso below conf gate near peak)";
+      p.reason_text = "the axiality model didn't score this punch (not in its held-out labelled set)";
       return;
     }
     if (p.peak_axiality > cfg.axialityMax) {

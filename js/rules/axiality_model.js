@@ -7,19 +7,24 @@
 //     "levels": [0, 0.383, 0.707, 0.924, 1.0],
 //     "names":  ["sideways","near_side","diagonal","near_axial","axial"],
 //     "metrics": { ...cv_metrics... },
+//     "counts":  { total, oof, infer, with_gt, straights_total, buildable },
 //     "punches": { "<punch_uuid>": { pred_axiality, pred_bucket,
-//                                    gt_axiality, gt_bucket } } }
+//                                    gt_axiality, gt_bucket, source } } }
 //
 // The viewer auto-collects every `predictions_*.json` into
 // state.predictionFiles; we pick the newest `predictions_axiality_*.json`,
-// parse it once, and expose a synchronous lookup by punch_uuid. Predictions are
-// out-of-fold (honest held-out), so the lens shows the same generalization the
-// CV metrics report. The model only scored LABELED straights from the Sheet —
-// `axialityForPunch` returns null for any punch the model never saw (real
-// footage), so callers must fall back to the geometric lens for those.
+// parse it once, and expose a synchronous lookup by punch_uuid. score_all.py
+// writes one entry per buildable straight, tagged with `source`:
+//   "oof"   — direction-labeled straights, scored by a held-out CV fold (honest)
+//             + ground truth; the same generalization the CV metrics report.
+//   "infer" — every other straight, forward-passed through the deployed model;
+//             gt_axiality / gt_bucket are null (no direction label to grade).
+// `axialityForPunch` still returns null for any punch with no entry — straights
+// in videos with no pose cache, or non-straights — so callers handle the gap
+// (arm_extension treats it as "not scored" and skips the punch).
 //
-// This lives in its own module (not inside forearm_axiality.js) so any rule can
-// gate on the learned axiality bucket, not just the standalone lens. Usage:
+// This lives in its own shared module so any rule can gate on the learned
+// axiality bucket. Usage:
 //   import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 //   ensureAxialityModel(state, onReady);           // idempotent; kicks async load
 //   const p = axialityForPunch(det.punch_uuid);    // sync; {predAxiality,...}|null
@@ -71,6 +76,7 @@ export function ensureAxialityModel(state, onReady) {
         m.set(uuid, {
           predAxiality: v.pred_axiality, predBucket: v.pred_bucket,
           gtAxiality: v.gt_axiality, gtBucket: v.gt_bucket,
+          source: v.source || null,
         });
       }
       nextPreds = m;
@@ -79,6 +85,8 @@ export function ensureAxialityModel(state, onReady) {
         levels: parsed.levels || null,
         metrics: parsed.metrics || null,
         model: parsed.model || "?",
+        exportedAt: parsed.exported_at || null,
+        counts: parsed.counts || null,
         file: cands[0].name, n: m.size,
       };
     } catch (e) {

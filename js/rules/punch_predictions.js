@@ -12,8 +12,7 @@
 //
 // Pure data join: this round's straights (state.labels.detections) ⨝ the
 // temporal model's held-out per-punch predictions (predictions_axiality_*.json,
-// loaded by axiality_model.js), keyed by punch_uuid. No pose geometry — the
-// geometric forearm-foreshortening estimate lives in forearm_axiality.js; this
+// loaded by axiality_model.js), keyed by punch_uuid. No pose geometry — this
 // lens is only the learned model's guess against truth.
 
 import { handForLabel } from "../sheet-labels.js";
@@ -25,7 +24,7 @@ import {
   axialityBucketName,
 } from "./axiality_model.js";
 
-// Straight punch labels (head + body). Matches forearm_axiality.js / arm_extension.js.
+// Straight punch labels (head + body). Matches arm_extension.js.
 const STRAIGHTS = new Set(["jab_head", "jab_body", "cross_head", "cross_body"]);
 
 // ── module state ────────────────────────────────────────────────────────────
@@ -112,35 +111,47 @@ function statusHtml() {
       + `run <code>train_axiality_temporal.py</code> (it writes one next to the caches).</span>`;
   }
   const ens = m.metrics && m.metrics["TCN_FA (ours, 3-seed ensemble)"];
-  const pm1 = ens && Number.isFinite(ens.overall_pm1) ? ` · &plusmn;1 ${ens.overall_pm1.toFixed(2)}` : "";
+  const pm1 = ens && Number.isFinite(ens.overall_pm1) ? ` &plusmn;1 ${ens.overall_pm1.toFixed(2)}` : "";
   const ex = ens && Number.isFinite(ens.overall_exact) ? ` · exact ${ens.overall_exact.toFixed(2)}` : "";
-  return `temporal model <code>${m.model}</code> · ${m.n} punches scored${pm1}${ex}<br>`
-    + `<span class="muted">held-out (out-of-fold) · ${m.file}</span>`;
+  const c = m.counts;
+  const cov = c
+    ? `${c.total} scored <span class="muted">(${c.oof} held-out + ${c.infer} inferred)</span>`
+    : `${m.n} punches scored`;
+  const cvLine = (pm1 || ex)
+    ? `<span class="muted">held-out CV (labeled subset):${pm1}${ex}</span><br>`
+    : "";
+  const stamp = m.exportedAt ? `${m.exportedAt} · ` : "";
+  return `temporal model <code>${m.model}</code> · ${cov}<br>`
+    + cvLine
+    + `<span class="muted">${stamp}${m.file}</span>`;
 }
 
 function summaryHtml() {
   if (!punches.length) return "";
-  let scored = 0, exact = 0, pm1 = 0, sumAbsDeg = 0;
+  let scored = 0, withGt = 0, exact = 0, pm1 = 0, sumAbsDeg = 0;
   for (const p of punches) {
     const mp = axialityForPunch(p.punch_uuid);
     if (!mp) continue;
     scored++;
+    if (!Number.isInteger(mp.gtBucket)) continue;   // forward-inferred: no truth to grade
+    withGt++;
     const d = Math.abs(mp.predBucket - mp.gtBucket);
     if (d === 0) exact++;
     if (d <= 1) pm1++;
     const dd = Math.abs(deg(mp.predAxiality) - deg(mp.gtAxiality));
     if (Number.isFinite(dd)) sumAbsDeg += dd;
   }
-  const unscored = punches.length - scored;
   if (!scored) {
     return `<span class="muted">${punches.length} straight(s) in this round — none scored by the model `
-      + `(unlabeled / not in the training set).</span>`;
+      + `(no pose cache for these punches).</span>`;
   }
-  const mae = Math.round(sumAbsDeg / scored);
+  const unscored = punches.length - scored;
   const unscoredTxt = unscored ? ` · ${unscored} unscored` : "";
-  return `this round: <b>${scored}</b>/${punches.length} scored${unscoredTxt}<br>`
-    + `<span class="muted">bucket exact ${exact}/${scored} · &plusmn;1 ${pm1}/${scored} · `
-    + `mean |&Delta;angle| ${mae}°</span>`;
+  const gradeLine = withGt
+    ? `<span class="muted">vs truth (${withGt} labeled): bucket exact ${exact}/${withGt} · `
+      + `&plusmn;1 ${pm1}/${withGt} · mean |&Delta;angle| ${Math.round(sumAbsDeg / withGt)}°</span>`
+    : `<span class="muted">no direction labels in this round — predictions shown without truth.</span>`;
+  return `this round: <b>${scored}</b>/${punches.length} scored${unscoredTxt}<br>` + gradeLine;
 }
 
 // ── canvas HUD ──────────────────────────────────────────────────────────────
@@ -200,7 +211,9 @@ function buildSidebar() {
       <b>90°</b> = flat across the image (side-on). Magnitude only — the model
       can't tell toward from away, so read left/right yourself. <b>✓</b> = same
       bucket, <b>±1</b> = one bucket off, <b>✗</b> = two or more.
-      <span class="muted">— = the model never scored this punch.</span>
+      <span class="muted">A <b>—</b> truth = no direction label yet; the model
+      still predicts it (forward inference). A fully <b>—</b> row = no pose cache
+      for that punch.</span>
     </p>
     <div id="pp-status" class="hint" style="line-height:1.7;margin:8px 0;"></div>
     <div id="pp-summary" class="hint" style="line-height:1.7;margin:8px 0;"></div>
