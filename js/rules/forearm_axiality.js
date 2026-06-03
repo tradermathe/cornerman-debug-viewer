@@ -61,6 +61,13 @@ function cf(pose, f, j) { return pose.conf[f * 17 + j]; }
 function imp(pose, f, j) { return pose.imputed ? pose.imputed[f * 17 + j] : 0; }
 function fmt(x) { return Number.isFinite(x) ? x.toFixed(3) : "—"; }
 function fmt0(x) { return Number.isFinite(x) ? String(Math.round(x)) : "—"; }
+// Off-axis angle in degrees = arccos(axiality): 90° = fully side-on (forearm
+// across the image), 0° = straight down the lens. Easier to read than 0..1;
+// the bend-trust cut sits at ~45° (axiality ≈ 0.71).
+function fmtDeg(ax) {
+  if (!Number.isFinite(ax)) return "—";
+  return `${Math.round(Math.acos(Math.max(0, Math.min(1, ax))) * 180 / Math.PI)}°`;
+}
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 // Color ramp for axiality: blue (across, 0) -> green (mid) -> orange (toward, 1).
@@ -438,7 +445,10 @@ function buildSidebar() {
     <p class="hint">
       How aligned each punch is with the camera axis, from forearm
       foreshortening: <b>0</b> = flat across the image (a hook), <b>1</b> =
-      down the lens (a straight toward or away). Magnitude only, straights only.
+      down the lens (a straight toward or away). The <b>off-axis</b> column is
+      the same thing in degrees (arccos): <b>90°</b> = fully side-on, <b>0°</b> =
+      down the lens, with ~45° the cut for trusting 2D bend. Magnitude only,
+      straights only.
       The dashed <b>circle</b> is where the wrist would sit if the forearm were
       flat; the wrist pulled inward means foreshortened (axial).
     </p>
@@ -491,13 +501,14 @@ function renderSidebar(state) {
           <td style="text-align:right">${p.apex}</td>
           <td style="text-align:right">${fmt(p.ratioApex)}</td>
           <td style="text-align:right;color:${axColor(p.axialityPunch)};font-weight:600">${fmt(p.axialityPunch)}</td>
+          <td style="text-align:right;color:${axColor(p.axialityPunch)}">${fmtDeg(p.axialityPunch)}</td>
           <td>${p.dir || "—"}</td>
         </tr>`).join("");
       tbl.innerHTML = `
         <table style="width:100%;border-collapse:collapse;font-size:12px">
           <thead><tr style="color:#888;text-align:left">
             <th>arm</th><th>type</th><th style="text-align:right">apex</th>
-            <th style="text-align:right">ratio</th><th style="text-align:right">axiality</th><th>dir</th>
+            <th style="text-align:right">ratio</th><th style="text-align:right">axiality</th><th style="text-align:right" title="off-axis angle = arccos(axiality); 90° = fully side-on, 0° = straight down the lens; ~45° is the cut for trusting 2D bend">off-axis</th><th>dir</th>
           </tr></thead><tbody>${rows}</tbody>
         </table>`;
       tbl.querySelectorAll("tr[data-i]").forEach(tr => {
