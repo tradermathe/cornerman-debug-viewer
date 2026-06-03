@@ -1,18 +1,32 @@
 // Arm extension lens — "did the straight punch reach full extension?".
 //
-// Per-frame metric (both arms, every frame):
+// The verdict is bend, and bend only: r[f] is the elbow straightness, so a
+// peak r ≥ threshold means the arm locked out. But bend is only trustworthy
+// when the punch travels across the image plane — a straight thrown toward or
+// away from the camera foreshortens and reads wrong. So a single AXIALITY GATE
+// fronts the verdict: punches whose forearm points too close to the camera
+// axis are skipped (can't judge), the rest are scored on bend alone.
 //
-//   r[f] = |shoulder→wrist|  /  ( |shoulder→elbow| + |elbow→wrist| )
+// Per-frame metrics (both arms, every frame):
 //
-// Domain:
+//   r[f]     = |shoulder→wrist| / (|shoulder→elbow| + |elbow→wrist|)
+//   reach[f] = |shoulder→wrist| / |shoulder_mid → hip_mid|     (Euclidean torso)
+//
+// Domain of r:
 //   1.00  arm dead straight (elbow on the shoulder→wrist line)
 //   0.95  ~25° bend at the elbow
 //   0.71  90° bend
 //   →0    arm fully folded
 //
+// reach is no longer a gate — it only picks the peak (most-extended) frame
+// inside the punch window, the moment bend is read at.
+//
 // Per labelled punch (straights only — jab/cross head/body):
-//   peak       = max(r[f]) inside the punch window
-//   predicted  = peak >= threshold ? "pass" : "fail"
+//   peak          = r[f] at the peak (max-reach) frame in the punch window
+//   peak_axiality = forearm axiality at that frame (0 = flat across image /
+//                   sideways, 1 = down the camera axis), median over ±2 frames,
+//                   computed by the forearm-axiality lens (raw Vision skeleton)
+//   predicted     = skip (axial) / fail (bent) / pass — see rescorePunch
 //
 // Wrist source: prefer the v6 cache (pose_cache_v6/, Apple Vision skeleton
 // with glove wrists baked in at joints 9/10 for gloved rounds — same model
@@ -28,27 +42,22 @@
 
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
-import { STANCE_FITS } from "./orientation_lens.js";
+// Axiality is the sideways-gate: reuse the forearm-axiality lens's exact
+// per-side computation so the gate's numbers match what that lens displays.
+import { computeSide as computeForearmAxiality, APEX_HALF } from "./forearm_axiality.js";
 
 const DEFAULTS = {
   threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
-  reachThreshold:   0.70,     // and peak reach ≥ this (in-plane extension)
-  reachEnabled:     true,     // turn the reach gate on/off
-  // Orientation gate. The arm-extension ratio is only trustworthy when the
-  // boxer is roughly sideways to the camera: a punch travelling along the
-  // camera axis foreshortens (high r on a bent arm). Use the orientation
-  // model's predicted facing at the punch's peak frame; require |angle|
-  // to lie inside [min, max] (degrees) for the verdict to count.
-  // GT convention: 0° = facing camera, ±90° = sideways, ±180° = facing away.
-  orientationGate:        true,
-  orientationMinAbsDeg:   60,
-  orientationMaxAbsDeg:   150,
-  // Facing-camera exclusion. When both eyes AND both ears clear this
-  // confidence at the punch's peak frame, the boxer is squared up to the
-  // camera and the punch travels into the camera axis — untrustworthy
-  // for any 2D depth-sensitive geometry. Predict "skip" in that case.
-  frontalExclude:        true,
-  frontalFaceConfMin:    0.20,
+  // Axiality gate — the only gate. Forearm axiality (0 = flat across the
+  // image / sideways, 1 = pointing down the camera axis) measures how
+  // foreshortened the punching forearm is. Bend is only trustworthy when the
+  // punch travels across the image plane, so punches with axiality ABOVE this
+  // cut are skipped (too close to the camera axis to judge). The default
+  // ≈0.707 keeps the forearm within ±45° of the image plane (the [45°,135°]
+  // off-camera-axis band); the signal is magnitude-only so that band collapses
+  // to a single upper cut. Lower = stricter (demand more side-on).
+  axialityGate:     true,
+  axialityMax:      Math.SQRT1_2,   // ≈0.7071 = cos 45° = sin 45°
   minGloveConf:     0.20,
   minPoseConf:      0.20,
   // Anatomical shoulder correction. COCO labels the shoulder kp at the
@@ -145,13 +154,12 @@ export const ArmExtensionRule = {
       slider.addEventListener("input", () => {
         cfg.threshold = Number(slider.value);
         out.textContent = cfg.threshold.toFixed(2);
-        // Re-score punches against the new threshold — fast, no recompute of r[f]
-        for (const p of signals.punches) {
-          p.predicted = p.peak >= cfg.threshold ? "pass" : "fail";
-        }
+        // Re-score punches against the new threshold — fast, no recompute of
+        // r[f]. Routes through rescorePunch so the axiality gate still applies.
+        for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
-        state.requestDraw?.();
+        window.__viewerRedraw?.();
       });
     }
 
@@ -163,8 +171,8 @@ export const ArmExtensionRule = {
       renderAggregate();
       updateCorrStatus();
       updateGateStatus();
-      try { updateArmStatus(); } catch {}
-      state.requestDraw?.();
+      updateAxialStatus();
+      window.__viewerRedraw?.();
     };
 
     // Confidence-gate status — how many frames pass the current gates
@@ -195,140 +203,47 @@ export const ArmExtensionRule = {
     wireGate("ae-pose-gate",  "ae-pose-gate-out",  "minPoseConf");
     wireGate("ae-glove-gate", "ae-glove-gate-out", "minGloveConf");
 
-    // Reach toggle + threshold slider
-    const updateArmStatus = () => {
-      const el = host.querySelector("#ae-arm-status");
+    // Axiality gate — the only gate. Both the toggle and the slider only move
+    // the verdict (peak_axiality is already computed per punch in computeAll),
+    // so they just re-score; no perFrameRatio recompute needed.
+    const updateAxialStatus = () => {
+      const el = host.querySelector("#ae-axial-status");
       if (!el) return;
-      const aL = signals.armLengthL, aR = signals.armLengthR;
-      const fmt = v => v ? `${v.toFixed(0)} px` : "—";
-      el.textContent = `Arm length (round-median sh→el + el→wr): L ${fmt(aL)} · R ${fmt(aR)}`;
-    };
-    const reachToggle = host.querySelector("#ae-reach-toggle");
-    const reachSlider = host.querySelector("#ae-reach-threshold");
-    const reachOut    = host.querySelector("#ae-reach-threshold-out");
-    const reachRow    = host.querySelector("#ae-reach-slider-row");
-    if (reachToggle) {
-      reachToggle.addEventListener("change", () => {
-        cfg.reachEnabled = reachToggle.checked;
-        if (reachSlider) reachSlider.disabled = !cfg.reachEnabled;
-        if (reachRow) reachRow.style.opacity = cfg.reachEnabled ? 1 : 0.5;
-        // Only the prediction depends on the gate — no need to rerun
-        // perFrameRatio. Re-score punches against the current settings.
-        for (const p of signals.punches) rescorePunch(p, cfg);
-        renderPunchTable();
-        renderAggregate();
-        state.requestDraw?.();
-      });
-    }
-    if (reachSlider) {
-      reachSlider.addEventListener("input", () => {
-        cfg.reachThreshold = Number(reachSlider.value);
-        reachOut.textContent = cfg.reachThreshold.toFixed(2);
-        if (!cfg.reachEnabled) return;
-        for (const p of signals.punches) rescorePunch(p, cfg);
-        renderPunchTable();
-        renderAggregate();
-        state.requestDraw?.();
-      });
-    }
-    updateArmStatus();
-
-    // Facing-camera exclusion — recompute the toggle's effect locally;
-    // the conf slider needs a full recompute because frontal_at_peak
-    // depends on the threshold at score time.
-    const updateFrontalStatus = () => {
-      const el = host.querySelector("#ae-frontal-status");
-      if (!el) return;
-      if (!cfg.frontalExclude) { el.textContent = "Disabled — predictions ignore facing direction."; return; }
+      if (!cfg.axialityGate) { el.textContent = "Disabled — every punch scored on bend regardless of foreshortening."; return; }
       const N = signals.punches.length;
-      const frontal = signals.punches.filter(p => p.frontal_at_peak).length;
-      el.textContent = `${frontal}/${N} labelled punches caught by the facing-camera gate (predicted "skip").`;
+      const skipped = signals.punches.filter(p => p.reason === "axial").length;
+      const unknown = signals.punches.filter(p => p.reason === "axial_unknown").length;
+      el.textContent = `${skipped}/${N} punches too head-on (skipped) · ${unknown} with unmeasurable axiality.`;
     };
-    const frontalToggle = host.querySelector("#ae-frontal-toggle");
-    const frontalSlider = host.querySelector("#ae-frontal-conf");
-    const frontalOut    = host.querySelector("#ae-frontal-conf-out");
-    const frontalRow    = host.querySelector("#ae-frontal-slider-row");
-    if (frontalToggle) {
-      frontalToggle.addEventListener("change", () => {
-        cfg.frontalExclude = frontalToggle.checked;
-        if (frontalSlider) frontalSlider.disabled = !cfg.frontalExclude;
-        if (frontalRow)    frontalRow.style.opacity = cfg.frontalExclude ? 1 : 0.5;
-        // Toggle alone doesn't change frontal_at_peak — just re-score.
+    const axialToggle = host.querySelector("#ae-axial-toggle");
+    const axialSlider = host.querySelector("#ae-axial-max");
+    const axialOut    = host.querySelector("#ae-axial-max-out");
+    const axialRow    = host.querySelector("#ae-axial-slider-row");
+    if (axialToggle) {
+      axialToggle.addEventListener("change", () => {
+        cfg.axialityGate = axialToggle.checked;
+        if (axialSlider) axialSlider.disabled = !cfg.axialityGate;
+        if (axialRow) axialRow.style.opacity = cfg.axialityGate ? 1 : 0.5;
         for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
-        updateFrontalStatus();
-        state.requestDraw?.();
+        updateAxialStatus();
+        window.__viewerRedraw?.();
       });
     }
-    if (frontalSlider) {
-      frontalSlider.addEventListener("input", () => {
-        cfg.frontalFaceConfMin = Number(frontalSlider.value);
-        frontalOut.textContent = cfg.frontalFaceConfMin.toFixed(2);
-        // Slider changes the threshold → frontal_at_peak needs recompute.
-        signals = computeAll(state, cfg);
-        renderPunchTable();
-        renderAggregate();
-        updateFrontalStatus();
-        state.requestDraw?.();
-      });
-    }
-    updateFrontalStatus();
-
-    // Orientation gate
-    const updateOrientStatus = () => {
-      const el = host.querySelector("#ae-orient-status");
-      if (!el) return;
-      if (!cfg.orientationGate) { el.textContent = "Disabled — predictions ignore orientation."; return; }
-      const N = signals.punches.length;
-      const sideways = signals.punches.filter(p => p.orientation_sideways).length;
-      const unknown = signals.punches.filter(p => p.orientation_deg == null).length;
-      el.textContent = `${sideways}/${N} punches sideways · ${unknown} with unknown orientation (predicted "skip").`;
-    };
-    const orientToggle = host.querySelector("#ae-orient-toggle");
-    const orientMin    = host.querySelector("#ae-orient-min");
-    const orientMinOut = host.querySelector("#ae-orient-min-out");
-    const orientMax    = host.querySelector("#ae-orient-max");
-    const orientMaxOut = host.querySelector("#ae-orient-max-out");
-    const orientMinRow = host.querySelector("#ae-orient-min-row");
-    const orientMaxRow = host.querySelector("#ae-orient-max-row");
-    if (orientToggle) {
-      orientToggle.addEventListener("change", () => {
-        cfg.orientationGate = orientToggle.checked;
-        if (orientMin) orientMin.disabled = !cfg.orientationGate;
-        if (orientMax) orientMax.disabled = !cfg.orientationGate;
-        if (orientMinRow) orientMinRow.style.opacity = cfg.orientationGate ? 1 : 0.5;
-        if (orientMaxRow) orientMaxRow.style.opacity = cfg.orientationGate ? 1 : 0.5;
+    if (axialSlider) {
+      axialSlider.addEventListener("input", () => {
+        cfg.axialityMax = Number(axialSlider.value);
+        axialOut.textContent = cfg.axialityMax.toFixed(2);
+        if (!cfg.axialityGate) return;
         for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
-        updateOrientStatus();
-        state.requestDraw?.();
+        updateAxialStatus();
+        window.__viewerRedraw?.();
       });
     }
-    if (orientMin) {
-      orientMin.addEventListener("input", () => {
-        cfg.orientationMinAbsDeg = Number(orientMin.value);
-        orientMinOut.textContent = `${cfg.orientationMinAbsDeg}°`;
-        for (const p of signals.punches) rescorePunch(p, cfg);
-        renderPunchTable();
-        renderAggregate();
-        updateOrientStatus();
-        state.requestDraw?.();
-      });
-    }
-    if (orientMax) {
-      orientMax.addEventListener("input", () => {
-        cfg.orientationMaxAbsDeg = Number(orientMax.value);
-        orientMaxOut.textContent = `${cfg.orientationMaxAbsDeg}°`;
-        for (const p of signals.punches) rescorePunch(p, cfg);
-        renderPunchTable();
-        renderAggregate();
-        updateOrientStatus();
-        state.requestDraw?.();
-      });
-    }
-    updateOrientStatus();
+    updateAxialStatus();
 
     const updateCorrStatus = () => {
       const el = host.querySelector("#ae-corr-status");
@@ -406,20 +321,12 @@ export const ArmExtensionRule = {
     setMetric("ae-r-ratio", signals.ratioR[f], cfg);
     setText("ae-l-bend", formatBend(signals.bendL[f]));
     setText("ae-r-bend", formatBend(signals.bendR[f]));
-    setReach("ae-l-reach", signals.reachL[f], cfg);
-    setReach("ae-r-reach", signals.reachR[f], cfg);
+    setAxial("ae-l-axial", signals.axialityL[f], cfg);
+    setAxial("ae-r-axial", signals.axialityR[f], cfg);
     setText("ae-l-source", signals.sourceL[f] || "—");
     setText("ae-r-source", signals.sourceR[f] || "—");
   },
 };
-
-// Exposed so the "Straights review" lens can reuse the per-punch
-// compute pipeline without duplicating code.
-export const ARM_EXT_DEFAULTS = DEFAULTS;
-export function computeArmExtension(state, cfg) {
-  return computeAll(state, cfg);
-}
-export { predictedFacingAt, medianPredictedFacing };
 
 // ─── compute ───────────────────────────────────────────────────────────────
 
@@ -437,11 +344,24 @@ function computeAll(state, cfg) {
   // hip motion during a punch doesn't move the corrected shoulder around.
   const bodyAxis = cfg.shoulderCorrect ? bodyAxisOffset(pose, cfg) : null;
 
-  const armLengthL = armLengthFor(pose, "L", cfg, bodyAxis);
-  const armLengthR = armLengthFor(pose, "R", cfg, bodyAxis);
+  // Reach denominator: per-frame Euclidean torso (|sh_mid → hip_mid|). Torso
+  // scales with the boxer's distance to camera the same way the arm does, so
+  // dividing by it makes reach depth-motion invariant — round-median arm
+  // length (the old denominator) broke whenever the boxer stepped in or out.
+  // Same normalizer the stance_width rule uses, just per-frame.
+  const torsoEuclid = torsoEuclidPerFrame(pose, cfg);
 
-  const { ratio: ratioL, reach: reachL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis, armLengthL);
-  const { ratio: ratioR, reach: reachR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis, armLengthR);
+  const { ratio: ratioL, reach: reachL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis, torsoEuclid);
+  const { ratio: ratioR, reach: reachR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis, torsoEuclid);
+
+  // Axiality — the sideways gate. Computed on the RAW Vision skeleton so the
+  // numbers match the standalone forearm-axiality lens exactly (it runs on
+  // state.pose with MIN_CONF 0.30 and F0 = 90th-pct ratio). Falls back to the
+  // verdict pose only for legacy rounds with no raw-Vision cache. These are
+  // per-frame arrays; each punch medians them over its peak ± APEX_HALF below.
+  const axPose = state.pose || pose;
+  const axialL = computeForearmAxiality(axPose, "L");
+  const axialR = computeForearmAxiality(axPose, "R");
 
   // Labelled punches — filtered to straights, with optional rule_extension
   // verdict for agreement scoring.
@@ -459,12 +379,13 @@ function computeAll(state, cfg) {
     const reachArr = side === "L" ? reachL : reachR;
     const bendArr  = side === "L" ? bendL : bendR;
     const srcArr   = side === "L" ? sourceL : sourceR;
+    const axArm    = side === "L" ? axialL : axialR;
 
     // Pick the peak frame as the most-extended one in the window — that's
     // the moment of "full extension" that drives the verdict. Prefer max
     // reach (|sh→wr|/arm_length); fall back to max r (straightness) when
     // arm_length is unknown so reach is NaN.
-    let peakReachWin = -Infinity, minReachWin = Infinity;
+    let peakReachWin = -Infinity;
     let peakRWin = -Infinity, peakFrame = sf, gloveFrames = 0, validFrames = 0;
     let peakFrameByR = sf, peakFrameByReach = sf;
     for (let f = sf; f <= ef; f++) {
@@ -474,77 +395,18 @@ function computeAll(state, cfg) {
       if (srcArr[f] === "glove") gloveFrames++;
       if (r > peakRWin) { peakRWin = r; peakFrameByR = f; }
       const rea = reachArr[f];
-      if (Number.isFinite(rea)) {
-        if (rea > peakReachWin) { peakReachWin = rea; peakFrameByReach = f; }
-        if (rea < minReachWin)  minReachWin  = rea;
-      }
+      if (Number.isFinite(rea) && rea > peakReachWin) { peakReachWin = rea; peakFrameByReach = f; }
     }
     const peakValid = Number.isFinite(peakRWin);
     peakFrame = (peakReachWin > -Infinity) ? peakFrameByReach : peakFrameByR;
     const peak = peakValid ? ratioArr[peakFrame] : NaN;
     const peakReach = peakValid ? reachArr[peakFrame] : NaN;
-    // Travel: range of |sh→wr|/arm_length swept during the punch window.
-    // peak − min so static poses (no motion) read ≈ 0, even when reach is
-    // high. Robust to label boundaries that include retraction frames.
-    const peakTravel = (peakReachWin > -Infinity && minReachWin < Infinity)
-      ? (peakReachWin - minReachWin) : NaN;
-    // Facing-camera detection at the peak frame: both eyes + both ears
-    // above the conf threshold = boxer is roughly square to the camera,
-    // so the punch (especially straights) travels along the depth axis
-    // and 2D geometry can't reliably score it.
-    let frontalAtPeak = false;
-    if (peakValid) {
-      const c = cfg.frontalFaceConfMin;
-      frontalAtPeak =
-        pose.conf[peakFrame * 17 + J.L_EYE] >= c &&
-        pose.conf[peakFrame * 17 + J.R_EYE] >= c &&
-        pose.conf[peakFrame * 17 + J.L_EAR] >= c &&
-        pose.conf[peakFrame * 17 + J.R_EAR] >= c;
-    }
 
-    // Orientation gate. Prefer the window-median predicted facing — it's
-    // robust to per-frame pose noise the way 07_punch_directions uses it.
-    // Falls back to peak-frame prediction when median isn't computable.
-    // "Sideways enough" = |angle| inside [min, max] of cfg.
-    const orientationDeg = medianPredictedFacing(pose, sf, ef, stance)
-      ?? (peakValid ? predictedFacingAt(pose, peakFrame, stance) : null);
-    const orientationSideways = (orientationDeg != null) && (() => {
-      const a = Math.abs(orientationDeg);
-      return a >= cfg.orientationMinAbsDeg && a <= cfg.orientationMaxAbsDeg;
-    })();
-
-    // Conjunction predictor:
-    //   - "pass" only when geometry says straight AND wrist reached out
-    //     AND fighter was sideways
-    //   - "skip" when straight in 2D but reach is short = depth-foreshortened
-    //     (the punch travelled into/out of the camera, untrustworthy)
-    //   - "skip" when fighter wasn't sideways (orientation gate)
-    //   - "fail" when geometry says bent (regardless of reach)
-    //   - "unclear" when we can't compute anything
-    let predicted;
-    if (!peakValid) {
-      predicted = "unclear";
-    } else if (cfg.frontalExclude && frontalAtPeak) {
-      // Boxer was facing camera at peak — depth-sensitive geometry can't
-      // be trusted. Skip BEFORE looking at r/reach so the user sees a
-      // dedicated reason for the exclusion (the row will get a face icon).
-      predicted = "skip";
-    } else if (cfg.orientationGate && orientationDeg == null) {
-      // Gate is on but we couldn't determine orientation — treat as skip
-      // rather than guessing.
-      predicted = "skip";
-    } else if (cfg.orientationGate && !orientationSideways) {
-      // Fighter not sideways → straights travel along depth axis, ratio
-      // can't be trusted.
-      predicted = "skip";
-    } else if (peak < cfg.threshold) {
-      predicted = "fail";
-    } else if (cfg.reachEnabled && Number.isFinite(peakReach)
-               && peakReach < cfg.reachThreshold) {
-      predicted = "skip";
-    } else {
-      predicted = "pass";
-    }
+    // Forearm axiality at the peak frame, medianed over ±APEX_HALF (the same
+    // window the forearm-axiality lens aggregates). 0 = forearm flat across
+    // the image (side-on, bend trustworthy), 1 = down the camera axis
+    // (foreshortened). This is the only gate — see rescorePunch.
+    const peak_axiality = peakValid ? medianAxialityAround(axArm, peakFrame) : NaN;
 
     const label = d.rule_extension === "pass" || d.rule_extension === "fail"
       ? d.rule_extension : null;
@@ -565,7 +427,7 @@ function computeAll(state, cfg) {
       }
     }
 
-    return {
+    const p = {
       idx,
       timestamp: d.timestamp,
       t_abs: startSec + (Number.isFinite(d.timestamp) ? d.timestamp : 0),
@@ -579,86 +441,41 @@ function computeAll(state, cfg) {
       peak: peakValid ? peak : NaN,
       peak_bend_deg: peakValid ? bendArr[peakFrame] : NaN,
       peak_reach: peakValid ? peakReach : NaN,
-      peak_travel: peakValid ? peakTravel : NaN,
-      frontal_at_peak: frontalAtPeak,
-      orientation_deg: orientationDeg,
-      orientation_sideways: orientationSideways,
+      peak_axiality,
       glove_coverage: validFrames ? gloveFrames / validFrames : 0,
       peak_sh_conf: shConf,
       peak_el_conf: elConf,
       peak_wr_conf: wrConf,
       peak_wr_source: peakValid ? (srcArr[peakFrame] || "—") : "—",
-      predicted,
       label,
     };
+    // Single source of truth for predicted/reason — keeps re-score handlers
+    // (threshold sliders, gate toggles) consistent with first-pass scoring.
+    rescorePunch(p, cfg);
+    return p;
   });
 
   return {
-    ratioL, ratioR, reachL, reachR, bendL, bendR,
+    ratioL, ratioR, bendL, bendR,
+    axialityL: axialL.axiality, axialityR: axialR.axiality,
     sourceL, sourceR, punches, fps, bodyAxis,
-    armLengthL, armLengthR,
   };
 }
 
-// Ankle-arrow → predicted facing direction at a given frame.
-// Mirrors orientation_lens.js: orthodox arrow points R→L (toward front
-// foot), southpaw L→R. Both ankles must clear 0.30 conf.
-const MIN_ANKLE_CONF_GATE = 0.30;
-function predictedFacingAt(pose, frame, stance) {
-  if (!stance) return null;
-  const fit = STANCE_FITS[stance];
-  if (!fit) return null;
-  const cL = pose.conf[frame * 17 + J.L_ANKLE];
-  const cR = pose.conf[frame * 17 + J.R_ANKLE];
-  if (cL < MIN_ANKLE_CONF_GATE || cR < MIN_ANKLE_CONF_GATE) return null;
-  const lx = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2];
-  const ly = pose.skeleton[(frame * 17 + J.L_ANKLE) * 2 + 1];
-  const rx = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2];
-  const ry = pose.skeleton[(frame * 17 + J.R_ANKLE) * 2 + 1];
-  if (![lx, ly, rx, ry].every(Number.isFinite)) return null;
-  const orthodox = stance !== "southpaw";
-  const dx = orthodox ? (lx - rx) : (rx - lx);
-  const dy = orthodox ? (ly - ry) : (ry - ly);
-  if (dx * dx + dy * dy < 1e-6) return null;
-  const arrowDeg = Math.atan2(dy, dx) * 180 / Math.PI;
-  // wrap180
-  let pred = fit.sign * arrowDeg + fit.offset_deg;
-  pred = ((pred + 180) % 360 + 360) % 360 - 180;
-  return pred;
-}
-
-// Median predicted facing across the punch window — same robustness trick
-// 07_punch_directions uses for the ankle arrow itself. Returns null when
-// fewer than 3 frames pass the conf gate.
-function medianPredictedFacing(pose, sf, ef, stance) {
-  if (!stance) return null;
-  const fit = STANCE_FITS[stance];
-  if (!fit) return null;
-  const dxs = [], dys = [];
-  for (let f = sf; f <= ef; f++) {
-    const cL = pose.conf[f * 17 + J.L_ANKLE];
-    const cR = pose.conf[f * 17 + J.R_ANKLE];
-    if (cL < MIN_ANKLE_CONF_GATE || cR < MIN_ANKLE_CONF_GATE) continue;
-    const lx = pose.skeleton[(f * 17 + J.L_ANKLE) * 2];
-    const ly = pose.skeleton[(f * 17 + J.L_ANKLE) * 2 + 1];
-    const rx = pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
-    const ry = pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
-    if (![lx, ly, rx, ry].every(Number.isFinite)) continue;
-    const orthodox = stance !== "southpaw";
-    dxs.push(orthodox ? (lx - rx) : (rx - lx));
-    dys.push(orthodox ? (ly - ry) : (ry - ly));
+// Median of valid per-frame axiality over [apex-APEX_HALF, apex+APEX_HALF] —
+// the same window the forearm-axiality lens uses. `ax` is the object returned
+// by computeForearmAxiality ({ axiality, valid, ... }); falls back to the apex
+// value alone when no valid neighbour exists.
+function medianAxialityAround(ax, apex) {
+  const vals = [];
+  for (let f = apex - APEX_HALF; f <= apex + APEX_HALF; f++) {
+    if (f < 0 || f >= ax.axiality.length) continue;
+    if (ax.valid[f] && Number.isFinite(ax.axiality[f])) vals.push(ax.axiality[f]);
   }
-  if (dxs.length < 3) return null;
-  dxs.sort((a, b) => a - b);
-  dys.sort((a, b) => a - b);
-  const mid = Math.floor(dxs.length / 2);
-  const mdx = dxs.length % 2 ? dxs[mid] : 0.5 * (dxs[mid - 1] + dxs[mid]);
-  const mdy = dys.length % 2 ? dys[mid] : 0.5 * (dys[mid - 1] + dys[mid]);
-  if (mdx * mdx + mdy * mdy < 1e-6) return null;
-  const arrowDeg = Math.atan2(mdy, mdx) * 180 / Math.PI;
-  let pred = fit.sign * arrowDeg + fit.offset_deg;
-  pred = ((pred + 180) % 360 + 360) % 360 - 180;
-  return pred;
+  if (!vals.length) return Number.isFinite(ax.axiality[apex]) ? ax.axiality[apex] : NaN;
+  vals.sort((a, b) => a - b);
+  const m = vals.length >> 1;
+  return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
 }
 
 function bodyAxisOffset(pose, cfg) {
@@ -713,7 +530,7 @@ function shoulderXY(pose, frame, joints, cfg, bodyAxis) {
   };
 }
 
-function perFrameRatio(pose, side, cfg, bodyAxis, armLength) {
+function perFrameRatio(pose, side, cfg, bodyAxis, torsoEuclid) {
   const N = pose.n_frames;
   const joints = JOINTS_FOR_SIDE[side];
   const ratio  = new Float32Array(N);
@@ -745,10 +562,14 @@ function perFrameRatio(pose, side, cfg, bodyAxis, armLength) {
     // Bounded [0,1]. Clamp tiny float overshoots that can happen when the
     // wrist is collinear with shoulder–elbow.
     ratio[f] = Math.min(1, sw / path);
-    // Reach: |shoulder→wrist| / arm_length. 1.0 = wrist as far from shoulder
-    // as the round's full arm reach. Low values on apparently-straight
-    // arms indicate depth foreshortening (punch into/out of the camera).
-    reach[f] = (armLength && armLength > 0) ? (sw / armLength) : NaN;
+    // Reach: |shoulder→wrist| / euclidean torso (per-frame). Torso scales
+    // with the boxer's distance to camera the same way the arm does, so
+    // depth motion cancels out. Typical full extension lands ≈1.8–2.5
+    // torsos; depth-foreshortened punches drop below ~1.0 even though r
+    // still reads near 1.0. NaN when the torso conf gate (both shoulders
+    // + both hips) rejected this frame.
+    const t = torsoEuclid[f];
+    reach[f] = (Number.isFinite(t) && t > 0) ? (sw / t) : NaN;
 
     // Exact elbow angle from law of cosines — handles uneven upper-arm /
     // forearm lengths (the sin(θ/2) approximation in ratio_to_bend_deg
@@ -760,39 +581,39 @@ function perFrameRatio(pose, side, cfg, bodyAxis, armLength) {
   return { ratio, reach, bendDeg, source };
 }
 
-function armLengthFor(pose, side, cfg, bodyAxis) {
-  // Round-stable estimate of the boxer's full arm length, in pixels.
-  // We measure each segment independently — both segments don't have to
-  // be high-conf in the same frame, which would discard a lot.
+// Per-frame Euclidean torso length, |shoulder_mid → hip_mid|. Returns a
+// Float32Array of length N with NaN for frames where any of the four
+// torso joints (both shoulders + both hips) fails the conf gate. Drives
+// the reach metric — same normalizer convention stance_width uses, just
+// computed every frame instead of round-medianed.
+function torsoEuclidPerFrame(pose, cfg) {
   const N = pose.n_frames;
-  const joints = JOINTS_FOR_SIDE[side];
-  const ueArr = [], faArr = [];
+  const out = new Float32Array(N);
+  const gate = cfg.minPoseConf;
   for (let f = 0; f < N; f++) {
-    const sc = pose.conf[f * 17 + joints.shoulder];
-    const ec = pose.conf[f * 17 + joints.elbow];
-    if (sc >= cfg.minPoseConf && ec >= cfg.minPoseConf) {
-      const sh = shoulderXY(pose, f, joints, cfg, bodyAxis);
-      const ex = pose.skeleton[(f * 17 + joints.elbow) * 2];
-      const ey = pose.skeleton[(f * 17 + joints.elbow) * 2 + 1];
-      const ue = Math.hypot(sh.x - ex, sh.y - ey);
-      if (Number.isFinite(ue)) ueArr.push(ue);
+    const cLs = pose.conf[f * 17 + J.L_SHOULDER];
+    const cRs = pose.conf[f * 17 + J.R_SHOULDER];
+    const cLh = pose.conf[f * 17 + J.L_HIP];
+    const cRh = pose.conf[f * 17 + J.R_HIP];
+    if (cLs < gate || cRs < gate || cLh < gate || cRh < gate) {
+      out[f] = NaN; continue;
     }
-    if (ec >= cfg.minPoseConf) {
-      const w = wristXY(pose, f, joints, cfg);
-      if (w) {
-        const ex = pose.skeleton[(f * 17 + joints.elbow) * 2];
-        const ey = pose.skeleton[(f * 17 + joints.elbow) * 2 + 1];
-        const fa = Math.hypot(ex - w.x, ey - w.y);
-        if (Number.isFinite(fa)) faArr.push(fa);
-      }
+    const lsx = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2];
+    const lsy = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2 + 1];
+    const rsx = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2];
+    const rsy = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2 + 1];
+    const lhx = pose.skeleton[(f * 17 + J.L_HIP) * 2];
+    const lhy = pose.skeleton[(f * 17 + J.L_HIP) * 2 + 1];
+    const rhx = pose.skeleton[(f * 17 + J.R_HIP) * 2];
+    const rhy = pose.skeleton[(f * 17 + J.R_HIP) * 2 + 1];
+    if (![lsx, lsy, rsx, rsy, lhx, lhy, rhx, rhy].every(Number.isFinite)) {
+      out[f] = NaN; continue;
     }
+    const shMidX = 0.5 * (lsx + rsx), shMidY = 0.5 * (lsy + rsy);
+    const hipMidX = 0.5 * (lhx + rhx), hipMidY = 0.5 * (lhy + rhy);
+    out[f] = Math.hypot(shMidX - hipMidX, shMidY - hipMidY);
   }
-  if (ueArr.length < 10 || faArr.length < 10) return null;
-  const median = arr => {
-    const s = [...arr].sort((a, b) => a - b);
-    return s[Math.floor(s.length / 2)];
-  };
-  return median(ueArr) + median(faArr);
+  return out;
 }
 
 function wristXY(pose, frame, joints, cfg) {
@@ -863,7 +684,7 @@ function renderTemplate(sig, cfg) {
         <div class="metric-val" id="ae-l-ratio">—</div>
         <div class="metric-sub">
           <span id="ae-l-bend">—</span> ·
-          reach <span id="ae-l-reach">—</span> ·
+          axial <span id="ae-l-axial">—</span> ·
           <span id="ae-l-source">—</span>
         </div>
       </div>
@@ -872,7 +693,7 @@ function renderTemplate(sig, cfg) {
         <div class="metric-val" id="ae-r-ratio">—</div>
         <div class="metric-sub">
           <span id="ae-r-bend">—</span> ·
-          reach <span id="ae-r-reach">—</span> ·
+          axial <span id="ae-r-axial">—</span> ·
           <span id="ae-r-source">—</span>
         </div>
       </div>
@@ -885,74 +706,29 @@ function renderTemplate(sig, cfg) {
       <span class="muted small">peak ratio r — geometric straightness</span>
     </div>
 
-    <h3>Orientation gate (sideways only)</h3>
+    <h3>Axiality gate (sideways only)</h3>
     <p class="hint">
-      Predicted facing direction (from the orientation model on ankle arrow)
-      must satisfy <code>${cfg.orientationMinAbsDeg}° ≤ |angle| ≤ ${cfg.orientationMaxAbsDeg}°</code>
-      at the punch window for the verdict to count. Straights travelling
-      along the depth axis can't be scored from 2D geometry — those punches
-      get a <b>skip</b>. (0° = facing camera, ±90° = sideways, ±180° = facing away.)
+      Bend is read in 2D, so it's only trustworthy when the punch travels
+      across the image plane. Forearm <b>axiality</b> (0 = flat across the
+      image / side-on, 1 = pointing straight down the camera axis) measures
+      that foreshortening — reused from the forearm-axiality lens (raw Vision
+      skeleton, medianed over the peak ±${APEX_HALF} frames). Punches whose peak
+      axiality is <em>above</em> the cut are too head-on to judge and get a
+      <b>skip</b>. The signal is magnitude-only, so one upper cut covers both
+      toward- and away-camera punches; the default ≈0.71 keeps the forearm
+      within ±45° of the image plane.
     </p>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <input type="checkbox" id="ae-orient-toggle" ${cfg.orientationGate ? 'checked' : ''} />
-      <span>Enable orientation gate</span>
+      <input type="checkbox" id="ae-axial-toggle" ${cfg.axialityGate ? 'checked' : ''} />
+      <span>Enable axiality gate</span>
     </label>
-    <div class="slider-row" style="opacity:${cfg.orientationGate ? 1 : 0.5}" id="ae-orient-min-row">
-      <input type="range" id="ae-orient-min" min="0" max="180" step="5"
-        value="${cfg.orientationMinAbsDeg}" ${cfg.orientationGate ? '' : 'disabled'} />
-      <output id="ae-orient-min-out">${cfg.orientationMinAbsDeg}°</output>
-      <span class="muted small">min |angle| (lower bound — exclude facing-camera)</span>
+    <div class="slider-row" style="opacity:${cfg.axialityGate ? 1 : 0.5}" id="ae-axial-slider-row">
+      <input type="range" id="ae-axial-max" min="0.30" max="1.00" step="0.01"
+        value="${cfg.axialityMax}" ${cfg.axialityGate ? '' : 'disabled'} />
+      <output id="ae-axial-max-out">${cfg.axialityMax.toFixed(2)}</output>
+      <span class="muted small">max peak axiality (lower = stricter / demand more side-on; 0.71 ≈ 45°)</span>
     </div>
-    <div class="slider-row" style="opacity:${cfg.orientationGate ? 1 : 0.5}" id="ae-orient-max-row">
-      <input type="range" id="ae-orient-max" min="0" max="180" step="5"
-        value="${cfg.orientationMaxAbsDeg}" ${cfg.orientationGate ? '' : 'disabled'} />
-      <output id="ae-orient-max-out">${cfg.orientationMaxAbsDeg}°</output>
-      <span class="muted small">max |angle| (upper bound — exclude facing-away)</span>
-    </div>
-    <p class="hint muted small" id="ae-orient-status" style="margin:4px 0 0 0">—</p>
-
-    <h3>Facing-camera exclusion</h3>
-    <p class="hint">
-      When all four face keypoints (both eyes + both ears) clear the
-      confidence threshold at the punch's <em>peak</em> frame, the boxer
-      is squared to the camera and the punch travels along the depth
-      axis. 2D geometry can't score it, so the prediction is forced to
-      <b>skip</b> regardless of <code>r</code> and <code>reach</code>.
-      (One ear hides behind the head as soon as the boxer rotates past
-      ~45°, so this catches the front-facing case cleanly.)
-    </p>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <input type="checkbox" id="ae-frontal-toggle" ${cfg.frontalExclude ? 'checked' : ''} />
-      <span>Exclude facing-camera punches</span>
-    </label>
-    <div class="slider-row" style="opacity:${cfg.frontalExclude ? 1 : 0.5}" id="ae-frontal-slider-row">
-      <input type="range" id="ae-frontal-conf" min="0.05" max="0.95" step="0.05"
-        value="${cfg.frontalFaceConfMin}" ${cfg.frontalExclude ? '' : 'disabled'} />
-      <output id="ae-frontal-conf-out">${cfg.frontalFaceConfMin.toFixed(2)}</output>
-      <span class="muted small">conf threshold for all four face keypoints</span>
-    </div>
-    <p class="hint muted small" id="ae-frontal-status" style="margin:4px 0 0 0">—</p>
-
-    <h3>Reach gate (depth)</h3>
-    <p class="hint">
-      Foreshortening: when a punch travels into/out of the camera, the
-      shoulder/elbow/wrist project onto roughly the same image-plane line,
-      so <code>r</code> reads near 1.0 even on a bent arm.
-      Reach = <code>|shoulder→wrist| / arm_length</code> measures how far
-      the wrist actually got from the shoulder in 2D, normalised by the
-      boxer's full arm reach. Low reach + high <code>r</code> = depth-
-      foreshortened punch → predicted <b>skip</b> instead of pass/fail.
-    </p>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <input type="checkbox" id="ae-reach-toggle" ${cfg.reachEnabled ? 'checked' : ''} />
-      <span>Enable reach gate</span>
-    </label>
-    <div class="slider-row" style="opacity:${cfg.reachEnabled ? 1 : 0.5}" id="ae-reach-slider-row">
-      <input type="range" id="ae-reach-threshold" min="0.30" max="1.00" step="0.01" value="${cfg.reachThreshold}" ${cfg.reachEnabled ? '' : 'disabled'} />
-      <output id="ae-reach-threshold-out">${cfg.reachThreshold.toFixed(2)}</output>
-      <span class="muted small">peak reach below this → depth-skipped</span>
-    </div>
-    <p class="hint muted small" id="ae-arm-status" style="margin:4px 0 0 0">—</p>
+    <p class="hint muted small" id="ae-axial-status" style="margin:4px 0 0 0">—</p>
 
     <h3>Confidence gates</h3>
     <p class="hint">
@@ -1038,9 +814,7 @@ function renderPunchTable() {
   const tbody = signals.punches.length
     ? signals.punches.map(p => {
         const tsStr   = Number.isFinite(p.t_abs) ? p.t_abs.toFixed(2) : "—";
-        const frontalIcon = (cfg.frontalExclude && p.frontal_at_peak)
-          ? ' <span title="boxer was facing camera at peak frame">👁</span>' : '';
-        const predCell = pill(p.predicted, "pred") + frontalIcon;
+        const predCell = pill(p.predicted, "pred");
         // Agreement marker against GT — only meaningful when GT exists
         let match = "";
         if (p.label && p.predicted !== "unclear") {
@@ -1050,35 +824,40 @@ function renderPunchTable() {
         }
         const bendStr = Number.isFinite(p.peak_bend_deg)
           ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
-        // Reach cell — colored by pass/fail against the reach threshold,
-        // but only when the gate is on. Greyed when disabled.
-        let reachCell;
-        if (!Number.isFinite(p.peak_reach)) {
-          reachCell = `<td class="muted">—</td>`;
+        // Axiality cell — the gate signal. Green = side-on enough to trust
+        // bend (≤ cut), red = too head-on (skipped). Greyed when the gate is
+        // off.
+        let axialCell;
+        if (!Number.isFinite(p.peak_axiality)) {
+          axialCell = `<td class="muted">—</td>`;
         } else {
-          const col = !cfg.reachEnabled ? "var(--muted, #888)"
-                    : (p.peak_reach >= cfg.reachThreshold) ? COLORS.pass
+          const col = !cfg.axialityGate ? "var(--muted, #888)"
+                    : (p.peak_axiality <= cfg.axialityMax) ? COLORS.pass
                     : COLORS.fail;
-          reachCell = `<td style="color:${col};font-variant-numeric:tabular-nums">${p.peak_reach.toFixed(2)}</td>`;
+          axialCell = `<td style="color:${col};font-variant-numeric:tabular-nums">${p.peak_axiality.toFixed(2)}</td>`;
         }
-        // Travel cell — no threshold/coloring yet, observation only.
-        const travelStr = Number.isFinite(p.peak_travel)
-          ? p.peak_travel.toFixed(2) : "—";
-        const travelCell = `<td style="font-variant-numeric:tabular-nums" class="muted">${travelStr}</td>`;
+        // Reach cell — context only now (no longer a gate), always muted.
+        const reachCell = Number.isFinite(p.peak_reach)
+          ? `<td class="muted" style="font-variant-numeric:tabular-nums">${p.peak_reach.toFixed(2)}</td>`
+          : `<td class="muted">—</td>`;
+        const reasonCode = p.reason || "—";
+        const reasonText = (p.reason_text || "").replace(/"/g, '&quot;');
+        const reasonCell = `<td class="muted small" title="${reasonText}" style="white-space:nowrap">${reasonCode}</td>`;
         return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
           <td>${predCell}</td>
           <td style="text-align:center">${match}</td>
+          ${reasonCell}
           <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
+          ${axialCell}
           ${reachCell}
-          ${travelCell}
           ${confCell(p.peak_sh_conf)}
           ${confCell(p.peak_el_conf)}
           ${confCell(p.peak_wr_conf)}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="10" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="11" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
@@ -1101,9 +880,10 @@ function renderPunchTable() {
       <table class="rule-table">
         <thead><tr>
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
+          <th title="which gate decided this punch — hover for the numbers that fired it (e.g. r=0.87 < 0.95)">why</th>
           <th>bend</th>
-          <th title="peak reach = |sh→wr| / arm_length at peak frame — high means the wrist ENDED far from the shoulder in 2D (mine)">reach</th>
-          <th title="travel = (peak − min) of reach during the punch window — high means the hand SWEPT a big arc in 2D (yours)">travel</th>
+          <th title="peak forearm axiality (0 = side-on, 1 = down the camera axis) — the gate. Above the cut → skipped as too head-on to judge bend">axiality</th>
+          <th title="peak reach = |sh→wr| / euclidean torso at peak frame — context only, no longer a gate (units: torsos)">reach</th>
           <th title="shoulder confidence at peak frame">sh</th>
           <th title="elbow confidence at peak frame">el</th>
           <th title="wrist confidence at peak frame — glove if used, pose if fallback">wr</th>
@@ -1123,7 +903,10 @@ function renderAggregate() {
   }
   const meanPeak = ps.reduce((s, p) => s + p.peak, 0) / ps.length;
   const passed = ps.filter(p => p.predicted === "pass").length;
-  const labelled = ps.filter(p => p.label);
+  const skipped = signals.punches.filter(p => p.predicted === "skip").length;
+  // Agreement is only meaningful on punches the gate actually scored
+  // (pass/fail) — skipped punches have no comparable verdict.
+  const labelled = ps.filter(p => p.label && p.predicted !== "skip");
   const agree = labelled.filter(p => p.label === p.predicted).length;
   const agreePct = labelled.length
     ? `${Math.round(100 * agree / labelled.length)}%`
@@ -1137,7 +920,12 @@ function renderAggregate() {
     <div class="metric">
       <div class="metric-label">predicted pass</div>
       <div class="metric-val">${passed}</div>
-      <div class="metric-sub">${Math.round(100 * passed / ps.length)}% reach ≥ ${cfg.threshold.toFixed(2)}</div>
+      <div class="metric-sub">${Math.round(100 * passed / ps.length)}% · r ≥ ${cfg.threshold.toFixed(2)}</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">skipped (axial)</div>
+      <div class="metric-val">${skipped}</div>
+      <div class="metric-sub">too head-on to judge</div>
     </div>
     <div class="metric">
       <div class="metric-label">mean peak r</div>
@@ -1146,7 +934,7 @@ function renderAggregate() {
     <div class="metric">
       <div class="metric-label">label agreement</div>
       <div class="metric-val">${agreePct}</div>
-      <div class="metric-sub">${agree} / ${labelled.length} match</div>
+      <div class="metric-sub">${agree} / ${labelled.length} match (scored only)</div>
     </div>
   `;
 }
@@ -1213,22 +1001,52 @@ function drawArmGhost(ctx, pose, frame, side, cfg, scale) {
 }
 
 function rescorePunch(p, cfg) {
-  // Mirrors the conjunction in computeAll. Used by UI handlers that
-  // change config bits which don't require a per-frame recompute.
-  if (!Number.isFinite(p.peak)) { p.predicted = "unclear"; return; }
-  if (cfg.frontalExclude && p.frontal_at_peak) { p.predicted = "skip"; return; }
-  if (cfg.orientationGate) {
-    if (p.orientation_deg == null) { p.predicted = "skip"; return; }
-    const a = Math.abs(p.orientation_deg);
-    const sideways = a >= cfg.orientationMinAbsDeg && a <= cfg.orientationMaxAbsDeg;
-    p.orientation_sideways = sideways;
-    if (!sideways) { p.predicted = "skip"; return; }
+  // Single source of truth for the verdict — also called from computeAll
+  // so reason + predicted always stay in sync. The verdict is BEND ALONE;
+  // axiality is the only gate (it just decides whether bend can be trusted).
+  //   p.predicted   "pass" | "fail" | "skip" | "unclear"
+  //   p.reason      short code (one of the branches below)
+  //   p.reason_text human-readable with the actual numbers that fired it
+  if (!Number.isFinite(p.peak)) {
+    p.predicted = "unclear";
+    p.reason = "no_peak";
+    p.reason_text = "no valid peak frame (joints below conf gates throughout window)";
+    return;
   }
-  if (p.peak < cfg.threshold) { p.predicted = "fail"; return; }
-  if (cfg.reachEnabled && Number.isFinite(p.peak_reach) && p.peak_reach < cfg.reachThreshold) {
-    p.predicted = "skip"; return;
+  // Axiality gate — the only gate. Bend is read in 2D, so it's only
+  // trustworthy when the forearm travels across the image plane. Axiality is
+  // magnitude-only (0 = flat/side-on, 1 = down the camera axis), so a single
+  // upper cut covers both toward- and away-camera foreshortening. Punches
+  // above the cut are too head-on to judge → skip.
+  if (cfg.axialityGate) {
+    if (!Number.isFinite(p.peak_axiality)) {
+      p.predicted = "skip";
+      p.reason = "axial_unknown";
+      p.reason_text = "couldn't measure forearm axiality (elbow/wrist/torso below conf gate near peak)";
+      return;
+    }
+    if (p.peak_axiality > cfg.axialityMax) {
+      p.predicted = "skip";
+      p.reason = "axial";
+      const offDeg = Math.acos(Math.max(0, Math.min(1, p.peak_axiality))) * 180 / Math.PI;
+      p.reason_text = `foreshortened: axiality ${p.peak_axiality.toFixed(2)} > ${cfg.axialityMax.toFixed(2)} (forearm ~${offDeg.toFixed(0)}° from camera axis, need ≥45°)`;
+      return;
+    }
+  }
+  // Verdict = elbow straightness alone.
+  if (p.peak < cfg.threshold) {
+    p.predicted = "fail";
+    p.reason = "bent";
+    const bend = Number.isFinite(p.peak_bend_deg) ? `${p.peak_bend_deg.toFixed(0)}°` : "—";
+    p.reason_text = `elbow bent: r=${p.peak.toFixed(2)} < ${cfg.threshold.toFixed(2)} (bend ${bend})`;
+    return;
   }
   p.predicted = "pass";
+  p.reason = "ok";
+  const axPart = (cfg.axialityGate && Number.isFinite(p.peak_axiality))
+    ? `, axiality ${p.peak_axiality.toFixed(2)} ≤ ${cfg.axialityMax.toFixed(2)}`
+    : "";
+  p.reason_text = `r=${p.peak.toFixed(2)} ≥ ${cfg.threshold.toFixed(2)}${axPart}`;
 }
 
 function activePunchAt(punches, frame) {
@@ -1255,8 +1073,9 @@ function drawVerdictHud(ctx, punch, scale, pose) {
   const labelTxt = punch.label ? `GT:   ${punch.label}` : "GT:   —";
   const predTxt  = `pred: ${punch.predicted}`;
   const peakTxt  = Number.isFinite(punch.peak)
-    ? `peak r ${punch.peak.toFixed(3)}` + (Number.isFinite(punch.peak_bend_deg)
-        ? `  ·  bend ${punch.peak_bend_deg.toFixed(1)}°` : "")
+    ? `peak r ${punch.peak.toFixed(3)}`
+      + (Number.isFinite(punch.peak_bend_deg) ? `  ·  bend ${punch.peak_bend_deg.toFixed(1)}°` : "")
+      + (Number.isFinite(punch.peak_axiality) ? `  ·  ax ${punch.peak_axiality.toFixed(2)}` : "")
     : null;
   const hand     = `${punch.hand} ${punch.punch_type}`;
   const agreeSym = punch.label && punch.predicted !== "unclear"
@@ -1515,12 +1334,13 @@ function setMetric(id, ratio, cfg) {
   el.style.color = ratio >= cfg.threshold ? COLORS.pass : COLORS.fail;
 }
 
-function setReach(id, reach, cfg) {
+function setAxial(id, ax, cfg) {
   const el = host?.querySelector("#" + id);
   if (!el) return;
-  if (!Number.isFinite(reach)) { el.textContent = "—"; el.style.color = ""; return; }
-  el.textContent = reach.toFixed(2);
-  if (!cfg.reachEnabled) { el.style.color = "var(--muted, #888)"; return; }
-  el.style.color = reach >= cfg.reachThreshold ? COLORS.pass : COLORS.fail;
+  if (!Number.isFinite(ax)) { el.textContent = "—"; el.style.color = ""; return; }
+  el.textContent = ax.toFixed(2);
+  if (!cfg.axialityGate) { el.style.color = "var(--muted, #888)"; return; }
+  // Green when side-on enough to trust bend (≤ cut), red when too head-on.
+  el.style.color = ax <= cfg.axialityMax ? COLORS.pass : COLORS.fail;
 }
 

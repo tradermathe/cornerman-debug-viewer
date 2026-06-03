@@ -21,7 +21,7 @@ import {
   mid,
 } from "./forearm_axiality_core.js";
 
-// Straight punch labels (head + body). Matches straights_review.js.
+// Straight punch labels (head + body). Matches arm_extension.js appliesTo.
 const STRAIGHTS = new Set(["jab_head", "jab_body", "cross_head", "cross_body"]);
 
 // (hand, stance) -> anatomical side. Mirrors arm_extension.js SIDE_FOR.
@@ -37,7 +37,7 @@ const SIDE_J = {
 const MIN_CONF = 0.30;          // elbow / wrist confidence floor for a valid frame
 const TORSO_CONF = 0.20;        // shoulder / hip floor for a trustworthy ruler
 const DEPTH_LEAN_FACTOR = 0.80; // torso below this * running median = depth-lean flag
-const APEX_HALF = 2;            // apex aggregation window is apex +/- this many frames
+export const APEX_HALF = 2;     // apex aggregation window is apex +/- this many frames
 const F0_PCT = 90;              // flat forearm reference percentile
 
 // ── module state ────────────────────────────────────────────────────────────
@@ -74,7 +74,9 @@ function axColor(ax) {
 }
 
 // ── compute ─────────────────────────────────────────────────────────────────
-function computeSide(pose, side) {
+// Exported so the arm-extension lens can gate on the exact same axiality the
+// standalone lens shows (raw Vision elbow/wrist, MIN_CONF 0.30, F0 = 90th pct).
+export function computeSide(pose, side) {
   const n = pose.n_frames;
   const sj = SIDE_J[side];
   const forearm = new Float64Array(n).fill(NaN);

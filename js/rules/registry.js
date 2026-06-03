@@ -13,7 +13,6 @@
 import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
 import { ArmExtensionRule } from "./arm_extension.js";
-import { PunchDirectionRule } from "./punch_direction.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { WristSwapRule } from "./wrist_swap.js";
 import { CombinedCompareRule } from "./combined_compare.js";
@@ -22,10 +21,6 @@ import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationReviewRule } from "./hip_rotation_review.js";
 import { FacingDirectionRule } from "./facing_direction.js";
 import { Vision3DRule } from "./vision_3d.js";
-import { OrientationLabelerRule } from "./orientation_labeler.js";
-import { OrientationLensRule } from "./orientation_lens.js";
-import { PunchDirectionReviewRule } from "./punch_direction_review.js";
-import { StraightsReviewRule } from "./straights_review.js";
 import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
@@ -41,7 +36,6 @@ export const RULES = [
   AudioImpactLensRule,
   GuardDropRule,
   ArmExtensionRule,
-  PunchDirectionRule,
   EngineCompareRule,
   WristSwapRule,
   CombinedCompareRule,
@@ -50,10 +44,6 @@ export const RULES = [
   HipRotationReviewRule,
   FacingDirectionRule,
   Vision3DRule,
-  OrientationLabelerRule,
-  OrientationLensRule,
-  PunchDirectionReviewRule,
-  StraightsReviewRule,
   ForearmAxialityRule,
   AngleChangeRule,
 ];
