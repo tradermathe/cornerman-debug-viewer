@@ -351,6 +351,9 @@ async function tryAutoLoad(state) {
   // works for both raw Files and FileSystemFileHandles.
   const items = [];
   for (const [name, value] of files) {
+    // predictions_axiality_*.json belongs to the Forearm-axiality lens (a flat
+    // per-uuid map, no `rounds`); skip it so it doesn't shadow a classifier dump.
+    if (/^predictions_axiality_/i.test(name)) continue;
     let file;
     if (value instanceof File) file = value;
     else if (typeof value?.getFile === "function") {

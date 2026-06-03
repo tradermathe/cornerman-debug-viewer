@@ -20,6 +20,13 @@ import {
   runningMedian,
   mid,
 } from "./forearm_axiality_core.js";
+import {
+  ensureAxialityModel,
+  axialityForPunch,
+  axialityModelMeta,
+  axialityModelError,
+  axialityBucketName,
+} from "./axiality_model.js";
 
 // Straight punch labels (head + body). Matches arm_extension.js appliesTo.
 const STRAIGHTS = new Set(["jab_head", "jab_body", "cross_head", "cross_body"]);
@@ -69,6 +76,25 @@ function fmtDeg(ax) {
   return `${Math.round(Math.acos(Math.max(0, Math.min(1, ax))) * 180 / Math.PI)}°`;
 }
 function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Status line for the temporal-model sidecar: which file, how many punches it
+// scored, and the headline CV accuracy so the per-punch model column reads in
+// context. The geometric axiality is always shown regardless; the model column
+// is the learned overlay.
+function modelStatusHtml() {
+  const err = axialityModelError();
+  if (err) return `<span class="muted">temporal model: load error — ${err}</span>`;
+  const m = axialityModelMeta();
+  if (!m) {
+    return `<span class="muted">temporal model: no <code>predictions_axiality_*.json</code> in `
+      + `this folder — run <code>train_axiality_temporal.py</code> (it writes one next to the caches).</span>`;
+  }
+  const ens = m.metrics && m.metrics["TCN_FA (ours, 3-seed ensemble)"];
+  const pm1 = ens && Number.isFinite(ens.overall_pm1) ? ` · &plusmn;1 ${ens.overall_pm1.toFixed(2)}` : "";
+  const ex = ens && Number.isFinite(ens.overall_exact) ? ` · exact ${ens.overall_exact.toFixed(2)}` : "";
+  return `temporal model <code>${m.model}</code> · ${m.n} punches scored${pm1}${ex}<br>`
+    + `<span class="muted">held-out (out-of-fold) · ${m.file}</span>`;
+}
 
 // Color ramp for axiality: blue (across, 0) -> green (mid) -> orange (toward, 1).
 function axColor(ax) {
@@ -175,6 +201,7 @@ function buildPunches(state) {
         BApex: apex >= 0 ? a.B[apex] : NaN,
         axialityPunch: apex >= 0 ? medianAxiality(side, apex) : NaN,
         dir: d.punch_direction || d.direction || null,
+        punch_uuid: d.punch_uuid || null,   // join key to the temporal model's preds
       };
     })
     .sort((x, y) => x.start_frame - y.start_frame);
@@ -193,6 +220,14 @@ function recompute(state) {
   lastLabels = state.labels;
   if (arms) buildPunches(state);
   else punches = [];
+}
+
+// Fires once when the temporal-model sidecar finishes loading (async), so the
+// table's model column and the canvas HUD refresh without waiting for the next
+// frame tick.
+function onModelReady() {
+  if (latestState) renderSidebar(latestState);
+  if (typeof window !== "undefined" && window.__viewerRedraw) window.__viewerRedraw();
 }
 
 // ── arm selection ───────────────────────────────────────────────────────────
@@ -294,6 +329,7 @@ function drawHud(ctx, state, side) {
   const ax = a.axiality[f];
   const p = activePunch(f);
   const inApex = p && p.apex >= 0 && Math.abs(f - p.apex) <= APEX_HALF;
+  const mp = p && p.punch_uuid ? axialityForPunch(p.punch_uuid) : null;
   const flags = [];
   if (a.lean[f]) flags.push("depth-lean");
   if (a.clamp[f]) flags.push("clamp");
@@ -307,8 +343,10 @@ function drawHud(ctx, state, side) {
     `forearm ${fmt0(a.forearm[f])}px · torso ${fmt0(a.torso[f])}px`,
     `ratio ${fmt(a.ratio[f])} · F0 ${fmt(a.F0.value)} · B ${fmt(a.B[f])}`,
     `el ${fmt(a.eConf[f])} · wr ${fmt(a.wConf[f])}`,
+    mp ? `model ${axialityBucketName(mp.predBucket)} ${fmt(mp.predAxiality)}` : "model —",
     flags.length ? `flags: ${flags.join(", ")}` : "flags: none",
   ];
+  const modelIdx = lines.length - 2;
 
   const fontPx = 14 * s, lineH = 20 * s, padX = 14 * s, padY = 10 * s;
   const x0 = 24 * s, y0 = 24 * s;
@@ -344,7 +382,8 @@ function drawHud(ctx, state, side) {
     }
     ctx.fillStyle = i === 1 ? axColor(ax)
       : i === 0 ? "rgba(255,255,255,0.92)"
-        : (i === lines.length - 1 && flags.length) ? "#f5b945" : "rgba(255,255,255,0.78)";
+        : i === modelIdx ? (mp ? axColor(mp.predAxiality) : "rgba(255,255,255,0.5)")
+          : (i === lines.length - 1 && flags.length) ? "#f5b945" : "rgba(255,255,255,0.78)";
     ctx.fillText(lines[i], x0 + padX, y);
     y += lineH;
   }
@@ -448,11 +487,14 @@ function buildSidebar() {
       down the lens (a straight toward or away). The <b>off-axis</b> column is
       the same thing in degrees (arccos): <b>90°</b> = fully side-on, <b>0°</b> =
       down the lens, with ~45° the cut for trusting 2D bend. Magnitude only,
-      straights only.
+      straights only. The <b>model</b> column is the trained temporal model's
+      held-out per-punch bucket — read it against the geometric value to see
+      where the learned estimator and the heuristic agree.
       The dashed <b>circle</b> is where the wrist would sit if the forearm were
       flat; the wrist pulled inward means foreshortened (axial).
     </p>
     <div id="fa-f0" class="hint" style="line-height:1.7;margin:8px 0;"></div>
+    <div id="fa-model" class="hint" style="line-height:1.7;margin:8px 0;"></div>
     <canvas id="fa-timeline" style="width:100%;height:120px;display:block;border-radius:6px;border:1px solid #222;"></canvas>
     <div id="fa-table" style="margin-top:12px;"></div>
     <p class="hint" style="margin-top:12px;font-size:11px;">
@@ -487,6 +529,9 @@ function renderSidebar(state) {
       + `R <code>${fmt(arms.R.F0.value)}</code> @f${arms.R.F0.index} (n${arms.R.F0.n})`;
   }
 
+  const modelEl = host.querySelector("#fa-model");
+  if (modelEl) modelEl.innerHTML = modelStatusHtml();
+
   const tbl = host.querySelector("#fa-table");
   if (tbl) {
     if (!punches.length) {
@@ -494,7 +539,12 @@ function renderSidebar(state) {
         ? `<span class="muted">No straights labeled in this round.</span>`
         : `<span class="muted">Waiting for label data…</span>`;
     } else {
-      const rows = punches.map((p, i) => `
+      const rows = punches.map((p, i) => {
+        const mp = axialityForPunch(p.punch_uuid);
+        const modelCell = mp
+          ? `<span style="color:${axColor(mp.predAxiality)};font-weight:600">${axialityBucketName(mp.predBucket)}</span> ${fmt(mp.predAxiality)}`
+          : `<span class="muted">—</span>`;
+        return `
         <tr data-i="${i}" style="cursor:pointer">
           <td>${p.hand || p.side}</td>
           <td>${p.punch_type}</td>
@@ -502,13 +552,15 @@ function renderSidebar(state) {
           <td style="text-align:right">${fmt(p.ratioApex)}</td>
           <td style="text-align:right;color:${axColor(p.axialityPunch)};font-weight:600">${fmt(p.axialityPunch)}</td>
           <td style="text-align:right;color:${axColor(p.axialityPunch)}">${fmtDeg(p.axialityPunch)}</td>
+          <td style="text-align:right">${modelCell}</td>
           <td>${p.dir || "—"}</td>
-        </tr>`).join("");
+        </tr>`;
+      }).join("");
       tbl.innerHTML = `
         <table style="width:100%;border-collapse:collapse;font-size:12px">
           <thead><tr style="color:#888;text-align:left">
             <th>arm</th><th>type</th><th style="text-align:right">apex</th>
-            <th style="text-align:right">ratio</th><th style="text-align:right">axiality</th><th style="text-align:right" title="off-axis angle = arccos(axiality); 90° = fully side-on, 0° = straight down the lens; ~45° is the cut for trusting 2D bend">off-axis</th><th>dir</th>
+            <th style="text-align:right">ratio</th><th style="text-align:right">axiality</th><th style="text-align:right" title="off-axis angle = arccos(axiality); 90° = fully side-on, 0° = straight down the lens; ~45° is the cut for trusting 2D bend">off-axis</th><th style="text-align:right" title="temporal model's held-out per-punch axiality: bucket name + |cos| value, joined by punch_uuid. — = the model never scored this punch (unlabeled / not in training set)">model</th><th>dir</th>
           </tr></thead><tbody>${rows}</tbody>
         </table>`;
       tbl.querySelectorAll("tr[data-i]").forEach(tr => {
@@ -542,7 +594,9 @@ export const ForearmAxialityRule = {
     host = _host;
     videoEl = document.getElementById("video");
     lastPose = null; lastLabels = null;
+    latestState = state;
     recompute(state);
+    ensureAxialityModel(state, onModelReady);
     buildSidebar();
     renderSidebar(state);
   },
@@ -550,6 +604,7 @@ export const ForearmAxialityRule = {
   update(state) {
     latestState = state;
     recompute(state);
+    ensureAxialityModel(state, onModelReady);
     renderSidebar(state);
   },
 
