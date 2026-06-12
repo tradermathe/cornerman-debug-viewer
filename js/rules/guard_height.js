@@ -9,12 +9,15 @@
 // where torso_height is the shoulder→hip distance (same normaliser
 // guard_drop.py uses), so the offset scales with the boxer's size and
 // distance from the camera instead of being a fixed pixel count.
-// Default targetOffset = 0.10 (~chin height); tune it with the slider.
+// Default targetOffset = 0.25: with glove tops at nose height the wrist
+// joint sits roughly a glove-length lower (0.10 was glove-top height, not
+// wrist height). Kept just above guard_drop's guard_low_threshold (0.30)
+// so "at target" here still counts as guard-up there. Tune with the slider.
 
 import { J, torsoHeight } from "../skeleton.js";
 
 const DEFAULTS = {
-  targetOffset: 0.10,          // fraction of torso height below the nose
+  targetOffset: 0.25,          // fraction of torso height below the nose
   minWristConfidence: 0.30,
 };
 
