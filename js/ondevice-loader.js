@@ -145,6 +145,14 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
       // null on v4 sidecars.
       sepRatiosCorrected: r.sep_ratios_corrected_b64 ? base64ToFloat32(r.sep_ratios_corrected_b64) : null,
       axisRatioSmoothed: r.axis_ratio_smoothed_b64 ? base64ToFloat32(r.axis_ratio_smoothed_b64) : null,
+      // pivot_rate v1: per-punch orientation samples + ratchet flags
+      // (mirrors the Python rule's details.per_punch), the per-frame
+      // ankle-orientation arrays the rule scored from (NaN where ankles
+      // unusable), and the short-circuit reason. null on other rules.
+      skipReason: r.skip_reason ?? null,
+      perPunch: Array.isArray(r.per_punch) ? r.per_punch : null,
+      orientationAngles: r.orientation_angle_b64 ? base64ToFloat32(r.orientation_angle_b64) : null,
+      orientationConfs: r.orientation_conf_b64 ? base64ToFloat32(r.orientation_conf_b64) : null,
     };
   }
 

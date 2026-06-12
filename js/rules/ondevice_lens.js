@@ -187,6 +187,71 @@ function buildStanceWidthBlock(sw, state) {
     </div>`;
 }
 
+function buildPivotRateBlock(pr, state) {
+  if (!pr) {
+    return `<p class="muted" style="margin-top:18px">No pivot_rate rule in this sidecar — record a fresh round with the latest build.</p>`;
+  }
+  const header = `
+    <h3 style="margin:18px 0 6px; font-size:14px">Pivot rate (change angles)
+      <span class="muted" style="font-size:11px">v${pr.version}</span>
+      <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(pr.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${pr.severity}</span>
+    </h3>`;
+
+  if (pr.skipReason) {
+    return `${header}
+      <div style="font-size:13px; line-height:1.6">
+        <span class="muted">Skipped: <code>${pr.skipReason}</code>
+        (${pr.extras.punchCount ?? 0} punches)</span>
+      </div>`;
+  }
+
+  const f = state.frame;
+  const frameAngle = pr.orientationAngles ? pr.orientationAngles[f] : NaN;
+  const x = pr.extras || {};
+  const rows = (pr.perPunch || []).map(p => {
+    const cls = p.fired_pivot ? "scored" : (p.used ? "unscored" : "skipped");
+    const angleTxt = p.angle_deg == null ? "—" : `${Number(p.angle_deg).toFixed(0)}°`;
+    return `
+      <tr class="${cls}" data-seek="${p.start_frame ?? 0}" style="cursor:pointer">
+        <td>${fmt(p.timestamp, 2)}s</td>
+        <td>${(p.punch_type || "?").replace(/_/g, " ")}</td>
+        <td>${p.hand || "?"}</td>
+        <td>${angleTxt}</td>
+        <td>${fmt(p.orientation_confidence, 2)}</td>
+        <td>${p.fired_pivot ? "★" : (p.used ? "" : `<span class="muted">${p.skip_reason}</span>`)}</td>
+      </tr>`;
+  }).join("");
+  const table = `
+    <details style="margin-top:6px">
+      <summary style="cursor:pointer">${(pr.perPunch || []).length} punch samples</summary>
+      <table class="sps-tbl" style="font-size:11px">
+        <thead><tr><th>t</th><th>Type</th><th>Hand</th><th>Angle</th><th>Conf</th><th>Fired</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>`;
+
+  return `${header}
+    <div style="font-size:13px; line-height:1.6">
+      pivots: <code>${x.pivotCount ?? "—"}</code> ·
+      sec/pivot: <code>${x.secPerPivot != null ? Number(x.secPerPivot).toFixed(1) : "—"} s</code><br>
+      <span class="muted">${x.validSampleCount ?? 0} / ${x.punchCount ?? 0} punches sampled · swing ≥ ${x.pivotSwingDegrees ?? "?"}°</span><br>
+      <em style="color:#ccc">${pr.coachCue || ""}</em><br>
+      <strong>frame ${f}:</strong> facing <code>${fmt(frameAngle, 1)}°</code>
+      ${table}
+    </div>`;
+}
+
+function wirePivotSeek() {
+  if (!host) return;
+  host.querySelectorAll("tr[data-seek]").forEach(tr => {
+    tr.addEventListener("click", () => {
+      const f = parseInt(tr.getAttribute("data-seek"), 10);
+      const slider = document.getElementById("scrubber");
+      if (slider) { slider.value = f; slider.dispatchEvent(new Event("input")); }
+    });
+  });
+}
+
 function renderSidebar(state) {
   if (!host) return;
   const el = host.querySelector("#ondev-state");
@@ -219,6 +284,9 @@ function renderSidebar(state) {
   // Stance width.
   const stanceHtml = buildStanceWidthBlock(a.rules.stance_width, state);
 
+  // Pivot rate (change angles).
+  const pivotHtml = buildPivotRateBlock(a.rules.pivot_rate, state);
+
   // DEPRECATED: legacy LogReg orientation, tucked into a collapsed details.
   const deprecatedBlock = a.orientation
     ? `<details style="margin-top:18px">
@@ -237,8 +305,10 @@ function renderSidebar(state) {
     ${ankleHeader}
     ${trustedBlock}
     ${stanceHtml}
+    ${pivotHtml}
     ${deprecatedBlock}
   `;
+  wirePivotSeek();
 }
 
 // Hip midpoint — same shape as orientation_lens.hipMid so the visual
@@ -277,8 +347,14 @@ function drawOrientationArrow(ctx, state) {
   const a = state.analysis;
   if (!a) return;
   const f = state.frame;
-  // Pick the trusted source if available; otherwise the legacy field.
-  const source = a.ankleOrientation || a.orientation;
+  // Pick the trusted source if available. Sidecars written after the
+  // 2026-06-02 telemetry retire have no ankle_orientation block — the
+  // same per-frame angles now ride inside rules.pivot_rate. Legacy
+  // LogReg is the last resort.
+  const pivotOrient = a.rules?.pivot_rate?.orientationAngles
+    ? { angles: a.rules.pivot_rate.orientationAngles }
+    : null;
+  const source = a.ankleOrientation || pivotOrient || a.orientation;
   if (!source) return;
   const angle = source.angles[f];
   if (!Number.isFinite(angle)) return;
