@@ -170,7 +170,11 @@ function medianSorted(xs) {
 
 // Full rule. Returns { result, debug } shaped like the Swift detectDebug:
 // result mirrors RuleResult, debug carries the per-frame intermediates.
-export function detectStanceWidth(skeleton, conf, nFrames, fps, config = DEFAULT_CONFIG) {
+//
+// `sepOverride` (experiment hook): per-frame sep-ratio array used instead of
+// the computed one — everything else (masks, counting, clips) is identical.
+// Omitted ⇒ exact port of the shipped rule.
+export function detectStanceWidth(skeleton, conf, nFrames, fps, config = DEFAULT_CONFIG, sepOverride = null) {
   const minValidFrames     = Math.max(1, Math.trunc(config.minValidSeconds     * fps));
   const minViolationFrames = Math.max(1, Math.trunc(config.minViolationSeconds * fps));
   const bridgeGapFrames    = Math.max(0, Math.trunc(config.bridgeGapSeconds    * fps));
@@ -192,10 +196,15 @@ export function detectStanceWidth(skeleton, conf, nFrames, fps, config = DEFAULT
   const lAnkle = config.requiredJoints[config.requiredJoints.length - 2];
   const rAnkle = config.requiredJoints[config.requiredJoints.length - 1];
 
-  const sepRatios = new Array(nFrames).fill(NaN);
-  for (let f = 0; f < nFrames; f++) {
-    if (frameTorsoHeight(skeleton, f) > 1e-6) {
-      sepRatios[f] = frameSepRatio(skeleton, f, lAnkle, rAnkle);
+  let sepRatios;
+  if (sepOverride) {
+    sepRatios = sepOverride.slice();
+  } else {
+    sepRatios = new Array(nFrames).fill(NaN);
+    for (let f = 0; f < nFrames; f++) {
+      if (frameTorsoHeight(skeleton, f) > 1e-6) {
+        sepRatios[f] = frameSepRatio(skeleton, f, lAnkle, rAnkle);
+      }
     }
   }
 
@@ -274,6 +283,20 @@ const COLOR_INVALID    = "#888";
 const COLOR_FRAME_MARK = "#3ad9e0";
 const COLOR_DX         = "#7ec8ff";  // horizontal ankle component
 const COLOR_DY         = "#ffd95c";  // vertical ankle component (depth proxy)
+const COLOR_CORRECTED  = "#e08aff";  // foreshortening-corrected sep / variant
+
+// Foreshortening-correction experiment: when the smoothed Δy/Δx ratio says
+// the stance line is depth-aligned, the measured sep underestimates the true
+// width — boost it before the rule logic runs. Ratio is smoothed with a
+// rolling MEDIAN so single-frame spikes (heel raises, steps) can't flip the
+// gate; only sustained depth-alignment does.
+const CORR = {
+  smoothSeconds: 0.5,  // half-window of the rolling median
+  ratioGate: 2.0,      // smoothed Δy/Δx above this ⇒ depth-aligned
+  boost: 1.5,          // multiply sep by this when gated (+50%)
+  ratioCap: 99,        // dx≈0 ⇒ ratio explodes; cap keeps the median sane
+  minWindowValid: 3,   // need at least this many finite ratios in the window
+};
 
 let host;
 // Memoized round computation, keyed on the pose object + fps.
@@ -303,16 +326,44 @@ function computeDxDy(pose) {
   return { dx, dy };
 }
 
+// NaN-aware rolling median; windows with too few finite values stay NaN.
+function rollingMedian(xs, halfWin, minValid) {
+  const n = xs.length;
+  const out = new Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - halfWin), hi = Math.min(n - 1, i + halfWin);
+    const vals = [];
+    for (let k = lo; k <= hi; k++) {
+      if (Number.isFinite(xs[k])) vals.push(xs[k]);
+    }
+    if (vals.length < minValid) continue;
+    vals.sort((a, b) => a - b);
+    out[i] = vals.length % 2 ? vals[(vals.length - 1) / 2]
+                             : 0.5 * (vals[vals.length / 2 - 1] + vals[vals.length / 2]);
+  }
+  return out;
+}
+
 function computeFor(state) {
   const pose = pickPose(state);
   if (!pose) return null;
   if (cache.pose !== pose || cache.fps !== state.fps) {
-    cache = {
-      pose,
-      fps: state.fps,
-      out: detectStanceWidth(pose.skeleton, pose.conf, pose.n_frames, state.fps),
-      dxdy: computeDxDy(pose),
-    };
+    const out = detectStanceWidth(pose.skeleton, pose.conf, pose.n_frames, state.fps);
+    const dxdy = computeDxDy(pose);
+
+    const rawRatio = dxdy.dx.map((dxv, f) =>
+      Number.isFinite(dxv) && Number.isFinite(dxdy.dy[f])
+        ? Math.min(dxdy.dy[f] / Math.max(dxv, 1e-6), CORR.ratioCap)
+        : NaN);
+    const halfWin = Math.max(1, Math.round(CORR.smoothSeconds * state.fps));
+    const smoothRatio = rollingMedian(rawRatio, halfWin, CORR.minWindowValid);
+
+    const sepCorr = out.debug.sepRatios.map((r, f) =>
+      Number.isFinite(r) && smoothRatio[f] > CORR.ratioGate ? r * CORR.boost : r);
+    const outCorr = detectStanceWidth(
+      pose.skeleton, pose.conf, pose.n_frames, state.fps, DEFAULT_CONFIG, sepCorr);
+
+    cache = { pose, fps: state.fps, out, outCorr, dxdy, smoothRatio, sepCorr };
   }
   return cache;
 }
@@ -384,46 +435,64 @@ export const StanceWidthLensRule = {
       return;
     }
     const { result: r, debug: d } = c.out;
+    const rc = c.outCorr.result;
     const f = state.frame;
 
+    const verdictCol = (title, res, color) => `
+      <div style="flex:1">
+        <div style="font-size:11px; color:${color}; font-weight:700; text-transform:uppercase">${title}</div>
+        <span style="display:inline-block; margin:3px 0; padding:1px 8px; border-radius:10px; background:${severityColor(res.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${res.severity}</span><br>
+        <code>${(res.violation_ratio * 100).toFixed(2)}%</code>
+        <span class="muted">(${res.violation_frames} / ${res.valid_frames})</span><br>
+        <span class="muted" style="font-size:11px">${res.clips.length} clip${res.clips.length === 1 ? "" : "s"} ·
+        med sep <code>${fmt(res.extras.median_sep_ratio, 2)}</code></span>
+      </div>`;
+
     host.querySelector("#sw-round").innerHTML = `
-      <h3 style="margin:10px 0 6px; font-size:14px">Round verdict
-        <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(r.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${r.severity}</span>
-      </h3>
-      <div style="font-size:13px; line-height:1.6">
-        violation ratio: <code>${(r.violation_ratio * 100).toFixed(2)}%</code>
-        <span class="muted">(${r.violation_frames} / ${r.valid_frames} valid frames)</span><br>
-        mean sep ratio: <code>${fmt(r.extras.mean_sep_ratio)}</code> ·
-        median: <code>${fmt(r.extras.median_sep_ratio)}</code><br>
-        <em style="color:#ccc">${r.coach_cue}</em>
+      <h3 style="margin:10px 0 6px; font-size:14px">Round verdict</h3>
+      <div style="display:flex; gap:12px; font-size:13px; line-height:1.5">
+        ${verdictCol("stock (app)", r, "#aaa")}
+        ${verdictCol("corrected", rc, COLOR_CORRECTED)}
       </div>
+      <p class="hint" style="margin:6px 0 0">corrected = sep ×${CORR.boost} where the
+        rolling-median (±${CORR.smoothSeconds}s) Δy/Δx exceeds ${CORR.ratioGate}.</p>
     `;
 
     const inValid = !!d.validMask[f];
     const inViolation = !!d.violationMask[f];
     const frameState = inViolation ? "VIOLATION" : inValid ? "valid (ok)" : "filtered out";
     const frameColor = inViolation ? COLOR_VIOLATION : inValid ? COLOR_VALID : COLOR_INVALID;
+    const corrViolation = !!c.outCorr.debug.violationMask[f];
+    const corrState = corrViolation ? "VIOLATION" : inValid ? "valid (ok)" : "filtered out";
+    const corrColor = corrViolation ? COLOR_VIOLATION : inValid ? COLOR_VALID : COLOR_INVALID;
+    const boosted = c.sepCorr[f] !== d.sepRatios[f]
+      && Number.isFinite(c.sepCorr[f]);
     const dx = c.dxdy.dx[f], dy = c.dxdy.dy[f];
     const tilt = Math.atan2(dy, dx) * 180 / Math.PI;
     host.querySelector("#sw-frame").innerHTML = `
       <strong>frame ${f}:</strong>
-      <span style="color:${frameColor}; font-weight:600">${frameState}</span><br>
-      sep ratio: <code>${fmt(d.sepRatios[f])}</code>
+      stock <span style="color:${frameColor}; font-weight:600">${frameState}</span> ·
+      corrected <span style="color:${corrColor}; font-weight:600">${corrState}</span><br>
+      sep: <code>${fmt(d.sepRatios[f])}</code>
+      → corrected: <code style="color:${boosted ? COLOR_CORRECTED : "inherit"}">${fmt(c.sepCorr[f])}</code>
       <span class="muted">(threshold ${DEFAULT_CONFIG.narrowThreshold})</span><br>
       <span style="color:${COLOR_DX}">Δx: <code>${fmt(dx)}</code></span> ·
       <span style="color:${COLOR_DY}">Δy: <code>${fmt(dy)}</code></span> ·
       Δy/Δx: <code>${fmt(dy / dx, 2)}</code> ·
+      smoothed: <code>${fmt(c.smoothRatio[f], 2)}</code> ·
       tilt: <code>${fmt(tilt, 1)}°</code>
     `;
 
-    host.querySelector("#sw-clips").innerHTML = r.clips.length
-      ? `<h3>${r.clips.length} violation clip${r.clips.length === 1 ? "" : "s"}</h3>
+    const clipList = (title, clips, color) => clips.length
+      ? `<h3 style="color:${color}">${clips.length} clip${clips.length === 1 ? "" : "s"} — ${title}</h3>
          <ul style="margin:4px 0 0 16px; padding:0; font-size:12px">
-           ${r.clips.map(c => `<li>${c.start_time.toFixed(2)}s → ${c.end_time.toFixed(2)}s (mid ${c.timestamp.toFixed(2)}s)</li>`).join("")}
+           ${clips.map(cl => `<li>${cl.start_time.toFixed(2)}s → ${cl.end_time.toFixed(2)}s (mid ${cl.timestamp.toFixed(2)}s)</li>`).join("")}
          </ul>`
-      : `<h3>Violation clips</h3><p class="muted" style="font-size:12px">none</p>`;
+      : `<h3 style="color:${color}">0 clips — ${title}</h3>`;
+    host.querySelector("#sw-clips").innerHTML =
+      clipList("stock", r.clips, "#aaa") + clipList("corrected", rc.clips, COLOR_CORRECTED);
 
-    drawTrace(host.querySelector("#sw-trace"), c.out, f);
+    drawTrace(host.querySelector("#sw-trace"), c, f);
     drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
   },
 
@@ -480,13 +549,17 @@ export const StanceWidthLensRule = {
       const sepColor = out.debug.violationMask[f] ? COLOR_VIOLATION
                      : out.debug.validMask[f]     ? COLOR_VALID
                                                   : COLOR_INVALID;
+      const sepC = c.sepCorr[f];
+      const smooth = c.smoothRatio[f];
       const fsz = Math.round(13 * s);
       const lineH = fsz + 4 * s;
       const lines = [
         [`sep   ${Number.isFinite(sep) ? sep.toFixed(3) : "—"}`, sepColor],
+        [`sep*  ${Number.isFinite(sepC) ? sepC.toFixed(3) : "—"}`, COLOR_CORRECTED],
         [`Δx    ${Number.isFinite(dx) ? dx.toFixed(3) : "—"}`, COLOR_DX],
         [`Δy    ${Number.isFinite(dy) ? dy.toFixed(3) : "—"}`, COLOR_DY],
         [`Δy/Δx ${Number.isFinite(dy / dx) ? (dy / dx).toFixed(2) : "—"}`, "#fff"],
+        [`r̄     ${Number.isFinite(smooth) ? smooth.toFixed(2) : "—"}`, "#fff"],
         [`tilt  ${Number.isFinite(tilt) ? tilt.toFixed(1) + "°" : "—"}`, "#fff"],
       ];
       const padX = 10 * s, padY = 8 * s;
@@ -509,56 +582,70 @@ export const StanceWidthLensRule = {
       ctx.restore();
     }
 
-    drawStateStrip(ctx, state, out);
+    drawStateStrip(ctx, state, c);
   },
 };
 
-// Bottom-of-canvas per-frame state strip (same idiom as ondevice_lens.js).
-function drawStateStrip(ctx, state, out) {
-  const { validMask, violationMask } = out.debug;
+// Bottom-of-canvas per-frame state strips (same idiom as ondevice_lens.js):
+// stock rule on the bottom, corrected variant stacked just above it.
+function drawStateStrip(ctx, state, c) {
+  const { validMask, violationMask } = c.out.debug;
+  const corrViolation = c.outCorr.debug.violationMask;
   const N = validMask.length;
   if (!N) return;
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
   const s = state.renderScale || 1;
   const stripH = 8 * s;
-  const stripY = H - stripH - 4 * s;
+  const stockY = H - stripH - 4 * s;
+  const corrY  = stockY - stripH - 2 * s;
 
   ctx.save();
   for (let f = 0; f < N; f++) {
     const x = (f / Math.max(1, N - 1)) * W;
     const w = Math.max(1, W / Math.max(1, N - 1));
+    ctx.globalAlpha = 0.75;
     if (violationMask[f])  ctx.fillStyle = COLOR_VIOLATION;
     else if (validMask[f]) ctx.fillStyle = COLOR_VALID;
     else                   ctx.fillStyle = COLOR_INVALID;
-    ctx.globalAlpha = 0.75;
-    ctx.fillRect(x, stripY, w + 0.5, stripH);
+    ctx.fillRect(x, stockY, w + 0.5, stripH);
+    if (corrViolation[f])  ctx.fillStyle = COLOR_VIOLATION;
+    else if (validMask[f]) ctx.fillStyle = COLOR_VALID;
+    else                   ctx.fillStyle = COLOR_INVALID;
+    ctx.fillRect(x, corrY, w + 0.5, stripH);
   }
-  const fx = (state.frame / Math.max(1, N - 1)) * W;
+  // Tiny labels so the two strips stay identifiable.
   ctx.globalAlpha = 1;
+  ctx.font = `${Math.round(9 * s)}px sans-serif`;
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  ctx.fillText("corr",  4 * s, corrY  + stripH - 1.5 * s);
+  ctx.fillText("stock", 4 * s, stockY + stripH - 1.5 * s);
+
+  const fx = (state.frame / Math.max(1, N - 1)) * W;
   ctx.strokeStyle = COLOR_FRAME_MARK;
   ctx.lineWidth = 2 * s;
   ctx.beginPath();
-  ctx.moveTo(fx, stripY - 2 * s);
-  ctx.lineTo(fx, stripY + stripH + 2 * s);
+  ctx.moveTo(fx, corrY - 2 * s);
+  ctx.lineTo(fx, stockY + stripH + 2 * s);
   ctx.stroke();
   ctx.restore();
 }
 
 // Sep-ratio sparkline over the full round: threshold line, valid/violation
-// coloring, current-frame marker.
-function drawTrace(canvas, out, frame) {
+// coloring, corrected-sep overlay on boosted frames, current-frame marker.
+function drawTrace(canvas, c, frame) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
 
-  const { sepRatios, validMask, violationMask } = out.debug;
+  const { sepRatios, validMask, violationMask } = c.out.debug;
   const N = sepRatios.length;
   if (!N) return;
 
   let maxR = DEFAULT_CONFIG.narrowThreshold * 1.5;
   for (const r of sepRatios) if (Number.isFinite(r) && r > maxR) maxR = r;
+  for (const r of c.sepCorr) if (Number.isFinite(r) && r > maxR) maxR = r;
   const yOf = r => H - 4 - (r / maxR) * (H - 12);
   const xOf = f => (f / Math.max(1, N - 1)) * W;
 
@@ -572,7 +659,8 @@ function drawTrace(canvas, out, frame) {
   ctx.setLineDash([]);
 
   // Per-frame dots, colored by state. Dots instead of a polyline so the
-  // filtered-out gaps stay visible as gaps.
+  // filtered-out gaps stay visible as gaps. Boosted frames get a second
+  // dot at the corrected value so the lift is visible as a parallel band.
   for (let f = 0; f < N; f++) {
     const r = sepRatios[f];
     if (!Number.isFinite(r)) continue;
@@ -580,6 +668,10 @@ function drawTrace(canvas, out, frame) {
                   : validMask[f]     ? COLOR_VALID
                                      : "rgba(136,136,136,0.5)";
     ctx.fillRect(xOf(f) - 0.5, yOf(r) - 1, 2, 2);
+    if (c.sepCorr[f] !== r && Number.isFinite(c.sepCorr[f])) {
+      ctx.fillStyle = COLOR_CORRECTED;
+      ctx.fillRect(xOf(f) - 0.5, yOf(c.sepCorr[f]) - 1, 2, 2);
+    }
   }
 
   // Current-frame marker.
