@@ -700,6 +700,18 @@ function renderPunchTable() {
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
     const metricStr = Number.isFinite(p.rotation_deg) ? p.rotation_deg.toFixed(1) + "°" : "—";
     const scoreStr = Number.isFinite(p.score) ? p.score.toFixed(0) : "—";
+    // GT is binary pass/fail; warn collapses to fail for the ✓/✗ check.
+    const predBinary = p.predicted === "pass" ? "pass"
+                     : (p.predicted === "warn" || p.predicted === "fail") ? "fail"
+                     : null;
+    const gtCell = p.label
+      ? pill(p.label, colorFor(p.label))
+        + (predBinary
+            ? (p.label === predBinary
+                ? ` <span style="color:${COLOR_PASS}">✓</span>`
+                : ` <span style="color:${COLOR_FAIL}">✗</span>`)
+            : "")
+      : `<span style="color:#666">—</span>`;
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
       <td style="padding:4px 6px; text-align:right; color:#888;">${i + 1}</td>
       <td style="padding:4px 6px; color:#aaa; font-family:ui-monospace, monospace;">${tStr}</td>
@@ -707,6 +719,7 @@ function renderPunchTable() {
       <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${metricStr}</td>
       <td style="padding:4px 6px; text-align:right; font-family:ui-monospace, monospace; color:${predCol};">${scoreStr}</td>
       <td style="padding:4px 6px;">${pill(p.predicted, predCol)}</td>
+      <td style="padding:4px 6px; white-space:nowrap;">${gtCell}</td>
     </tr>`;
   }).join("");
 
@@ -720,6 +733,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; text-align:right; font-weight:600;">rotation</th>
           <th style="padding:4px 6px; text-align:right; font-weight:600;">score</th>
           <th style="padding:4px 6px; font-weight:600;">verdict</th>
+          <th style="padding:4px 6px; font-weight:600;">GT</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
