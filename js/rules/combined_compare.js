@@ -120,7 +120,7 @@ export const CombinedCompareRule = {
     if (lagCheckbox) {
       lagCheckbox.addEventListener("change", () => {
         lagCompensate = lagCheckbox.checked;
-        if (state.requestDraw) state.requestDraw();
+        window.__viewerRedraw?.();
       });
     }
 
@@ -138,7 +138,7 @@ export const CombinedCompareRule = {
           b.style.background = (b.dataset.mode === mode) ? "var(--accent, #4da6ff)" : "transparent";
           b.style.color      = (b.dataset.mode === mode) ? "white" : "inherit";
         }
-        if (state.requestDraw) state.requestDraw();
+        window.__viewerRedraw?.();
       });
       if (btn.dataset.mode === mode) {
         btn.style.background = "var(--accent, #4da6ff)";

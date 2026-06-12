@@ -105,7 +105,7 @@ export const WristSwapRule = {
           b.style.color      = (b.dataset.mode === mode) ? "white" : "inherit";
         }
         // request a redraw — viewer auto-refreshes on next frame; force one now
-        if (state.requestDraw) state.requestDraw();
+        window.__viewerRedraw?.();
       });
       if (btn.dataset.mode === mode) {
         btn.style.background = "var(--accent, #4da6ff)";

@@ -151,7 +151,7 @@ export const GuardDropRule = {
 
   draw(ctx, state) {
     const f = state.frame;
-    const p = state.pose;
+    const p = pickPose(state);
     const W = ctx.canvas.width;
     const s = state.renderScale || 1;   // canvas-internal-per-display-pixel
 
@@ -179,7 +179,7 @@ export const GuardDropRule = {
 
   update(state) {
     const f = state.frame;
-    const p = state.pose;
+    const p = pickPose(state);
 
     const nose = jt(p, f, J.NOSE);
     const lw = jt(p, f, J.L_WRIST);
@@ -213,6 +213,14 @@ export const GuardDropRule = {
 };
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+// v6 cache (pose_cache_v6/) is the canonical wrist source for glove videos —
+// it bakes in the glove-model wrist substitution the iOS app does live, and is
+// pure Apple Vision for ungloved rounds. Falls back to state.pose for rounds
+// that pre-date v6. Mirrors arm_extension.js's pickPose.
+function pickPose(state) {
+  return state.poseV6 || state.pose;
+}
 
 function jt(pose, frame, j) {
   return {
