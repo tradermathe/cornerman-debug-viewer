@@ -140,6 +140,11 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
       validMask: r.valid_mask_b64 ? base64ToUint8(r.valid_mask_b64) : null,
       violationMask: r.violation_mask_b64 ? base64ToUint8(r.violation_mask_b64) : null,
       sepRatios: r.sep_ratios_b64 ? base64ToFloat32(r.sep_ratios_b64) : null,
+      // stance_width v5: corrected sep (post foreshortening boost — the
+      // values the violation decision actually used) + smoothed |dy|/|dx|.
+      // null on v4 sidecars.
+      sepRatiosCorrected: r.sep_ratios_corrected_b64 ? base64ToFloat32(r.sep_ratios_corrected_b64) : null,
+      axisRatioSmoothed: r.axis_ratio_smoothed_b64 ? base64ToFloat32(r.axis_ratio_smoothed_b64) : null,
     };
   }
 

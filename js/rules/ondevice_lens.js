@@ -160,8 +160,18 @@ function buildStanceWidthBlock(sw, state) {
            ${sw.clips.map(c => `<li>${fmt(c.start_time, 2)}s → ${fmt(c.end_time, 2)}s (mid ${fmt(c.timestamp, 2)}s)</li>`).join("")}
          </ul></details>`
     : `<span class="muted">no clips</span>`;
+  // v5 sidecars carry the corrected sep (used for the violation decision)
+  // and the smoothed ankle |dy|/|dx|; v4 sidecars don't.
+  const sepCorr = sw.sepRatiosCorrected ? sw.sepRatiosCorrected[f] : NaN;
+  const axisSmoothed = sw.axisRatioSmoothed ? sw.axisRatioSmoothed[f] : NaN;
+  const v5Lines = sw.sepRatiosCorrected
+    ? `corrected sep: <code style="color:#e08aff">${fmt(sepCorr, 3)}</code>
+       <span class="muted">(decision input${sepCorr !== sepRatio && Number.isFinite(sepCorr) ? " — boosted" : ""})</span><br>
+       smoothed Δy/Δx: <code>${fmt(axisSmoothed, 2)}</code><br>`
+    : "";
   return `
     <h3 style="margin:18px 0 6px; font-size:14px">Stance width
+      <span class="muted" style="font-size:11px">v${sw.version}</span>
       <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(sw.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${sw.severity}</span>
     </h3>
     <div style="font-size:13px; line-height:1.6">
@@ -172,6 +182,7 @@ function buildStanceWidthBlock(sw, state) {
       <strong>frame ${f}:</strong>
       <span style="color:${frameColor}; font-weight:600">${frameState}</span><br>
       sep ratio: <code>${fmt(sepRatio, 3)}</code><br>
+      ${v5Lines}
       ${clipsHtml}
     </div>`;
 }

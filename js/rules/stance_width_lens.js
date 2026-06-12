@@ -421,10 +421,11 @@ export const StanceWidthLensRule = {
     host.innerHTML = `
       <h2>Stance width</h2>
       <p class="hint">
-        Recomputes the shipped stance_width rule (v4, exact port of the
-        iOS implementation) from the loaded pose cache. Ankle separation /
-        torso height &lt; ${DEFAULT_CONFIG.narrowThreshold} on a valid frame
-        ⇒ violation. Timeline below the video:
+        Recomputes the stance_width rule from the loaded pose cache.
+        "v5 (shipped)" = what the app runs (foreshorten boost + ≥1s
+        sustained); "v4 (old)" + "+ foreshorten" decompose it. Ankle
+        separation / torso height &lt; ${DEFAULT_CONFIG.narrowThreshold}
+        on a valid frame ⇒ violation. Timeline below the video:
         <span style="color:${COLOR_VALID}">valid</span> ·
         <span style="color:${COLOR_VIOLATION}">violation</span> ·
         <span style="color:${COLOR_INVALID}">filtered</span>.
@@ -470,9 +471,9 @@ export const StanceWidthLensRule = {
     host.querySelector("#sw-round").innerHTML = `
       <h3 style="margin:10px 0 6px; font-size:14px">Round verdict</h3>
       <div style="display:flex; gap:12px; font-size:13px; line-height:1.5">
-        ${verdictCol("stock (app)", r, "#aaa")}
-        ${verdictCol("corrected", rc, COLOR_CORRECTED)}
-        ${verdictCol("final", rf, COLOR_FINAL)}
+        ${verdictCol("v4 (old)", r, "#aaa")}
+        ${verdictCol("+ foreshorten", rc, COLOR_CORRECTED)}
+        ${verdictCol("v5 (shipped)", rf, COLOR_FINAL)}
       </div>
       <p class="hint" style="margin:6px 0 0">corrected = sep ×${CORR.boost} where the
         rolling-median (±${CORR.smoothSeconds}s) Δy/Δx exceeds ${CORR.ratioGate}.
@@ -496,9 +497,9 @@ export const StanceWidthLensRule = {
     const tilt = Math.atan2(dy, dx) * 180 / Math.PI;
     host.querySelector("#sw-frame").innerHTML = `
       <strong>frame ${f}:</strong>
-      stock <span style="color:${frameColor}; font-weight:600">${frameState}</span> ·
-      corrected <span style="color:${corrColor}; font-weight:600">${corrState}</span> ·
-      final <span style="color:${finColor}; font-weight:600">${finState}</span><br>
+      v4 <span style="color:${frameColor}; font-weight:600">${frameState}</span> ·
+      corr <span style="color:${corrColor}; font-weight:600">${corrState}</span> ·
+      v5 <span style="color:${finColor}; font-weight:600">${finState}</span><br>
       sep: <code>${fmt(d.sepRatios[f])}</code>
       → corrected: <code style="color:${boosted ? COLOR_CORRECTED : "inherit"}">${fmt(c.sepCorr[f])}</code>
       <span class="muted">(threshold ${DEFAULT_CONFIG.narrowThreshold})</span><br>
@@ -516,9 +517,9 @@ export const StanceWidthLensRule = {
          </ul>`
       : `<h3 style="color:${color}">0 clips — ${title}</h3>`;
     host.querySelector("#sw-clips").innerHTML =
-      clipList("stock", r.clips, "#aaa")
-      + clipList("corrected", rc.clips, COLOR_CORRECTED)
-      + clipList("final", rf.clips, COLOR_FINAL);
+      clipList("v4 (old)", r.clips, "#aaa")
+      + clipList("+ foreshorten", rc.clips, COLOR_CORRECTED)
+      + clipList("v5 (shipped)", rf.clips, COLOR_FINAL);
 
     drawTrace(host.querySelector("#sw-trace"), c, f);
     drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
@@ -678,9 +679,9 @@ function drawStanceTimeline(canvas, c, frame) {
   if (!N) return;
 
   const tracks = [
-    { label: "stock", viol: violationMask, color: "#aaa" },
+    { label: "v4",    viol: violationMask, color: "#aaa" },
     { label: "corr",  viol: c.outCorr.debug.violationMask,  color: COLOR_CORRECTED },
-    { label: "final", viol: c.outFinal.debug.violationMask, color: COLOR_FINAL },
+    { label: "v5",    viol: c.outFinal.debug.violationMask, color: COLOR_FINAL },
   ];
   const gap = 6, top = 4;
   const trackH = Math.floor((H - top * 2 - gap * (tracks.length - 1)) / tracks.length);
