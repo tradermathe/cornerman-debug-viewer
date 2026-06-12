@@ -241,6 +241,68 @@ function buildPivotRateBlock(pr, state) {
     </div>`;
 }
 
+function buildArmExtensionBlock(ae, state) {
+  if (!ae) {
+    return `<p class="muted" style="margin-top:18px">No arm_extension rule in this sidecar — record a fresh round with the latest build.</p>`;
+  }
+  const header = `
+    <h3 style="margin:18px 0 6px; font-size:14px">Arm extension (straights)
+      <span class="muted" style="font-size:11px">v${ae.version}</span>
+      <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(ae.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${ae.severity}</span>
+    </h3>`;
+
+  const x = ae.extras || {};
+  // Verdict colors match the labeled-data arm_extension lens.
+  const VERDICT_COLOR = {
+    pass: "#5fd97a", fail: "#e85a5a", skip: "#7ec8ff", unclear: "#f5b945",
+  };
+  const pill = v => `<span style="color:${VERDICT_COLOR[v] || "#888"}; font-weight:700">${v}</span>`;
+
+  const perPunch = ae.perPunch || [];
+  const rows = perPunch.map(p => {
+    const bendTxt = p.peak_bend == null ? "—" : Number(p.peak_bend).toFixed(3);
+    const axTxt   = p.axiality == null ? "—" : Number(p.axiality).toFixed(2);
+    const seek = p.peak_frame ?? p.start_frame ?? 0;
+    return `
+      <tr data-seek="${seek}" style="cursor:pointer">
+        <td>${fmt(p.timestamp, 2)}s</td>
+        <td>${(p.punch_type || "?").replace(/_/g, " ")}</td>
+        <td>${p.hand || "?"}</td>
+        <td>${bendTxt}</td>
+        <td>${axTxt}</td>
+        <td>${pill(p.verdict)}${p.skip_reason ? ` <span class="muted">${p.skip_reason}</span>` : ""}</td>
+      </tr>`;
+  }).join("");
+  const table = perPunch.length ? `
+    <details style="margin-top:6px">
+      <summary style="cursor:pointer">${perPunch.length} straights</summary>
+      <table class="sps-tbl" style="font-size:11px">
+        <thead><tr><th>t</th><th>Type</th><th>Hand</th><th>Bend</th><th>Axiality</th><th>Verdict</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>` : "";
+
+  if (ae.skipReason) {
+    return `${header}
+      <div style="font-size:13px; line-height:1.6">
+        <span class="muted">Skipped: <code>${ae.skipReason}</code>
+        (${x.punchCount ?? 0} punches, ${x.straightCount ?? 0} straights, ${x.scoredCount ?? 0} scored)</span>
+        ${table}
+      </div>`;
+  }
+
+  const skipped = perPunch.filter(p => p.verdict === "skip").length;
+  const unclear = perPunch.filter(p => p.verdict === "unclear").length;
+  return `${header}
+    <div style="font-size:13px; line-height:1.6">
+      fails: <code>${x.failCount ?? "—"} / ${x.scoredCount ?? "—"}</code> scored ·
+      ratio: <code>${fmt(ae.violationRatio, 2)}</code><br>
+      <span class="muted">${x.straightCount ?? 0} straights · ${skipped} gated (axiality > ${x.axialityMax != null ? Number(x.axialityMax).toFixed(2) : "?"}) · ${unclear} unclear · pass bend ≥ ${x.bendThreshold ?? "?"}</span><br>
+      <em style="color:#ccc">${ae.coachCue || ""}</em>
+      ${table}
+    </div>`;
+}
+
 function wirePivotSeek() {
   if (!host) return;
   host.querySelectorAll("tr[data-seek]").forEach(tr => {
@@ -287,6 +349,9 @@ function renderSidebar(state) {
   // Pivot rate (change angles).
   const pivotHtml = buildPivotRateBlock(a.rules.pivot_rate, state);
 
+  // Arm extension (straights, axiality-gated).
+  const armExtHtml = buildArmExtensionBlock(a.rules.arm_extension, state);
+
   // DEPRECATED: legacy LogReg orientation, tucked into a collapsed details.
   const deprecatedBlock = a.orientation
     ? `<details style="margin-top:18px">
@@ -306,6 +371,7 @@ function renderSidebar(state) {
     ${trustedBlock}
     ${stanceHtml}
     ${pivotHtml}
+    ${armExtHtml}
     ${deprecatedBlock}
   `;
   wirePivotSeek();
