@@ -284,6 +284,7 @@ const COLOR_FRAME_MARK = "#3ad9e0";
 const COLOR_DX         = "#7ec8ff";  // horizontal ankle component
 const COLOR_DY         = "#ffd95c";  // vertical ankle component (depth proxy)
 const COLOR_CORRECTED  = "#e08aff";  // foreshortening-corrected sep / variant
+const COLOR_FINAL      = "#ffb347";  // corrected + sustained-duration variant
 
 // Foreshortening-correction experiment: when the smoothed Δy/Δx ratio says
 // the stance line is depth-aligned, the measured sep underestimates the true
@@ -299,6 +300,16 @@ const CORR = {
   boost: 1.5,          // multiply sep by this when gated (+50%)
   ratioCap: 99,        // dx≈0 ⇒ ratio explodes; cap keeps the median sane
   minWindowValid: 3,   // need at least this many finite ratios in the window
+};
+
+// "Final" candidate on top of the correction: stance width is a posture, not
+// an event — require the narrow stance to be SUSTAINED before it counts.
+// 1.0s ≈ the knee of the run-length distribution on the labeled rounds
+// (median step-transition run is 0.23s; ~0.7 flags/round survive at 1.0s).
+// Bridge widened 0.3 → 0.5s so one brief widening doesn't split an event.
+const FINAL = {
+  minViolationSeconds: 1.0,
+  bridgeGapSeconds: 0.5,
 };
 
 let host;
@@ -365,8 +376,11 @@ function computeFor(state) {
       Number.isFinite(r) && smoothRatio[f] > CORR.ratioGate ? r * CORR.boost : r);
     const outCorr = detectStanceWidth(
       pose.skeleton, pose.conf, pose.n_frames, state.fps, DEFAULT_CONFIG, sepCorr);
+    const outFinal = detectStanceWidth(
+      pose.skeleton, pose.conf, pose.n_frames, state.fps,
+      { ...DEFAULT_CONFIG, ...FINAL }, sepCorr);
 
-    cache = { pose, fps: state.fps, out, outCorr, dxdy, smoothRatio, sepCorr };
+    cache = { pose, fps: state.fps, out, outCorr, outFinal, dxdy, smoothRatio, sepCorr };
   }
   return cache;
 }
@@ -440,6 +454,7 @@ export const StanceWidthLensRule = {
     }
     const { result: r, debug: d } = c.out;
     const rc = c.outCorr.result;
+    const rf = c.outFinal.result;
     const f = state.frame;
 
     const verdictCol = (title, res, color) => `
@@ -457,9 +472,12 @@ export const StanceWidthLensRule = {
       <div style="display:flex; gap:12px; font-size:13px; line-height:1.5">
         ${verdictCol("stock (app)", r, "#aaa")}
         ${verdictCol("corrected", rc, COLOR_CORRECTED)}
+        ${verdictCol("final", rf, COLOR_FINAL)}
       </div>
       <p class="hint" style="margin:6px 0 0">corrected = sep ×${CORR.boost} where the
-        rolling-median (±${CORR.smoothSeconds}s) Δy/Δx exceeds ${CORR.ratioGate}.</p>
+        rolling-median (±${CORR.smoothSeconds}s) Δy/Δx exceeds ${CORR.ratioGate}.
+        final = corrected + violation must last ≥${FINAL.minViolationSeconds}s
+        (bridge ${FINAL.bridgeGapSeconds}s).</p>
     `;
 
     const inValid = !!d.validMask[f];
@@ -469,6 +487,9 @@ export const StanceWidthLensRule = {
     const corrViolation = !!c.outCorr.debug.violationMask[f];
     const corrState = corrViolation ? "VIOLATION" : inValid ? "valid (ok)" : "filtered out";
     const corrColor = corrViolation ? COLOR_VIOLATION : inValid ? COLOR_VALID : COLOR_INVALID;
+    const finViolation = !!c.outFinal.debug.violationMask[f];
+    const finState = finViolation ? "VIOLATION" : inValid ? "valid (ok)" : "filtered out";
+    const finColor = finViolation ? COLOR_VIOLATION : inValid ? COLOR_VALID : COLOR_INVALID;
     const boosted = c.sepCorr[f] !== d.sepRatios[f]
       && Number.isFinite(c.sepCorr[f]);
     const dx = c.dxdy.dx[f], dy = c.dxdy.dy[f];
@@ -476,7 +497,8 @@ export const StanceWidthLensRule = {
     host.querySelector("#sw-frame").innerHTML = `
       <strong>frame ${f}:</strong>
       stock <span style="color:${frameColor}; font-weight:600">${frameState}</span> ·
-      corrected <span style="color:${corrColor}; font-weight:600">${corrState}</span><br>
+      corrected <span style="color:${corrColor}; font-weight:600">${corrState}</span> ·
+      final <span style="color:${finColor}; font-weight:600">${finState}</span><br>
       sep: <code>${fmt(d.sepRatios[f])}</code>
       → corrected: <code style="color:${boosted ? COLOR_CORRECTED : "inherit"}">${fmt(c.sepCorr[f])}</code>
       <span class="muted">(threshold ${DEFAULT_CONFIG.narrowThreshold})</span><br>
@@ -494,7 +516,9 @@ export const StanceWidthLensRule = {
          </ul>`
       : `<h3 style="color:${color}">0 clips — ${title}</h3>`;
     host.querySelector("#sw-clips").innerHTML =
-      clipList("stock", r.clips, "#aaa") + clipList("corrected", rc.clips, COLOR_CORRECTED);
+      clipList("stock", r.clips, "#aaa")
+      + clipList("corrected", rc.clips, COLOR_CORRECTED)
+      + clipList("final", rf.clips, COLOR_FINAL);
 
     drawTrace(host.querySelector("#sw-trace"), c, f);
     drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
@@ -611,9 +635,9 @@ function mountStageTimeline() {
   wrap.appendChild(label);
   const canvas = document.createElement("canvas");
   canvas.id = "sw-timeline";
-  canvas.style.cssText = "display:block;width:100%;height:56px";
+  canvas.style.cssText = "display:block;width:100%;height:82px";
   canvas.width = 800;
-  canvas.height = 56;
+  canvas.height = 82;
   wrap.appendChild(canvas);
   slot.appendChild(wrap);
 
@@ -650,16 +674,16 @@ function drawStanceTimeline(canvas, c, frame) {
   ctx.clearRect(0, 0, W, H);
 
   const { validMask, violationMask } = c.out.debug;
-  const corrViolation = c.outCorr.debug.violationMask;
   const N = validMask.length;
   if (!N) return;
 
   const tracks = [
     { label: "stock", viol: violationMask, color: "#aaa" },
-    { label: "corr",  viol: corrViolation, color: COLOR_CORRECTED },
+    { label: "corr",  viol: c.outCorr.debug.violationMask,  color: COLOR_CORRECTED },
+    { label: "final", viol: c.outFinal.debug.violationMask, color: COLOR_FINAL },
   ];
   const gap = 6, top = 4;
-  const trackH = Math.floor((H - top * 2 - gap) / 2);
+  const trackH = Math.floor((H - top * 2 - gap * (tracks.length - 1)) / tracks.length);
   const xOf = f => TL_LABEL_W + (f / Math.max(1, N - 1)) * (W - TL_LABEL_W - 4);
   const colW = Math.max(1, (W - TL_LABEL_W - 4) / Math.max(1, N - 1));
 
