@@ -12,6 +12,7 @@
 
 import { OverviewRule } from "./overview.js";
 import { GuardDropRule } from "./guard_drop.js";
+import { GuardHeightRule } from "./guard_height.js";
 import { ArmExtensionRule } from "./arm_extension.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { WristSwapRule } from "./wrist_swap.js";
@@ -28,22 +29,24 @@ import { StanceWidthLensRule } from "./stance_width_lens.js";
 import { AudioImpactLensRule } from "./audio_impact_lens.js";
 import { PunchPredictionsRule } from "./punch_predictions.js";
 
+// Overview stays first as the default; the rest are alphabetical by label.
 export const RULES = [
   OverviewRule,
-  OnDeviceLensRule,
-  StanceWidthLensRule,
-  RoundV6Rule,
-  PunchClassifierRule,
-  AudioImpactLensRule,
-  GuardDropRule,
+  AngleChangeRule,
   ArmExtensionRule,
-  EngineCompareRule,
-  WristSwapRule,
+  AudioImpactLensRule,
   CombinedCompareRule,
+  EngineCompareRule,
+  GuardDropRule,
+  GuardHeightRule,
+  HipRotationReviewRule,
+  OnDeviceLensRule,
+  PunchClassifierRule,
+  PunchPredictionsRule,
+  RoundV6Rule,
+  StanceWidthLensRule,
   StepPunchSyncRule,
   StepDetectorRule,
-  HipRotationReviewRule,
   Vision3DRule,
-  PunchPredictionsRule,
-  AngleChangeRule,
+  WristSwapRule,
 ];
