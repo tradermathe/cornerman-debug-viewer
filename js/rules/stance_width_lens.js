@@ -410,7 +410,7 @@ export const StanceWidthLensRule = {
         Recomputes the shipped stance_width rule (v4, exact port of the
         iOS implementation) from the loaded pose cache. Ankle separation /
         torso height &lt; ${DEFAULT_CONFIG.narrowThreshold} on a valid frame
-        ⇒ violation. Bottom strip:
+        ⇒ violation. Timeline below the video:
         <span style="color:${COLOR_VALID}">valid</span> ·
         <span style="color:${COLOR_VIOLATION}">violation</span> ·
         <span style="color:${COLOR_INVALID}">filtered</span>.
@@ -427,6 +427,7 @@ export const StanceWidthLensRule = {
       <canvas id="sw-dxdy" width="320" height="110"></canvas>
       <div id="sw-clips"></div>
     `;
+    mountStageTimeline();
   },
 
   update(state) {
@@ -497,6 +498,7 @@ export const StanceWidthLensRule = {
 
     drawTrace(host.querySelector("#sw-trace"), c, f);
     drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
+    drawStanceTimeline(document.getElementById("sw-timeline"), c, f);
   },
 
   draw(ctx, state) {
@@ -585,53 +587,104 @@ export const StanceWidthLensRule = {
       ctx.restore();
     }
 
-    drawStateStrip(ctx, state, c);
   },
 };
 
-// Bottom-of-canvas per-frame state strips (same idiom as ondevice_lens.js):
-// stock rule on the bottom, corrected variant stacked just above it.
-function drawStateStrip(ctx, state, c) {
+// ── Stage-extras timeline ──────────────────────────────────────────────────
+// Stock vs corrected state tracks live BELOW the video (in #stage-extras),
+// full stage width and click-to-seek — same idiom as punch_classifier.js.
+// viewer.js clears #stage-extras on every lens switch, so re-inject on mount.
+
+const TL_LABEL_W = 64;
+
+function mountStageTimeline() {
+  const slot = document.getElementById("stage-extras");
+  if (!slot) return;
+  slot.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.id = "sw-timeline-wrap";
+  wrap.style.cssText = "margin-top:12px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px";
+  const label = document.createElement("div");
+  label.className = "muted small";
+  label.style.cssText = "margin-bottom:6px";
+  label.textContent = "Stance width — stock vs corrected timeline (click to seek)";
+  wrap.appendChild(label);
+  const canvas = document.createElement("canvas");
+  canvas.id = "sw-timeline";
+  canvas.style.cssText = "display:block;width:100%;height:56px";
+  canvas.width = 800;
+  canvas.height = 56;
+  wrap.appendChild(canvas);
+  slot.appendChild(wrap);
+
+  // Click-to-seek. Canvas is recreated on every mount, so the listener is
+  // wired fresh each time and doesn't leak across lens switches.
+  canvas.addEventListener("click", e => {
+    const N = cache?.out?.debug?.validMask?.length;
+    if (!N) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const ratio = (cx - TL_LABEL_W) / Math.max(1, rect.width - TL_LABEL_W - 4);
+    const f = Math.round(ratio * (N - 1));
+    seekHack(Math.max(0, Math.min(N - 1, f)));
+  });
+}
+
+function seekHack(f) {
+  const slider = document.getElementById("scrubber");
+  if (!slider) return;
+  slider.value = f;
+  slider.dispatchEvent(new Event("input"));
+}
+
+function drawStanceTimeline(canvas, c, frame) {
+  if (!canvas) return;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const cssW = Math.max(1, canvas.getBoundingClientRect().width);
+  const cssH = Math.max(1, canvas.getBoundingClientRect().height);
+  if (canvas.width !== Math.round(cssW * dpr))  canvas.width  = Math.round(cssW * dpr);
+  if (canvas.height !== Math.round(cssH * dpr)) canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+  ctx.clearRect(0, 0, W, H);
+
   const { validMask, violationMask } = c.out.debug;
   const corrViolation = c.outCorr.debug.violationMask;
   const N = validMask.length;
   if (!N) return;
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
-  const s = state.renderScale || 1;
-  const stripH = 8 * s;
-  const stockY = H - stripH - 4 * s;
-  const corrY  = stockY - stripH - 2 * s;
 
-  ctx.save();
-  for (let f = 0; f < N; f++) {
-    const x = (f / Math.max(1, N - 1)) * W;
-    const w = Math.max(1, W / Math.max(1, N - 1));
-    ctx.globalAlpha = 0.75;
-    if (violationMask[f])  ctx.fillStyle = COLOR_VIOLATION;
-    else if (validMask[f]) ctx.fillStyle = COLOR_VALID;
-    else                   ctx.fillStyle = COLOR_INVALID;
-    ctx.fillRect(x, stockY, w + 0.5, stripH);
-    if (corrViolation[f])  ctx.fillStyle = COLOR_VIOLATION;
-    else if (validMask[f]) ctx.fillStyle = COLOR_VALID;
-    else                   ctx.fillStyle = COLOR_INVALID;
-    ctx.fillRect(x, corrY, w + 0.5, stripH);
-  }
-  // Tiny labels so the two strips stay identifiable.
-  ctx.globalAlpha = 1;
-  ctx.font = `${Math.round(9 * s)}px sans-serif`;
-  ctx.fillStyle = "rgba(255,255,255,0.8)";
-  ctx.fillText("corr",  4 * s, corrY  + stripH - 1.5 * s);
-  ctx.fillText("stock", 4 * s, stockY + stripH - 1.5 * s);
+  const tracks = [
+    { label: "stock", viol: violationMask, color: "#aaa" },
+    { label: "corr",  viol: corrViolation, color: COLOR_CORRECTED },
+  ];
+  const gap = 6, top = 4;
+  const trackH = Math.floor((H - top * 2 - gap) / 2);
+  const xOf = f => TL_LABEL_W + (f / Math.max(1, N - 1)) * (W - TL_LABEL_W - 4);
+  const colW = Math.max(1, (W - TL_LABEL_W - 4) / Math.max(1, N - 1));
 
-  const fx = (state.frame / Math.max(1, N - 1)) * W;
+  ctx.font = "10px ui-monospace, monospace";
+  tracks.forEach((t, i) => {
+    const y = top + i * (trackH + gap);
+    ctx.fillStyle = t.color;
+    ctx.fillText(t.label, 4, y + trackH / 2 + 3);
+    for (let f = 0; f < N; f++) {
+      ctx.fillStyle = t.viol[f]       ? COLOR_VIOLATION
+                    : validMask[f]    ? COLOR_VALID
+                                      : COLOR_INVALID;
+      ctx.globalAlpha = 0.85;
+      ctx.fillRect(xOf(f), y, colW + 0.5, trackH);
+    }
+    ctx.globalAlpha = 1;
+  });
+
+  // Current-frame marker across both tracks.
   ctx.strokeStyle = COLOR_FRAME_MARK;
-  ctx.lineWidth = 2 * s;
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(fx, corrY - 2 * s);
-  ctx.lineTo(fx, stockY + stripH + 2 * s);
+  ctx.moveTo(xOf(frame), 1);
+  ctx.lineTo(xOf(frame), H - 1);
   ctx.stroke();
-  ctx.restore();
 }
 
 // Sep-ratio sparkline over the full round: threshold line, valid/violation
