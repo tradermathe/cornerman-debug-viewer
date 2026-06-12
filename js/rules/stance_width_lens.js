@@ -272,6 +272,8 @@ const COLOR_VIOLATION  = "#ff5d6c";
 const COLOR_VALID      = "#7adf7a";
 const COLOR_INVALID    = "#888";
 const COLOR_FRAME_MARK = "#3ad9e0";
+const COLOR_DX         = "#7ec8ff";  // horizontal ankle component
+const COLOR_DY         = "#ffd95c";  // vertical ankle component (depth proxy)
 
 let host;
 // Memoized round computation, keyed on the pose object + fps.
@@ -282,6 +284,25 @@ function pickPose(state) {
   return state.poseV6 || state.pose;
 }
 
+// Lens-side diagnostic, NOT part of the ported rule: split the ankle
+// separation into its horizontal/vertical image components (torso-
+// normalized, same scale as sep ratio). With the camera above ankle
+// height, depth maps to image-vertical — so a vertical-leaning ankle
+// line suggests the stance is depth-aligned and sep ratio undercounts.
+function computeDxDy(pose) {
+  const n = pose.n_frames;
+  const dx = new Array(n).fill(NaN);
+  const dy = new Array(n).fill(NaN);
+  for (let f = 0; f < n; f++) {
+    const th = frameTorsoHeight(pose.skeleton, f);
+    if (!(th > 1e-6)) continue;
+    const base = f * 17;
+    dx[f] = Math.abs(pose.skeleton[(base + J.L_ANKLE) * 2]     - pose.skeleton[(base + J.R_ANKLE) * 2])     / th;
+    dy[f] = Math.abs(pose.skeleton[(base + J.L_ANKLE) * 2 + 1] - pose.skeleton[(base + J.R_ANKLE) * 2 + 1]) / th;
+  }
+  return { dx, dy };
+}
+
 function computeFor(state) {
   const pose = pickPose(state);
   if (!pose) return null;
@@ -290,9 +311,10 @@ function computeFor(state) {
       pose,
       fps: state.fps,
       out: detectStanceWidth(pose.skeleton, pose.conf, pose.n_frames, state.fps),
+      dxdy: computeDxDy(pose),
     };
   }
-  return cache.out;
+  return cache;
 }
 
 function fmt(n, digits = 3) {
@@ -344,19 +366,24 @@ export const StanceWidthLensRule = {
       <div id="sw-frame" style="font-size:13px; line-height:1.6"></div>
       <h3>Sep ratio over time</h3>
       <canvas id="sw-trace" width="320" height="110"></canvas>
+      <h3>Ankle <span style="color:${COLOR_DX}">Δx</span> / <span style="color:${COLOR_DY}">Δy</span> over time</h3>
+      <p class="hint" style="margin-top:0">Torso-normalized image components of the
+        ankle separation. Δy ≈ depth proxy: when the stance line points at the
+        camera, Δx collapses and Δy carries the (foreshortened) width.</p>
+      <canvas id="sw-dxdy" width="320" height="110"></canvas>
       <div id="sw-clips"></div>
     `;
   },
 
   update(state) {
     if (!host) return;
-    const out = computeFor(state);
-    if (!out) {
+    const c = computeFor(state);
+    if (!c) {
       host.querySelector("#sw-round").innerHTML =
         `<p class="muted">No pose cache loaded.</p>`;
       return;
     }
-    const { result: r, debug: d } = out;
+    const { result: r, debug: d } = c.out;
     const f = state.frame;
 
     host.querySelector("#sw-round").innerHTML = `
@@ -376,11 +403,17 @@ export const StanceWidthLensRule = {
     const inViolation = !!d.violationMask[f];
     const frameState = inViolation ? "VIOLATION" : inValid ? "valid (ok)" : "filtered out";
     const frameColor = inViolation ? COLOR_VIOLATION : inValid ? COLOR_VALID : COLOR_INVALID;
+    const dx = c.dxdy.dx[f], dy = c.dxdy.dy[f];
+    const tilt = Math.atan2(dy, dx) * 180 / Math.PI;
     host.querySelector("#sw-frame").innerHTML = `
       <strong>frame ${f}:</strong>
       <span style="color:${frameColor}; font-weight:600">${frameState}</span><br>
       sep ratio: <code>${fmt(d.sepRatios[f])}</code>
-      <span class="muted">(threshold ${DEFAULT_CONFIG.narrowThreshold})</span>
+      <span class="muted">(threshold ${DEFAULT_CONFIG.narrowThreshold})</span><br>
+      <span style="color:${COLOR_DX}">Δx: <code>${fmt(dx)}</code></span> ·
+      <span style="color:${COLOR_DY}">Δy: <code>${fmt(dy)}</code></span> ·
+      Δy/Δx: <code>${fmt(dy / dx, 2)}</code> ·
+      tilt: <code>${fmt(tilt, 1)}°</code>
     `;
 
     host.querySelector("#sw-clips").innerHTML = r.clips.length
@@ -390,12 +423,14 @@ export const StanceWidthLensRule = {
          </ul>`
       : `<h3>Violation clips</h3><p class="muted" style="font-size:12px">none</p>`;
 
-    drawTrace(host.querySelector("#sw-trace"), out, f);
+    drawTrace(host.querySelector("#sw-trace"), c.out, f);
+    drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
   },
 
   draw(ctx, state) {
-    const out = computeFor(state);
-    if (!out) return;
+    const c = computeFor(state);
+    if (!c) return;
+    const out = c.out;
     const f = state.frame;
     const pose = pickPose(state);
     const s = state.renderScale || 1;
@@ -409,6 +444,23 @@ export const StanceWidthLensRule = {
                   : out.debug.validMask[f]     ? COLOR_VALID
                                                : COLOR_INVALID;
       ctx.save();
+      // Dashed right-triangle legs: the horizontal (Δx) and vertical (Δy)
+      // image components of the ankle separation, color-matched to the
+      // Δx/Δy trace in the sidebar.
+      ctx.lineWidth = 2 * s;
+      ctx.setLineDash([4 * s, 4 * s]);
+      ctx.strokeStyle = COLOR_DX;
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(rx, ly);
+      ctx.stroke();
+      ctx.strokeStyle = COLOR_DY;
+      ctx.beginPath();
+      ctx.moveTo(rx, ly);
+      ctx.lineTo(rx, ry);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
       ctx.lineWidth = 3 * s;
@@ -417,9 +469,18 @@ export const StanceWidthLensRule = {
       ctx.lineTo(rx, ry);
       ctx.stroke();
       const ratio = out.debug.sepRatios[f];
+      ctx.font = `${Math.round(12 * s)}px sans-serif`;
       if (Number.isFinite(ratio)) {
-        ctx.font = `${Math.round(12 * s)}px sans-serif`;
         ctx.fillText(ratio.toFixed(3), (lx + rx) / 2 + 8 * s, (ly + ry) / 2 - 8 * s);
+      }
+      const dx = c.dxdy.dx[f], dy = c.dxdy.dy[f];
+      if (Number.isFinite(dx)) {
+        ctx.fillStyle = COLOR_DX;
+        ctx.fillText(`Δx ${dx.toFixed(2)}`, (lx + rx) / 2 - 20 * s, ly + 16 * s);
+      }
+      if (Number.isFinite(dy)) {
+        ctx.fillStyle = COLOR_DY;
+        ctx.fillText(`Δy ${dy.toFixed(2)}`, rx + 8 * s, (ly + ry) / 2);
       }
       ctx.restore();
     }
@@ -498,6 +559,45 @@ function drawTrace(canvas, out, frame) {
   }
 
   // Current-frame marker.
+  ctx.strokeStyle = COLOR_FRAME_MARK;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(xOf(frame), 0);
+  ctx.lineTo(xOf(frame), H);
+  ctx.stroke();
+}
+
+// Δx / Δy components over the full round, same x-axis and y-scale idiom as
+// the sep-ratio trace so dips line up visually between the two canvases.
+function drawDxDyTrace(canvas, c, frame) {
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const { dx, dy } = c.dxdy;
+  const N = dx.length;
+  if (!N) return;
+
+  let maxV = DEFAULT_CONFIG.narrowThreshold * 1.5;
+  for (let f = 0; f < N; f++) {
+    if (Number.isFinite(dx[f]) && dx[f] > maxV) maxV = dx[f];
+    if (Number.isFinite(dy[f]) && dy[f] > maxV) maxV = dy[f];
+  }
+  const yOf = v => H - 4 - (v / maxV) * (H - 12);
+  const xOf = f => (f / Math.max(1, N - 1)) * W;
+
+  for (let f = 0; f < N; f++) {
+    if (Number.isFinite(dx[f])) {
+      ctx.fillStyle = COLOR_DX;
+      ctx.fillRect(xOf(f) - 0.5, yOf(dx[f]) - 1, 2, 2);
+    }
+    if (Number.isFinite(dy[f])) {
+      ctx.fillStyle = COLOR_DY;
+      ctx.fillRect(xOf(f) - 0.5, yOf(dy[f]) - 1, 2, 2);
+    }
+  }
+
   ctx.strokeStyle = COLOR_FRAME_MARK;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
