@@ -292,7 +292,10 @@ const COLOR_CORRECTED  = "#e08aff";  // foreshortening-corrected sep / variant
 // gate; only sustained depth-alignment does.
 const CORR = {
   smoothSeconds: 0.5,  // half-window of the rolling median
-  ratioGate: 2.0,      // smoothed Δy/Δx above this ⇒ depth-aligned
+  // 0.75 = knee of the label-eval sweep: fixes 26/54 foreshortened false
+  // flags while erasing only 2/27 genuine side-on flags. (2.0 was near-zero
+  // collateral but only fixed 13/54.)
+  ratioGate: 0.75,     // smoothed Δy/Δx above this ⇒ depth-aligned
   boost: 1.5,          // multiply sep by this when gated (+50%)
   ratioCap: 99,        // dx≈0 ⇒ ratio explodes; cap keeps the median sane
   minWindowValid: 3,   // need at least this many finite ratios in the window
