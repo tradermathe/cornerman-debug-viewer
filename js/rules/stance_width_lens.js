@@ -468,20 +468,44 @@ export const StanceWidthLensRule = {
       ctx.moveTo(lx, ly);
       ctx.lineTo(rx, ry);
       ctx.stroke();
-      const ratio = out.debug.sepRatios[f];
-      ctx.font = `${Math.round(12 * s)}px sans-serif`;
-      if (Number.isFinite(ratio)) {
-        ctx.fillText(ratio.toFixed(3), (lx + rx) / 2 + 8 * s, (ly + ry) / 2 - 8 * s);
-      }
+      ctx.restore();
+    }
+
+    // Numbers live in a corner HUD, not around the feet — the overlay there
+    // stays just the ankle line + dashed component legs.
+    {
       const dx = c.dxdy.dx[f], dy = c.dxdy.dy[f];
-      if (Number.isFinite(dx)) {
-        ctx.fillStyle = COLOR_DX;
-        ctx.fillText(`Δx ${dx.toFixed(2)}`, (lx + rx) / 2 - 20 * s, ly + 16 * s);
-      }
-      if (Number.isFinite(dy)) {
-        ctx.fillStyle = COLOR_DY;
-        ctx.fillText(`Δy ${dy.toFixed(2)}`, rx + 8 * s, (ly + ry) / 2);
-      }
+      const sep = out.debug.sepRatios[f];
+      const tilt = Math.atan2(dy, dx) * 180 / Math.PI;
+      const sepColor = out.debug.violationMask[f] ? COLOR_VIOLATION
+                     : out.debug.validMask[f]     ? COLOR_VALID
+                                                  : COLOR_INVALID;
+      const fsz = Math.round(13 * s);
+      const lineH = fsz + 4 * s;
+      const lines = [
+        [`sep   ${Number.isFinite(sep) ? sep.toFixed(3) : "—"}`, sepColor],
+        [`Δx    ${Number.isFinite(dx) ? dx.toFixed(3) : "—"}`, COLOR_DX],
+        [`Δy    ${Number.isFinite(dy) ? dy.toFixed(3) : "—"}`, COLOR_DY],
+        [`Δy/Δx ${Number.isFinite(dy / dx) ? (dy / dx).toFixed(2) : "—"}`, "#fff"],
+        [`tilt  ${Number.isFinite(tilt) ? tilt.toFixed(1) + "°" : "—"}`, "#fff"],
+      ];
+      const padX = 10 * s, padY = 8 * s;
+      const boxW = 110 * s;
+      const boxH = lines.length * lineH + padY * 2 - 4 * s;
+      const bx = ctx.canvas.width - boxW - 10 * s;
+      const by = 10 * s;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, boxH, 6 * s);
+      ctx.fill();
+      ctx.font = `${fsz}px ui-monospace, monospace`;
+      ctx.textBaseline = "top";
+      lines.forEach(([text, color], i) => {
+        ctx.fillStyle = color;
+        ctx.fillText(text, bx + padX, by + padY + i * lineH);
+      });
       ctx.restore();
     }
 
