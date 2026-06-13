@@ -6,7 +6,7 @@
 // guard. Watch the retract, not the throw: the throw can be clean and the
 // return still wrong.
 //
-// Per labelled punch (straights only — jab/cross head/body):
+// Per labelled punch (head straights only — jab_head / cross_head):
 //
 //   peak  = most-extended frame in the punch window (max reach =
 //           |shoulder→wrist| / torso, same pick as arm_extension) — the
@@ -55,11 +55,14 @@ const DEFAULTS = {
   axialityMax:  Math.SQRT1_2,   // ≈0.7071 = cos 45° — same cut as arm_extension
   minGloveConf: 0.20,
   minPoseConf:  0.20,
-  // Only straights have a "back along the same line" goal — hooks and
-  // uppercuts arc by design.
+  // HEAD straights only. Hooks/uppercuts arc by design, and body shots
+  // travel down-to-target then back up — "straight back along the same
+  // line" describes neither. Body shots flagged at 3.5× the head rate
+  // (7% vs 2%) — mostly false positives from that down-up geometry plus
+  // peak/re-guard placement misfiring on it — so they're out of scope.
   appliesTo: new Set([
-    "jab_head", "jab_body",
-    "cross_head", "cross_body",
+    "jab_head",
+    "cross_head",
   ]),
 };
 
