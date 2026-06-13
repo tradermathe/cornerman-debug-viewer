@@ -19,8 +19,11 @@
 //           closest-approach frame (annotated, still scored).
 //   sag   = max perpendicular deviation of the return wrist track BELOW
 //           the straight chord peak→B, normalized by the window-median
-//           torso. A straight return reads ~0; a U reads the depth of
-//           the U. Verdict is sag alone: fail if sag ≥ sagFail.
+//           torso. Measured in the SHOULDER FRAME (wrist minus per-frame
+//           shoulder-line midpoint) so a knee bend / bob that lowers the
+//           whole body during the return doesn't masquerade as a dip.
+//           A straight return reads ~0; a U reads the depth of the U.
+//           Verdict is sag alone: fail if sag ≥ sagFail.
 //
 // AXIALITY GATE — same cut as arm_extension, joined by punch_uuid: the
 // return arc is only visible when the punch travels across the image
@@ -304,6 +307,7 @@ function computeAll(state, cfg) {
   const startSec = pose.start_sec || 0;
 
   const torso = torsoEuclidPerFrame(pose, cfg);
+  const midShoulder = midShoulderPerFrame(pose, cfg);
   const arms = {
     L: perFrameArm(pose, "L", cfg, torso),
     R: perFrameArm(pose, "R", cfg, torso),
@@ -320,13 +324,13 @@ function computeAll(state, cfg) {
   const punches = all
     .filter(({ d }) => cfg.appliesTo.has(d.punch_type))
     .map(({ d, stance, side }, idx) =>
-      buildPunch(d, stance, side, idx, { arms, torso, all, N, fps, startSec, cfg }));
+      buildPunch(d, stance, side, idx, { arms, torso, midShoulder, all, N, fps, startSec, cfg }));
 
-  return { arms, torso, punches, fps };
+  return { arms, torso, midShoulder, punches, fps };
 }
 
 function buildPunch(d, stance, side, idx, ctx) {
-  const { arms, torso, all, N, fps, startSec, cfg } = ctx;
+  const { arms, torso, midShoulder, all, N, fps, startSec, cfg } = ctx;
   const arm = arms[side];
   const sf = Math.max(0, d.start_frame);
   const ef = Math.min(N - 1, d.end_frame);
@@ -404,9 +408,19 @@ function buildPunch(d, stance, side, idx, ctx) {
   p.return_sec = (bFrame - peakFrame) / fps;
   p.closest_dist = p.re_guarded ? arm.noseDist[bFrame] : minDist;
 
-  // Sag: max deviation below the chord A(peak)→B, over interior frames.
-  const Ax = arm.wx[peakFrame], Ay = arm.wy[peakFrame];
-  const Bx = arm.wx[bFrame],   By = arm.wy[bFrame];
+  // Sag: max deviation below the chord A(peak)→B, over interior frames —
+  // measured in the SHOULDER FRAME. Each wrist sample has the per-frame
+  // shoulder-line midpoint subtracted, so whole-body vertical motion during
+  // the return (knee bend, bob, a step down) is cancelled: it moves the
+  // wrist in the image but not relative to the body, and must not read as a
+  // U. A genuine loop still curves relative to the shoulders. We only
+  // subtract a translation, so +y is still image-down and the normal logic
+  // is unchanged. Mid-shoulder is finite at A and B by construction (peak is
+  // picked via reach, B via nose distance — both already require valid
+  // shoulders/torso).
+  const { msx, msy } = midShoulder;
+  const Ax = arm.wx[peakFrame] - msx[peakFrame], Ay = arm.wy[peakFrame] - msy[peakFrame];
+  const Bx = arm.wx[bFrame]   - msx[bFrame],     By = arm.wy[bFrame]   - msy[bFrame];
   const dx = Bx - Ax, dy = By - Ay;
   const len = Math.hypot(dx, dy);
   // Chord normal pointing "down" in image coords (+y). Degenerate chord
@@ -419,8 +433,8 @@ function buildPunch(d, stance, side, idx, ctx) {
   let sagPx = 0, sagFrame = -1, nValid = 0;
   const nTotal = Math.max(0, bFrame - peakFrame - 1);
   for (let f = peakFrame + 1; f < bFrame; f++) {
-    const x = arm.wx[f], y = arm.wy[f];
-    if (!Number.isFinite(x)) continue;
+    const x = arm.wx[f] - msx[f], y = arm.wy[f] - msy[f];
+    if (!Number.isFinite(x)) continue;   // wrist OR shoulder missing → skip
     nValid++;
     const s = (x - Ax) * nx + (y - Ay) * ny;
     if (s > sagPx) { sagPx = s; sagFrame = f; }
@@ -543,6 +557,31 @@ function wristXY(pose, frame, joints, cfg) {
   const gate = isGloveBaked ? cfg.minGloveConf : cfg.minPoseConf;
   if (pc < gate || !Number.isFinite(px)) return null;
   return { x: px, y: py, source: isGloveBaked ? "glove" : "pose" };
+}
+
+// Per-frame shoulder-line midpoint (L/R shoulder average). NaN when either
+// shoulder is below the conf gate. This is the reference the sag is measured
+// against: subtracting it cancels whole-body vertical motion (knee bend, bob,
+// a step down) during the return, which moves the wrist in the image but not
+// relative to the body — so it must not read as a U.
+function midShoulderPerFrame(pose, cfg) {
+  const N = pose.n_frames;
+  const msx = new Float32Array(N).fill(NaN);
+  const msy = new Float32Array(N).fill(NaN);
+  const gate = cfg.minPoseConf;
+  for (let f = 0; f < N; f++) {
+    const cL = pose.conf[f * 17 + J.L_SHOULDER];
+    const cR = pose.conf[f * 17 + J.R_SHOULDER];
+    if (cL < gate || cR < gate) continue;
+    const lx = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2];
+    const ly = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2 + 1];
+    const rx = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2];
+    const ry = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2 + 1];
+    if (!Number.isFinite(lx) || !Number.isFinite(rx)) continue;
+    msx[f] = 0.5 * (lx + rx);
+    msy[f] = 0.5 * (ly + ry);
+  }
+  return { msx, msy };
 }
 
 // Per-frame euclidean torso |shoulder_mid → hip_mid| — same normalizer
@@ -806,7 +845,8 @@ function renderTemplate(sig, cfg) {
       After the peak, the wrist should travel back to the guard along the
       straight chord peak→re-guard. <b>sag</b> = max deviation below that
       chord, in torsos — ~0 for a straight return, the depth of the U for
-      a looping one.
+      a looping one. Measured relative to the shoulder line, so bending the
+      knees / bobbing mid-return doesn't count as a dip.
     </p>
 
     <h3>Legend</h3>
