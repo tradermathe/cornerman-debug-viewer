@@ -11,24 +11,27 @@
 //   peak  = most-extended frame in the punch window (max reach =
 //           |shoulder→wrist| / torso, same pick as arm_extension) — the
 //           start of the return.
-//   B     = return end: first frame after peak where the wrist is back
-//           inside the guard radius (wrist→nose euclidean ≤ reGuardDist
-//           torsos). The search is capped by the next punch on the SAME
-//           hand (combos), maxReturnSec, and end of cache; if the wrist
-//           never re-guards inside the cap, B falls back to the
-//           closest-approach frame (annotated, still scored).
-//   drop  = how far the fist sinks BELOW its extension height, measured
-//           against the SAME-SIDE SHOULDER so whole-body vertical motion
-//           cancels. Per frame, offset = wrist_y − shoulder_y (bigger =
-//           fist lower). The baseline is offset AT PEAK; the low is the
-//           biggest offset over the return. Both use the shoulder at
-//           THEIR OWN frame, so the value is frozen, not live:
-//             drop = (offset_at_low − offset_at_peak) / torso   (clamp ≥0)
-//           A knee bend (even continuous, even after impact) moves wrist
-//           and shoulder together → offset unchanged → drop ~0. Only the
-//           fist pulling away from the shoulder opens it. Fail if
+//   window= [peak, cap], cap = min(peak + maxReturnSec, next same-hand
+//           punch − 1, cache end). NOT re-guard — the verdict reads the
+//           recovery off the trajectory, so it only needs a roomy window,
+//           not a precise end. Re-guard is computed for the readout / loop
+//           bound only.
+//   drop  = the U-dip's PROMINENCE, against the SAME-SIDE SHOULDER so
+//           whole-body vertical motion cancels. Per frame (smoothed),
+//           offset = wrist_y − shoulder_y (bigger = fist lower). The low is
+//           the biggest offset over the window; the recovery is the highest
+//           the fist climbs back AFTER the low. A real U needs BOTH halves:
+//             descent  = offset_low − offset_peak
+//             recovery = offset_low − min(offset after low)
+//             drop     = max(0, min(descent, recovery)) / torso
+//           Equivalently drop = (offset_low − max(offset_peak, recovery_h))
+//           / torso. A monotonic descent to a low guard never climbs back
+//           → recovery ~0 → pass. A body shot's fist is low at peak and
+//           only rises → descent ~0 → pass. A knee bend (even continuous)
+//           moves wrist+shoulder together → offset flat → pass. Fail if
 //           drop ≥ dropFail. Vertical-only: catches a dropped hand, not a
-//           purely-sideways loop (the rarer fault).
+//           purely-sideways loop (the rarer fault). If a combo chops the
+//           window before any recovery shows → unclear, not a guess.
 //
 // AXIALITY GATE — optional (togglable), joined by punch_uuid. Less load-
 // bearing than for the old 2D-arc metric since a vertical drop reads even
@@ -50,9 +53,10 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 
 const DEFAULTS = {
-  dropFail:     0.20,   // fail if shoulder-relative drop ≥ this (torsos)
-  reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard
-  maxReturnSec: 1.0,    // search cap after the peak frame
+  dropFail:     0.20,   // fail if U-dip prominence ≥ this (torsos)
+  reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard (cosmetic)
+  maxReturnSec: 1.0,    // window cap after the peak frame
+  smoothSec:    0.08,   // moving-average window on the offset signal
   minCoverage:  0.60,   // min fraction of valid wrist frames inside the return window
   axialityGate: true,
   axialityMax:  Math.SQRT1_2,   // ≈0.7071 = cos 45° — same cut as arm_extension
@@ -376,9 +380,12 @@ function buildPunch(d, stance, side, idx, ctx) {
     peak_frame: peakFrame,
     peak_valid: peakFrame >= 0,
     b_frame: -1,
+    cap: -1,
     low_frame: -1,
+    base_offset: NaN,
     re_guarded: false,
     has_return: false,
+    chopped: false,
     return_sec: NaN,
     drop: NaN,
     coverage: NaN,
@@ -388,18 +395,24 @@ function buildPunch(d, stance, side, idx, ctx) {
   };
   if (!p.peak_valid) { rescorePunch(p, cfg); return p; }
 
-  // Search cap: maxReturnSec, end of cache, and the next punch thrown
-  // with the SAME hand (in a combo that hand is busy again — the return,
-  // whatever its shape, is over).
-  let cap = Math.min(N - 1, peakFrame + Math.round(cfg.maxReturnSec * fps));
+  // Window cap (generous): maxReturnSec, the next same-hand punch (that hand
+  // is busy again), end of cache. NOT the re-guard heuristic — the metric
+  // reads recovery from the trajectory, so it only needs a roomy window, not
+  // a precise end. capByPunch tracks whether a combo cut it short.
+  const maxRetCap = Math.min(N - 1, peakFrame + Math.round(cfg.maxReturnSec * fps));
+  let cap = maxRetCap, capByPunch = false;
   for (const { d: od, side: oside } of all) {
     if (oside !== side) continue;
     if (od.start_frame > peakFrame && od.start_frame - 1 < cap) {
-      cap = od.start_frame - 1;
+      cap = od.start_frame - 1; capByPunch = true;
     }
   }
+  p.cap = cap;
+  if (cap <= peakFrame) { rescorePunch(p, cfg); return p; }   // no return window
+  p.has_return = true;
 
-  // B = first re-guard frame, else closest approach inside the cap.
+  // Re-guard — COSMETIC ONLY now (readout + loop bound), never the verdict
+  // anchor. First wrist-in-guard frame, else closest approach.
   let bFrame = -1, minDist = Infinity, minDistFrame = -1;
   for (let f = peakFrame + 1; f <= cap; f++) {
     const dist = arm.noseDist[f];
@@ -408,46 +421,74 @@ function buildPunch(d, stance, side, idx, ctx) {
     if (dist <= cfg.reGuardDist) { bFrame = f; break; }
   }
   p.re_guarded = bFrame >= 0;
-  if (bFrame < 0) bFrame = minDistFrame;
-  if (bFrame < 0) { rescorePunch(p, cfg); return p; }  // no valid frames after peak
+  p.b_frame = bFrame >= 0 ? bFrame : (minDistFrame >= 0 ? minDistFrame : cap);
+  p.return_sec = (p.b_frame - peakFrame) / fps;
+  p.closest_dist = p.re_guarded ? arm.noseDist[p.b_frame] : minDist;
 
-  p.b_frame = bFrame;
-  p.has_return = true;
-  p.return_sec = (bFrame - peakFrame) / fps;
-  p.closest_dist = p.re_guarded ? arm.noseDist[bFrame] : minDist;
+  // Smoothed shoulder-relative offset (wrist_y − shoulder_y; bigger = fist
+  // lower). Smoothing stops one jittery glove frame faking a dip / recovery.
+  const half = Math.max(0, Math.round((cfg.smoothSec * fps - 1) / 2));
+  const offS = smoothOffset(arm, peakFrame, cap, half);
+  const offPeak = offS[peakFrame];
 
-  // Drop: how far the fist sinks below its extension height, measured
-  // against the SAME-SIDE SHOULDER at each frame (offset = wrist_y −
-  // shoulder_y, image-down so bigger = lower). The baseline is the offset
-  // at peak; the low is the biggest offset over the return. Both read the
-  // shoulder at their OWN frame, so a body that keeps sinking (knee bend,
-  // even after impact) moves wrist and shoulder together and the offset
-  // doesn't change — only the fist pulling away from the shoulder opens it.
-  // Frozen at the low frame, not the live cursor.
-  const offPeak = arm.wy[peakFrame] - arm.shy[peakFrame];   // baseline (px)
-  let lowFrame = -1, offLow = -Infinity, nValid = 0;
-  const nTotal = Math.max(0, bFrame - peakFrame);
-  for (let f = peakFrame + 1; f <= bFrame; f++) {
-    const wy = arm.wy[f], sy = arm.shy[f];
-    if (!Number.isFinite(wy) || !Number.isFinite(sy)) continue;  // wrist OR shoulder missing
+  // Low = lowest fist (max offset) over the return; coverage tally.
+  let lowFrame = peakFrame, offLow = Number.isFinite(offPeak) ? offPeak : -Infinity;
+  let nValid = 0; const nTotal = cap - peakFrame;
+  for (let f = peakFrame + 1; f <= cap; f++) {
+    const o = offS[f];
+    if (!Number.isFinite(o)) continue;
     nValid++;
-    const off = wy - sy;
-    if (off > offLow) { offLow = off; lowFrame = f; }
+    if (o > offLow) { offLow = o; lowFrame = f; }
   }
   p.coverage = nTotal > 0 ? nValid / nTotal : 1;
   p.low_frame = lowFrame;
 
+  // Recovery = how far the fist climbs back AFTER the low (min offset after).
+  let recoHigh = offLow;
+  for (let f = lowFrame + 1; f <= cap; f++) {
+    const o = offS[f];
+    if (Number.isFinite(o) && o < recoHigh) recoHigh = o;
+  }
+  // Chopped: a combo cut the window before any recovery could be observed →
+  // can't tell whether it would have climbed back.
+  p.chopped = capByPunch && (cap - lowFrame) <= Math.max(1, half);
+
+  // Prominence: it's a U only if the fist BOTH fell below extension AND
+  // climbed back. Score the smaller of the two (= dip prominence). The
+  // baseline is the higher (lower-fist) of {peak, recovery}, so a monotonic
+  // descent to a low guard — or a body shot rising from a low peak — reads ~0.
+  const baseOff = Math.max(Number.isFinite(offPeak) ? offPeak : -Infinity, recoHigh);
+  p.base_offset = baseOff;
+  const uPx = Math.max(0, offLow - baseOff);
+
   const tVals = [];
-  for (let f = peakFrame; f <= bFrame; f++) {
+  for (let f = peakFrame; f <= cap; f++) {
     if (Number.isFinite(torso[f])) tVals.push(torso[f]);
   }
   const tMed = median(tVals);
-  p.drop = (Number.isFinite(tMed) && tMed > 0 && Number.isFinite(offPeak) && lowFrame >= 0)
-    ? Math.max(0, (offLow - offPeak) / tMed)
+  p.drop = (Number.isFinite(tMed) && tMed > 0 && nValid > 0 && Number.isFinite(baseOff))
+    ? uPx / tMed
     : NaN;
 
   rescorePunch(p, cfg);
   return p;
+}
+
+// NaN-aware moving average of the shoulder-relative offset (wrist_y −
+// shoulder_y) over [lo, hi], half-window `half`. Frames missing wrist or
+// shoulder are skipped; output NaN where no neighbour was valid.
+function smoothOffset(arm, lo, hi, half) {
+  const out = new Float32Array(arm.wy.length).fill(NaN);
+  for (let f = lo; f <= hi; f++) {
+    let s = 0, n = 0;
+    const a = Math.max(lo, f - half), b = Math.min(hi, f + half);
+    for (let k = a; k <= b; k++) {
+      const wy = arm.wy[k], sy = arm.shy[k];
+      if (Number.isFinite(wy) && Number.isFinite(sy)) { s += wy - sy; n++; }
+    }
+    if (n > 0) out[f] = s / n;
+  }
+  return out;
 }
 
 function rescorePunch(p, cfg) {
@@ -485,6 +526,12 @@ function rescorePunch(p, cfg) {
     p.reason_text = `only ${Math.round(100 * p.coverage)}% of return frames have a wrist — gaps could hide the dip`;
     return;
   }
+  if (p.chopped) {
+    p.predicted = "unclear";
+    p.reason = "chopped";
+    p.reason_text = "the next same-hand punch cut the return before the fist recovered — can't tell if it would have climbed back";
+    return;
+  }
   if (!Number.isFinite(p.drop)) {
     p.predicted = "unclear";
     p.reason = "no_torso";
@@ -496,12 +543,12 @@ function rescorePunch(p, cfg) {
     : `never re-guarded inside the cap (closest approach ${p.closest_dist.toFixed(2)}t)`;
   if (p.drop >= cfg.dropFail) {
     p.predicted = "fail";
-    p.reason = "drop";
-    p.reason_text = `fist dropped ${p.drop.toFixed(2)}t below extension height ≥ ${cfg.dropFail.toFixed(2)} — hand sank on the way back; ${tail}`;
+    p.reason = "u_dip";
+    p.reason_text = `fist dipped ${p.drop.toFixed(2)}t below where it sits and climbed back ≥ ${cfg.dropFail.toFixed(2)} — U-shaped return; ${tail}`;
   } else {
     p.predicted = "pass";
-    p.reason = "stayed_up";
-    p.reason_text = `fist dropped ${p.drop.toFixed(2)}t < ${cfg.dropFail.toFixed(2)} — hand stayed up; ${tail}`;
+    p.reason = "no_dip";
+    p.reason_text = `U-dip ${p.drop.toFixed(2)}t < ${cfg.dropFail.toFixed(2)} — no drop-and-recover; ${tail}`;
   }
 }
 
@@ -751,28 +798,27 @@ function updateActiveRow() {
 //   1. shoulder at peak  — frozen, faint    (where the body was)
 //   2. shoulder now      — live              (gap 1↔2 = body sank, ignored)
 //   3. detected low      — frozen, verdict   (lowest the fist got)
-//   + a caliper, frozen at the low frame, from the extension-height baseline
-//     (shoulder-at-low + peak offset) down to the low — that gap IS the drop.
-//   + the live wrist dot.
+//   + a caliper, frozen at the low frame, from the prominence baseline
+//     (shoulder-at-low + max(peak, recovery) offset) down to the low — that
+//     gap IS the U-dip. + the live wrist dot.
 function drawReturnPath(ctx, p, scale, frame) {
   if (!p.peak_valid || !p.has_return) return;
   const arm = signals.arms[p.side];
   const col = COLORS[p.predicted] || COLORS.unclear;
   const W = ctx.canvas.width;
-  const peak = p.peak_frame, low = p.low_frame, b = p.b_frame;
-  const offPeak = arm.wy[peak] - arm.shy[peak];   // fist-below-shoulder at peak (px)
+  const peak = p.peak_frame, low = p.low_frame, end = p.cap >= 0 ? p.cap : p.b_frame;
 
-  // Faint context: the actual wrist trail through the return.
-  drawTrail(ctx, arm, peak, b, COLORS.outPath, 1.5, [3, 3], scale);
+  // Faint context: the actual wrist trail through the return window.
+  drawTrail(ctx, arm, peak, end, COLORS.outPath, 1.5, [3, 3], scale);
 
   // 1. shoulder at peak (frozen) · 2. shoulder now (live).
   hline(ctx, arm.shy[peak], W, COLORS.shoulderPk, 1 * scale, [6 * scale, 5 * scale]);
   hline(ctx, arm.shy[frame], W, COLORS.shoulderNow, 1.2 * scale, null);
 
   // 3. + caliper, frozen at the low frame.
-  if (low >= 0 && Number.isFinite(arm.wy[low]) && Number.isFinite(arm.shy[low]) && Number.isFinite(offPeak)) {
+  if (low >= 0 && Number.isFinite(arm.wy[low]) && Number.isFinite(arm.shy[low]) && Number.isFinite(p.base_offset)) {
     const wxLow = arm.wx[low], wyLow = arm.wy[low];
-    const baseY = arm.shy[low] + offPeak;          // extension height at the low frame's shoulder
+    const baseY = arm.shy[low] + p.base_offset;    // prominence baseline at the low frame's shoulder
 
     hline(ctx, wyLow, W, col, 1.2 * scale, [6 * scale, 5 * scale]);
 
@@ -861,12 +907,12 @@ function renderTemplate(sig, cfg) {
   return `
     <h2>Hand return path (straights)</h2>
     <p class="hint">
-      After the peak, the fist should come back to guard without dropping.
-      <b>drop</b> = how far it sinks below its extension height, measured
-      against the same-side shoulder, in torsos. Because it's wrist−shoulder
-      every frame, bending the knees (even continuously after impact) moves
-      both together and reads ~0 — only the fist pulling away from the
-      shoulder opens it.
+      <b>drop</b> = the U-dip's prominence vs the same-side shoulder, in
+      torsos: the fist must BOTH fall below its extension height AND climb
+      back. We score the smaller half, so a clean retrace to a low guard
+      (falls, never climbs) and a body shot (low at peak, only rises) both
+      read ~0 — and because it's wrist−shoulder every frame, bending the
+      knees (even continuously after impact) cancels too.
     </p>
 
     <h3>Legend</h3>
@@ -876,9 +922,9 @@ function renderTemplate(sig, cfg) {
       <li><span style="display:inline-block;width:24px;height:2px;background:${COLORS.shoulderNow};vertical-align:middle"></span>
         &nbsp;shoulder height now — gap from the line above = body sank (ignored)</li>
       <li><span style="display:inline-block;width:24px;height:1px;border-top:2px dashed ${COLORS.baseLine};vertical-align:middle"></span>
-        &nbsp;extension height at the low frame — top of the caliper</li>
+        &nbsp;prominence baseline — higher of extension / recovery</li>
       <li><span style="color:${COLORS.lowMark};font-weight:700">✕</span>
-        &nbsp;detected low + verdict-colored caliper = the drop</li>
+        &nbsp;detected low + verdict-colored caliper = the U-dip</li>
       <li><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${COLORS.wristNow};vertical-align:middle"></span>
         &nbsp;live wrist &nbsp;·&nbsp;
         <span style="display:inline-block;width:14px;height:14px;border:2px dashed ${COLORS.guardRing};border-radius:50%;vertical-align:middle"></span>
