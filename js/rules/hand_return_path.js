@@ -6,7 +6,7 @@
 // guard. Watch the retract, not the throw: the throw can be clean and the
 // return still wrong.
 //
-// Per labelled punch (head straights only — jab_head / cross_head):
+// Per labelled straight (jab/cross, head + body):
 //
 //   peak  = most-extended frame in the punch window (max reach =
 //           |shoulder→wrist| / torso, same pick as arm_extension) — the
@@ -17,23 +17,26 @@
 //           hand (combos), maxReturnSec, and end of cache; if the wrist
 //           never re-guards inside the cap, B falls back to the
 //           closest-approach frame (annotated, still scored).
-//   sag   = max perpendicular deviation of the return wrist track BELOW
-//           the straight chord peak→B, normalized by the window-median
-//           torso. Measured in the SHOULDER FRAME (wrist minus per-frame
-//           shoulder-line midpoint) so a knee bend / bob that lowers the
-//           whole body during the return doesn't masquerade as a dip.
-//           A straight return reads ~0; a U reads the depth of the U.
-//           Verdict is sag alone: fail if sag ≥ sagFail.
+//   drop  = how far the fist sinks BELOW its extension height, measured
+//           against the SAME-SIDE SHOULDER so whole-body vertical motion
+//           cancels. Per frame, offset = wrist_y − shoulder_y (bigger =
+//           fist lower). The baseline is offset AT PEAK; the low is the
+//           biggest offset over the return. Both use the shoulder at
+//           THEIR OWN frame, so the value is frozen, not live:
+//             drop = (offset_at_low − offset_at_peak) / torso   (clamp ≥0)
+//           A knee bend (even continuous, even after impact) moves wrist
+//           and shoulder together → offset unchanged → drop ~0. Only the
+//           fist pulling away from the shoulder opens it. Fail if
+//           drop ≥ dropFail. Vertical-only: catches a dropped hand, not a
+//           purely-sideways loop (the rarer fault).
 //
-// AXIALITY GATE — same cut as arm_extension, joined by punch_uuid: the
-// return arc is only visible when the punch travels across the image
-// plane, so punches the temporal model calls too head-on are skipped
-// (can't judge a path you can't see).
+// AXIALITY GATE — optional (togglable), joined by punch_uuid. Less load-
+// bearing than for the old 2D-arc metric since a vertical drop reads even
+// on a head-on punch; left in so head-on punches can be excluded if wanted.
 //
-// COVERAGE GATE — the sag max over a gappy track can miss the dip
-// (glove occlusion → NaN wrist, no Vision fallback). Windows with less
-// than minCoverage valid interior frames score "unclear" instead of
-// pretending the path was clean.
+// COVERAGE GATE — the low over a gappy track can miss the dip (glove
+// occlusion → NaN wrist, no Vision fallback). Windows with less than
+// minCoverage valid frames score "unclear" instead of guessing.
 //
 // Wrist source: identical contract to arm_extension — v6 cache preferred
 // (glove wrists baked in at joints 9/10, conf gated by minGloveConf),
@@ -47,7 +50,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 
 const DEFAULTS = {
-  sagFail:      0.20,   // fail if max sag ≥ this (torsos)
+  dropFail:     0.20,   // fail if shoulder-relative drop ≥ this (torsos)
   reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard
   maxReturnSec: 1.0,    // search cap after the peak frame
   minCoverage:  0.60,   // min fraction of valid wrist frames inside the return window
@@ -55,28 +58,31 @@ const DEFAULTS = {
   axialityMax:  Math.SQRT1_2,   // ≈0.7071 = cos 45° — same cut as arm_extension
   minGloveConf: 0.20,
   minPoseConf:  0.20,
-  // HEAD straights only. Hooks/uppercuts arc by design, and body shots
-  // travel down-to-target then back up — "straight back along the same
-  // line" describes neither. Body shots flagged at 3.5× the head rate
-  // (7% vs 2%) — mostly false positives from that down-up geometry plus
-  // peak/re-guard placement misfiring on it — so they're out of scope.
+  // Straights only (hooks/uppercuts arc by design). Body shots are back
+  // in: the drop metric measures the fist sinking BELOW its extension
+  // height, and a body shot's fist is already low at peak and only rises
+  // afterward, so it reads ~0 instead of false-failing the way the old
+  // chord-sag did.
   appliesTo: new Set([
-    "jab_head",
-    "cross_head",
+    "jab_head", "jab_body",
+    "cross_head", "cross_body",
   ]),
 };
 
 const COLORS = {
-  pass:      "#5fd97a",
-  fail:      "#e85a5a",
-  unclear:   "#f5b945",
-  skip:      "#7ec8ff",
-  outPath:   "rgba(255,255,255,0.35)",
-  chord:     "rgba(255,255,255,0.55)",
-  guardRing: "rgba(126,200,255,0.45)",
-  sagMark:   "#ff8bd2",
-  agree:     "#5fd97a",
-  disagree:  "#e85a5a",
+  pass:        "#5fd97a",
+  fail:        "#e85a5a",
+  unclear:     "#f5b945",
+  skip:        "#7ec8ff",
+  outPath:     "rgba(255,255,255,0.35)",
+  guardRing:   "rgba(126,200,255,0.45)",
+  shoulderPk:  "rgba(255,255,255,0.30)",   // shoulder height at peak (frozen)
+  shoulderNow: "rgba(255,255,255,0.70)",   // shoulder height this frame (live)
+  baseLine:    "rgba(126,200,255,0.65)",   // extension height carried to the low frame
+  wristNow:    "#7ec8ff",                  // live wrist dot
+  lowMark:     "#ff8bd2",                  // detected-low marker
+  agree:       "#5fd97a",
+  disagree:    "#e85a5a",
 };
 
 // (hand, stance) → anatomical side, mirroring arm_extension / guard_drop.
@@ -161,8 +167,8 @@ export const HandReturnPathRule = {
       window.__viewerRedraw?.();
     };
 
-    // sagFail only moves the verdict — rescore, no window recompute.
-    wireSlider("hrp-sag", "hrp-sag-out", "sagFail", rescoreAndRefresh);
+    // dropFail only moves the verdict — rescore, no window recompute.
+    wireSlider("hrp-drop", "hrp-drop-out", "dropFail", rescoreAndRefresh);
     // These reshape the return window — full recompute.
     wireSlider("hrp-reguard", "hrp-reguard-out", "reGuardDist", recomputeAndRefresh);
     wireSlider("hrp-maxret",  "hrp-maxret-out",  "maxReturnSec", recomputeAndRefresh, 1);
@@ -235,7 +241,7 @@ export const HandReturnPathRule = {
     }
 
     const active = activePunchAt(signals.punches, f);
-    if (active) drawReturnPath(ctx, active, s);
+    if (active) drawReturnPath(ctx, active, s, f);
   },
 
   update(state) {
@@ -271,7 +277,7 @@ export const HandReturnPathRule = {
     setNoseDist("hrp-r-dist", signals.arms.R.noseDist[f], cfg);
     const ap = activePunchAt(signals.punches, f);
     setText("hrp-active", ap
-      ? `${ap.punch_type} · sag ${Number.isFinite(ap.sag) ? ap.sag.toFixed(2) + "t" : "—"} · ${ap.predicted}`
+      ? `${ap.punch_type} · drop ${Number.isFinite(ap.drop) ? ap.drop.toFixed(2) + "t" : "—"} · ${ap.predicted}`
       : "—");
   },
 
@@ -310,7 +316,6 @@ function computeAll(state, cfg) {
   const startSec = pose.start_sec || 0;
 
   const torso = torsoEuclidPerFrame(pose, cfg);
-  const midShoulder = midShoulderPerFrame(pose, cfg);
   const arms = {
     L: perFrameArm(pose, "L", cfg, torso),
     R: perFrameArm(pose, "R", cfg, torso),
@@ -327,13 +332,13 @@ function computeAll(state, cfg) {
   const punches = all
     .filter(({ d }) => cfg.appliesTo.has(d.punch_type))
     .map(({ d, stance, side }, idx) =>
-      buildPunch(d, stance, side, idx, { arms, torso, midShoulder, all, N, fps, startSec, cfg }));
+      buildPunch(d, stance, side, idx, { arms, torso, all, N, fps, startSec, cfg }));
 
-  return { arms, torso, midShoulder, punches, fps };
+  return { arms, torso, punches, fps };
 }
 
 function buildPunch(d, stance, side, idx, ctx) {
-  const { arms, torso, midShoulder, all, N, fps, startSec, cfg } = ctx;
+  const { arms, torso, all, N, fps, startSec, cfg } = ctx;
   const arm = arms[side];
   const sf = Math.max(0, d.start_frame);
   const ef = Math.min(N - 1, d.end_frame);
@@ -371,11 +376,11 @@ function buildPunch(d, stance, side, idx, ctx) {
     peak_frame: peakFrame,
     peak_valid: peakFrame >= 0,
     b_frame: -1,
-    sag_frame: -1,
+    low_frame: -1,
     re_guarded: false,
     has_return: false,
     return_sec: NaN,
-    sag: NaN,
+    drop: NaN,
     coverage: NaN,
     closest_dist: NaN,
     peak_axiality,
@@ -411,46 +416,35 @@ function buildPunch(d, stance, side, idx, ctx) {
   p.return_sec = (bFrame - peakFrame) / fps;
   p.closest_dist = p.re_guarded ? arm.noseDist[bFrame] : minDist;
 
-  // Sag: max deviation below the chord A(peak)→B, over interior frames —
-  // measured in the SHOULDER FRAME. Each wrist sample has the per-frame
-  // shoulder-line midpoint subtracted, so whole-body vertical motion during
-  // the return (knee bend, bob, a step down) is cancelled: it moves the
-  // wrist in the image but not relative to the body, and must not read as a
-  // U. A genuine loop still curves relative to the shoulders. We only
-  // subtract a translation, so +y is still image-down and the normal logic
-  // is unchanged. Mid-shoulder is finite at A and B by construction (peak is
-  // picked via reach, B via nose distance — both already require valid
-  // shoulders/torso).
-  const { msx, msy } = midShoulder;
-  const Ax = arm.wx[peakFrame] - msx[peakFrame], Ay = arm.wy[peakFrame] - msy[peakFrame];
-  const Bx = arm.wx[bFrame]   - msx[bFrame],     By = arm.wy[bFrame]   - msy[bFrame];
-  const dx = Bx - Ax, dy = By - Ay;
-  const len = Math.hypot(dx, dy);
-  // Chord normal pointing "down" in image coords (+y). Degenerate chord
-  // (A≈B — punch barely left the guard) falls back to straight-down.
-  let nx = 0, ny = 1;
-  if (len >= 1e-3) {
-    nx = -dy / len; ny = dx / len;
-    if (ny < 0) { nx = -nx; ny = -ny; }
-  }
-  let sagPx = 0, sagFrame = -1, nValid = 0;
-  const nTotal = Math.max(0, bFrame - peakFrame - 1);
-  for (let f = peakFrame + 1; f < bFrame; f++) {
-    const x = arm.wx[f] - msx[f], y = arm.wy[f] - msy[f];
-    if (!Number.isFinite(x)) continue;   // wrist OR shoulder missing → skip
+  // Drop: how far the fist sinks below its extension height, measured
+  // against the SAME-SIDE SHOULDER at each frame (offset = wrist_y −
+  // shoulder_y, image-down so bigger = lower). The baseline is the offset
+  // at peak; the low is the biggest offset over the return. Both read the
+  // shoulder at their OWN frame, so a body that keeps sinking (knee bend,
+  // even after impact) moves wrist and shoulder together and the offset
+  // doesn't change — only the fist pulling away from the shoulder opens it.
+  // Frozen at the low frame, not the live cursor.
+  const offPeak = arm.wy[peakFrame] - arm.shy[peakFrame];   // baseline (px)
+  let lowFrame = -1, offLow = -Infinity, nValid = 0;
+  const nTotal = Math.max(0, bFrame - peakFrame);
+  for (let f = peakFrame + 1; f <= bFrame; f++) {
+    const wy = arm.wy[f], sy = arm.shy[f];
+    if (!Number.isFinite(wy) || !Number.isFinite(sy)) continue;  // wrist OR shoulder missing
     nValid++;
-    const s = (x - Ax) * nx + (y - Ay) * ny;
-    if (s > sagPx) { sagPx = s; sagFrame = f; }
+    const off = wy - sy;
+    if (off > offLow) { offLow = off; lowFrame = f; }
   }
   p.coverage = nTotal > 0 ? nValid / nTotal : 1;
-  p.sag_frame = sagFrame;
+  p.low_frame = lowFrame;
 
   const tVals = [];
   for (let f = peakFrame; f <= bFrame; f++) {
     if (Number.isFinite(torso[f])) tVals.push(torso[f]);
   }
   const tMed = median(tVals);
-  p.sag = (Number.isFinite(tMed) && tMed > 0) ? sagPx / tMed : NaN;
+  p.drop = (Number.isFinite(tMed) && tMed > 0 && Number.isFinite(offPeak) && lowFrame >= 0)
+    ? Math.max(0, (offLow - offPeak) / tMed)
+    : NaN;
 
   rescorePunch(p, cfg);
   return p;
@@ -491,23 +485,23 @@ function rescorePunch(p, cfg) {
     p.reason_text = `only ${Math.round(100 * p.coverage)}% of return frames have a wrist — gaps could hide the dip`;
     return;
   }
-  if (!Number.isFinite(p.sag)) {
+  if (!Number.isFinite(p.drop)) {
     p.predicted = "unclear";
     p.reason = "no_torso";
-    p.reason_text = "no valid torso in the return window — can't normalize the sag";
+    p.reason_text = "no valid torso / shoulder in the return window — can't measure the drop";
     return;
   }
   const tail = p.re_guarded
     ? `re-guarded in ${p.return_sec.toFixed(2)}s`
     : `never re-guarded inside the cap (closest approach ${p.closest_dist.toFixed(2)}t)`;
-  if (p.sag >= cfg.sagFail) {
+  if (p.drop >= cfg.dropFail) {
     p.predicted = "fail";
-    p.reason = "sag";
-    p.reason_text = `max sag ${p.sag.toFixed(2)}t ≥ ${cfg.sagFail.toFixed(2)} — U-shaped return; ${tail}`;
+    p.reason = "drop";
+    p.reason_text = `fist dropped ${p.drop.toFixed(2)}t below extension height ≥ ${cfg.dropFail.toFixed(2)} — hand sank on the way back; ${tail}`;
   } else {
     p.predicted = "pass";
-    p.reason = "straight";
-    p.reason_text = `max sag ${p.sag.toFixed(2)}t < ${cfg.sagFail.toFixed(2)} — return tracks the chord; ${tail}`;
+    p.reason = "stayed_up";
+    p.reason_text = `fist dropped ${p.drop.toFixed(2)}t < ${cfg.dropFail.toFixed(2)} — hand stayed up; ${tail}`;
   }
 }
 
@@ -517,20 +511,28 @@ function perFrameArm(pose, side, cfg, torso) {
   const joints = JOINTS_FOR_SIDE[side];
   const wx = new Float32Array(N).fill(NaN);
   const wy = new Float32Array(N).fill(NaN);
+  const shx = new Float32Array(N).fill(NaN);   // same-side shoulder, conf-gated
+  const shy = new Float32Array(N).fill(NaN);
   const reach = new Float32Array(N).fill(NaN);
   const noseDist = new Float32Array(N).fill(NaN);
   const source = new Array(N).fill(null);
   for (let f = 0; f < N; f++) {
+    // Same-side shoulder (drop reference) — gated on shoulder conf alone so
+    // the overlay lines survive even when torso is briefly missing.
+    const sc = pose.conf[f * 17 + joints.shoulder];
+    let sx = NaN, sy = NaN;
+    if (sc >= cfg.minPoseConf) {
+      sx = pose.skeleton[(f * 17 + joints.shoulder) * 2];
+      sy = pose.skeleton[(f * 17 + joints.shoulder) * 2 + 1];
+      if (Number.isFinite(sx)) { shx[f] = sx; shy[f] = sy; }
+    }
     const w = wristXY(pose, f, joints, cfg);
     if (!w) continue;
     wx[f] = w.x; wy[f] = w.y; source[f] = w.source;
     const t = torso[f];
     const tOk = Number.isFinite(t) && t > 0;
-    const sc = pose.conf[f * 17 + joints.shoulder];
-    if (sc >= cfg.minPoseConf && tOk) {
-      const sx = pose.skeleton[(f * 17 + joints.shoulder) * 2];
-      const sy = pose.skeleton[(f * 17 + joints.shoulder) * 2 + 1];
-      if (Number.isFinite(sx)) reach[f] = Math.hypot(w.x - sx, w.y - sy) / t;
+    if (Number.isFinite(shx[f]) && tOk) {
+      reach[f] = Math.hypot(w.x - shx[f], w.y - shy[f]) / t;
     }
     const nc = pose.conf[f * 17 + J.NOSE];
     if (nc >= cfg.minPoseConf && tOk) {
@@ -539,7 +541,7 @@ function perFrameArm(pose, side, cfg, torso) {
       if (Number.isFinite(nx)) noseDist[f] = Math.hypot(w.x - nx, w.y - ny) / t;
     }
   }
-  return { wx, wy, reach, noseDist, source };
+  return { wx, wy, shx, shy, reach, noseDist, source };
 }
 
 // Same wrist contract as arm_extension: legacy glove sidecar first, then
@@ -560,31 +562,6 @@ function wristXY(pose, frame, joints, cfg) {
   const gate = isGloveBaked ? cfg.minGloveConf : cfg.minPoseConf;
   if (pc < gate || !Number.isFinite(px)) return null;
   return { x: px, y: py, source: isGloveBaked ? "glove" : "pose" };
-}
-
-// Per-frame shoulder-line midpoint (L/R shoulder average). NaN when either
-// shoulder is below the conf gate. This is the reference the sag is measured
-// against: subtracting it cancels whole-body vertical motion (knee bend, bob,
-// a step down) during the return, which moves the wrist in the image but not
-// relative to the body — so it must not read as a U.
-function midShoulderPerFrame(pose, cfg) {
-  const N = pose.n_frames;
-  const msx = new Float32Array(N).fill(NaN);
-  const msy = new Float32Array(N).fill(NaN);
-  const gate = cfg.minPoseConf;
-  for (let f = 0; f < N; f++) {
-    const cL = pose.conf[f * 17 + J.L_SHOULDER];
-    const cR = pose.conf[f * 17 + J.R_SHOULDER];
-    if (cL < gate || cR < gate) continue;
-    const lx = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2];
-    const ly = pose.skeleton[(f * 17 + J.L_SHOULDER) * 2 + 1];
-    const rx = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2];
-    const ry = pose.skeleton[(f * 17 + J.R_SHOULDER) * 2 + 1];
-    if (!Number.isFinite(lx) || !Number.isFinite(rx)) continue;
-    msx[f] = 0.5 * (lx + rx);
-    msy[f] = 0.5 * (ly + ry);
-  }
-  return { msx, msy };
 }
 
 // Per-frame euclidean torso |shoulder_mid → hip_mid| — same normalizer
@@ -770,54 +747,93 @@ function updateActiveRow() {
 
 // ─── draw ──────────────────────────────────────────────────────────────────
 
-function drawReturnPath(ctx, p, scale) {
+// Four-line overlay (all in pose-pixel space, which the canvas is in):
+//   1. shoulder at peak  — frozen, faint    (where the body was)
+//   2. shoulder now      — live              (gap 1↔2 = body sank, ignored)
+//   3. detected low      — frozen, verdict   (lowest the fist got)
+//   + a caliper, frozen at the low frame, from the extension-height baseline
+//     (shoulder-at-low + peak offset) down to the low — that gap IS the drop.
+//   + the live wrist dot.
+function drawReturnPath(ctx, p, scale, frame) {
   if (!p.peak_valid || !p.has_return) return;
   const arm = signals.arms[p.side];
   const col = COLORS[p.predicted] || COLORS.unclear;
+  const W = ctx.canvas.width;
+  const peak = p.peak_frame, low = p.low_frame, b = p.b_frame;
+  const offPeak = arm.wy[peak] - arm.shy[peak];   // fist-below-shoulder at peak (px)
 
-  // Out path (start→peak), faint — context for "same line back".
-  drawTrail(ctx, arm, p.start_frame, p.peak_frame, COLORS.outPath, 1.5, [3, 3], scale);
-  // Chord A→B, dashed — the "if it came straight back" line.
-  const Ax = arm.wx[p.peak_frame], Ay = arm.wy[p.peak_frame];
-  const Bx = arm.wx[p.b_frame],   By = arm.wy[p.b_frame];
-  ctx.save();
-  ctx.strokeStyle = COLORS.chord;
-  ctx.lineWidth = 1.5 * scale;
-  ctx.setLineDash([6 * scale, 4 * scale]);
-  ctx.beginPath(); ctx.moveTo(Ax, Ay); ctx.lineTo(Bx, By); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.restore();
-  // Return path (peak→B), verdict-colored.
-  drawTrail(ctx, arm, p.peak_frame, p.b_frame, col, 3, null, scale);
+  // Faint context: the actual wrist trail through the return.
+  drawTrail(ctx, arm, peak, b, COLORS.outPath, 1.5, [3, 3], scale);
 
-  ctx.save();
-  // Endpoints: A = peak (filled), B = re-guard / closest approach (ring).
-  ctx.fillStyle = col;
-  ctx.beginPath(); ctx.arc(Ax, Ay, 5 * scale, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = col;
-  ctx.lineWidth = 2 * scale;
-  ctx.beginPath(); ctx.arc(Bx, By, 6 * scale, 0, Math.PI * 2); ctx.stroke();
+  // 1. shoulder at peak (frozen) · 2. shoulder now (live).
+  hline(ctx, arm.shy[peak], W, COLORS.shoulderPk, 1 * scale, [6 * scale, 5 * scale]);
+  hline(ctx, arm.shy[frame], W, COLORS.shoulderNow, 1.2 * scale, null);
 
-  // Max-sag point + readout.
-  if (p.sag_frame >= 0 && Number.isFinite(p.sag)) {
-    const sx = arm.wx[p.sag_frame], sy = arm.wy[p.sag_frame];
-    if (Number.isFinite(sx)) {
-      ctx.strokeStyle = COLORS.sagMark;
-      ctx.lineWidth = 2 * scale;
-      const r = 6 * scale;
-      ctx.beginPath();
-      ctx.moveTo(sx - r, sy - r); ctx.lineTo(sx + r, sy + r);
-      ctx.moveTo(sx - r, sy + r); ctx.lineTo(sx + r, sy - r);
-      ctx.stroke();
-      const txt = `sag ${p.sag.toFixed(2)}t · ${p.predicted}${p.label ? ` (GT ${p.label})` : ""}`;
-      ctx.font = `${12 * scale}px ui-monospace, monospace`;
-      const tw = ctx.measureText(txt).width;
-      ctx.fillStyle = "rgba(0,0,0,0.65)";
-      ctx.fillRect(sx + 10 * scale, sy - 9 * scale, tw + 8 * scale, 18 * scale);
-      ctx.fillStyle = col;
-      ctx.fillText(txt, sx + 14 * scale, sy + 4 * scale);
-    }
+  // 3. + caliper, frozen at the low frame.
+  if (low >= 0 && Number.isFinite(arm.wy[low]) && Number.isFinite(arm.shy[low]) && Number.isFinite(offPeak)) {
+    const wxLow = arm.wx[low], wyLow = arm.wy[low];
+    const baseY = arm.shy[low] + offPeak;          // extension height at the low frame's shoulder
+
+    hline(ctx, wyLow, W, col, 1.2 * scale, [6 * scale, 5 * scale]);
+
+    ctx.save();
+    // baseline tick around the low point
+    ctx.strokeStyle = COLORS.baseLine;
+    ctx.lineWidth = 1.5 * scale;
+    ctx.setLineDash([4 * scale, 3 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(wxLow - 42 * scale, baseY); ctx.lineTo(wxLow + 42 * scale, baseY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // caliper from baseline down to the low
+    const cx = wxLow - 28 * scale;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5 * scale;
+    ctx.beginPath();
+    ctx.moveTo(cx, baseY); ctx.lineTo(cx, wyLow);
+    ctx.moveTo(cx - 4 * scale, baseY); ctx.lineTo(cx + 4 * scale, baseY);
+    ctx.moveTo(cx - 4 * scale, wyLow); ctx.lineTo(cx + 4 * scale, wyLow);
+    ctx.stroke();
+
+    // low marker ✕
+    ctx.strokeStyle = COLORS.lowMark;
+    ctx.lineWidth = 2 * scale;
+    const r = 6 * scale;
+    ctx.beginPath();
+    ctx.moveTo(wxLow - r, wyLow - r); ctx.lineTo(wxLow + r, wyLow + r);
+    ctx.moveTo(wxLow - r, wyLow + r); ctx.lineTo(wxLow + r, wyLow - r);
+    ctx.stroke();
+
+    // readout
+    const txt = `drop ${Number.isFinite(p.drop) ? p.drop.toFixed(2) : "—"}t · ${p.predicted}${p.label ? ` (GT ${p.label})` : ""}`;
+    ctx.font = `${12 * scale}px ui-monospace, monospace`;
+    const tw = ctx.measureText(txt).width;
+    const ly = (baseY + wyLow) / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(cx - tw - 14 * scale, ly - 9 * scale, tw + 8 * scale, 18 * scale);
+    ctx.fillStyle = col;
+    ctx.fillText(txt, cx - tw - 10 * scale, ly + 4 * scale);
+    ctx.restore();
   }
+
+  // Live wrist dot.
+  if (Number.isFinite(arm.wx[frame])) {
+    ctx.save();
+    ctx.fillStyle = COLORS.wristNow;
+    ctx.beginPath(); ctx.arc(arm.wx[frame], arm.wy[frame], 5 * scale, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Full-width horizontal reference line at pose-y.
+function hline(ctx, y, W, color, width, dash) {
+  if (!Number.isFinite(y)) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dash || []);
+  ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   ctx.restore();
 }
 
@@ -845,26 +861,28 @@ function renderTemplate(sig, cfg) {
   return `
     <h2>Hand return path (straights)</h2>
     <p class="hint">
-      After the peak, the wrist should travel back to the guard along the
-      straight chord peak→re-guard. <b>sag</b> = max deviation below that
-      chord, in torsos — ~0 for a straight return, the depth of the U for
-      a looping one. Measured relative to the shoulder line, so bending the
-      knees / bobbing mid-return doesn't count as a dip.
+      After the peak, the fist should come back to guard without dropping.
+      <b>drop</b> = how far it sinks below its extension height, measured
+      against the same-side shoulder, in torsos. Because it's wrist−shoulder
+      every frame, bending the knees (even continuously after impact) moves
+      both together and reads ~0 — only the fist pulling away from the
+      shoulder opens it.
     </p>
 
     <h3>Legend</h3>
     <ul class="hint" style="list-style:none;padding-left:0;margin:0 0 12px 0;line-height:1.7">
-      <li><span style="display:inline-block;width:24px;height:1px;border-top:2px dashed ${COLORS.outPath};vertical-align:middle"></span>
-        &nbsp;out path (punch start → peak), context only</li>
-      <li><span style="display:inline-block;width:24px;height:1px;border-top:2px dashed ${COLORS.chord};vertical-align:middle"></span>
-        &nbsp;chord peak → re-guard — the "straight back" reference</li>
-      <li><span style="display:inline-block;width:24px;height:3px;background:${COLORS.pass};vertical-align:middle"></span>
-        / <span style="display:inline-block;width:24px;height:3px;background:${COLORS.fail};vertical-align:middle"></span>
-        &nbsp;actual return path, colored by verdict</li>
-      <li><span style="color:${COLORS.sagMark};font-weight:700">✕</span>
-        &nbsp;max-sag point with the sag readout</li>
-      <li><span style="display:inline-block;width:14px;height:14px;border:2px dashed ${COLORS.guardRing};border-radius:50%;vertical-align:middle"></span>
-        &nbsp;guard radius around the nose (re-guard target)</li>
+      <li><span style="display:inline-block;width:24px;height:1px;border-top:2px dashed ${COLORS.shoulderPk};vertical-align:middle"></span>
+        &nbsp;shoulder height at peak (frozen)</li>
+      <li><span style="display:inline-block;width:24px;height:2px;background:${COLORS.shoulderNow};vertical-align:middle"></span>
+        &nbsp;shoulder height now — gap from the line above = body sank (ignored)</li>
+      <li><span style="display:inline-block;width:24px;height:1px;border-top:2px dashed ${COLORS.baseLine};vertical-align:middle"></span>
+        &nbsp;extension height at the low frame — top of the caliper</li>
+      <li><span style="color:${COLORS.lowMark};font-weight:700">✕</span>
+        &nbsp;detected low + verdict-colored caliper = the drop</li>
+      <li><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${COLORS.wristNow};vertical-align:middle"></span>
+        &nbsp;live wrist &nbsp;·&nbsp;
+        <span style="display:inline-block;width:14px;height:14px;border:2px dashed ${COLORS.guardRing};border-radius:50%;vertical-align:middle"></span>
+        &nbsp;guard radius (re-guard target)</li>
     </ul>
 
     <h3>Live wrist → nose (torsos)</h3>
@@ -883,11 +901,11 @@ function renderTemplate(sig, cfg) {
       </div>
     </div>
 
-    <h3>Sag fail threshold</h3>
+    <h3>Drop fail threshold</h3>
     <div class="slider-row">
-      <input type="range" id="hrp-sag" min="0.05" max="0.50" step="0.01" value="${cfg.sagFail}" />
-      <output id="hrp-sag-out">${cfg.sagFail.toFixed(2)}</output>
-      <span class="muted small">max sag (torsos) — at or above = U-shaped return</span>
+      <input type="range" id="hrp-drop" min="0.05" max="0.50" step="0.01" value="${cfg.dropFail}" />
+      <output id="hrp-drop-out">${cfg.dropFail.toFixed(2)}</output>
+      <span class="muted small">drop below extension height (torsos) — at or above = dropped hand</span>
     </div>
 
     <h3>Return window</h3>
@@ -990,8 +1008,8 @@ function renderPunchTable() {
             ? `<span style="color:${COLORS.agree}" title="GT ${p.label} · agrees">✓</span>`
             : `<span style="color:${COLORS.disagree}" title="GT ${p.label} · disagrees">✗</span>`;
         }
-        const sagCell = Number.isFinite(p.sag)
-          ? `<td style="color:${p.sag >= cfg.sagFail ? COLORS.fail : COLORS.pass};font-variant-numeric:tabular-nums">${p.sag.toFixed(2)}</td>`
+        const dropCell = Number.isFinite(p.drop)
+          ? `<td style="color:${p.drop >= cfg.dropFail ? COLORS.fail : COLORS.pass};font-variant-numeric:tabular-nums">${p.drop.toFixed(2)}</td>`
           : `<td class="muted">—</td>`;
         const retCell = Number.isFinite(p.return_sec)
           ? `<td class="muted" style="font-variant-numeric:tabular-nums">${p.return_sec.toFixed(2)}s${p.re_guarded ? "" : " ⃠"}</td>`
@@ -1015,7 +1033,7 @@ function renderPunchTable() {
           <td>${pill(p.predicted)}</td>
           <td style="text-align:center">${match}</td>
           <td class="muted small" title="${reasonText}" style="white-space:nowrap">${p.reason || "—"}</td>
-          ${sagCell}
+          ${dropCell}
           ${retCell}
           ${axialCell}
           ${covCell}
@@ -1045,7 +1063,7 @@ function renderPunchTable() {
       <thead><tr>
         <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
         <th title="which gate decided this punch — hover for the numbers that fired it">why</th>
-        <th title="max sag below the peak→re-guard chord (torsos)">sag</th>
+        <th title="how far the fist dropped below its extension height, vs the same-side shoulder (torsos)">drop</th>
         <th title="peak → return end; ⃠ = never re-guarded inside the cap (closest approach used)">ret</th>
         <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — above the cut = arc not visible, skipped">axiality</th>
         <th title="valid wrist frames inside the return window">cov</th>
@@ -1065,7 +1083,7 @@ function renderAggregate() {
   }
   const passed = scored.filter(p => p.predicted === "pass").length;
   const skipped = signals.punches.filter(p => p.predicted === "skip").length;
-  const meanSag = scored.reduce((s, p) => s + p.sag, 0) / scored.length;
+  const meanDrop = scored.reduce((s, p) => s + p.drop, 0) / scored.length;
   const labelled = scored.filter(p => p.label);
   const agree = labelled.filter(p => p.label === p.predicted).length;
   const agreePct = labelled.length
@@ -1079,16 +1097,16 @@ function renderAggregate() {
     <div class="metric">
       <div class="metric-label">predicted pass</div>
       <div class="metric-val">${passed}</div>
-      <div class="metric-sub">${Math.round(100 * passed / scored.length)}% · sag &lt; ${cfg.sagFail.toFixed(2)}</div>
+      <div class="metric-sub">${Math.round(100 * passed / scored.length)}% · drop &lt; ${cfg.dropFail.toFixed(2)}</div>
     </div>
     <div class="metric">
       <div class="metric-label">skipped (axial)</div>
       <div class="metric-val">${skipped}</div>
-      <div class="metric-sub">return arc not visible</div>
+      <div class="metric-sub">head-on, gated out</div>
     </div>
     <div class="metric">
-      <div class="metric-label">mean sag</div>
-      <div class="metric-val">${meanSag.toFixed(3)}</div>
+      <div class="metric-label">mean drop</div>
+      <div class="metric-val">${meanDrop.toFixed(3)}</div>
       <div class="metric-sub">torsos (scored only)</div>
     </div>
     <div class="metric">
