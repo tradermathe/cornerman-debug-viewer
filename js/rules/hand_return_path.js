@@ -91,6 +91,14 @@ let lastPose = null;
 let lastDetections = null;
 let latestState = null;
 
+// Loop playback — step through the straights one at a time, video looping
+// within each one. Mirrors hip_rotation_review.
+let videoEl = null;
+let loopWindow = null;       // {start_frame, end_frame} the video loops within
+let activeIdx = -1;          // index into signals.punches currently looped
+let timeupdateHandler = null;
+let keydownHandler = null;
+
 // v6 cache is the canonical wrist source — same pick as arm_extension.
 function pickPose(state) {
   return state.poseV6 || state.pose;
@@ -135,6 +143,7 @@ export const HandReturnPathRule = {
       renderPunchTable();
       renderAggregate();
       updateAxialStatus();
+      syncActiveLoop();
       window.__viewerRedraw?.();
     };
     const rescoreAndRefresh = () => {
@@ -142,6 +151,7 @@ export const HandReturnPathRule = {
       renderPunchTable();
       renderAggregate();
       updateAxialStatus();
+      syncActiveLoop();
       window.__viewerRedraw?.();
     };
 
@@ -169,17 +179,28 @@ export const HandReturnPathRule = {
     wireSlider("hrp-axial-max", "hrp-axial-max-out", "axialityMax", rescoreAndRefresh);
     updateAxialStatus();
 
-    // Click a punch row to seek — same scrubber-dispatch trick as the
-    // other lenses.
+    // Nav buttons — step through the straights, looping each in place.
+    host.querySelector("#hrp-prev")?.addEventListener("click",
+      () => seekToPunch(activeIdx - 1, latestState));
+    host.querySelector("#hrp-next")?.addEventListener("click",
+      () => seekToPunch(activeIdx + 1, latestState));
+    host.querySelector("#hrp-mute")?.addEventListener("click", toggleMute);
+
+    // Click a punch row to jump to (and loop) that straight.
     host.addEventListener("click", (ev) => {
-      const tr = ev.target.closest("tr[data-frame]");
+      const tr = ev.target.closest("tr[data-idx]");
       if (!tr) return;
-      const f = Number(tr.dataset.frame);
-      const slider = document.getElementById("scrubber");
-      if (!slider) return;
-      slider.value = String(f);
-      slider.dispatchEvent(new Event("input"));
+      seekToPunch(Number(tr.dataset.idx), latestState);
     });
+
+    // Loop the active straight's window + N/P/M keys, mirroring
+    // hip_rotation_review. Start on the first straight.
+    videoEl = document.getElementById("video");
+    installTimeupdateLoop();
+    installKeyHandlers();
+    updateMuteButton();
+    if (signals.punches.length) seekToPunch(0, latestState);
+    else updateCounter();
   },
 
   draw(ctx, state) {
@@ -215,13 +236,46 @@ export const HandReturnPathRule = {
     latestState = state;
     ensureAxialityModel(state, onModelReady);
     maybeRecompute(state);
+
+    // If the user scrubbed out of the active straight, hop the loop to
+    // whichever straight the cursor now sits inside — same pattern as
+    // hip_rotation_review.
     const f = state.frame;
+    const punches = signals.punches;
+    if (punches.length) {
+      const TOL = 5;
+      const active = activeIdx >= 0 ? punches[activeIdx] : null;
+      const aw = active ? loopWindowFor(active) : null;
+      const nearActive = aw && f >= aw.start_frame - TOL && f <= aw.end_frame + TOL;
+      if (!nearActive) {
+        const inside = punches.findIndex(p => {
+          const w = loopWindowFor(p);
+          return f >= w.start_frame && f <= w.end_frame;
+        });
+        if (inside !== -1 && inside !== activeIdx) {
+          activeIdx = inside;
+          loopWindow = loopWindowFor(punches[inside]);
+          updateCounter();
+          updateActiveRow();
+        }
+      }
+    }
+
     setNoseDist("hrp-l-dist", signals.arms.L.noseDist[f], cfg);
     setNoseDist("hrp-r-dist", signals.arms.R.noseDist[f], cfg);
     const ap = activePunchAt(signals.punches, f);
     setText("hrp-active", ap
       ? `${ap.punch_type} · sag ${Number.isFinite(ap.sag) ? ap.sag.toFixed(2) + "t" : "—"} · ${ap.predicted}`
       : "—");
+  },
+
+  unmount() {
+    if (videoEl && timeupdateHandler) videoEl.removeEventListener("timeupdate", timeupdateHandler);
+    if (keydownHandler) document.removeEventListener("keydown", keydownHandler, true);
+    timeupdateHandler = null;
+    keydownHandler = null;
+    loopWindow = null;
+    activeIdx = -1;
   },
 };
 
@@ -232,6 +286,12 @@ function maybeRecompute(state) {
     signals = computeAll(state, cfg);
     lastPose = pose;
     lastDetections = dets;
+    // New round (or relabeled) — rebuild the table and reset the loop to
+    // the first straight so N/P walks the new round cleanly.
+    renderPunchTable();
+    renderAggregate();
+    if (signals.punches.length) seekToPunch(0, state);
+    else { activeIdx = -1; loopWindow = null; updateCounter(); }
   }
 }
 
@@ -555,6 +615,117 @@ function updateAxialStatus() {
   el.textContent = `${skipped}/${N} too head-on (skipped) · ${unknown} not scored by the model.`;
 }
 
+// ─── loop playback (mirrors hip_rotation_review) ─────────────────────────────
+
+// Window the video loops within for a punch: the throw plus the full
+// return (peak → re-guard / closest approach), so you watch the retract.
+function loopWindowFor(p) {
+  const end = Math.max(p.end_frame, p.b_frame >= 0 ? p.b_frame : p.end_frame);
+  return { start_frame: p.start_frame, end_frame: end };
+}
+
+function seekToPunch(idx, state) {
+  const punches = signals?.punches || [];
+  if (!punches.length || !state) return;
+  if (idx < 0) idx = 0;
+  if (idx >= punches.length) idx = punches.length - 1;
+  activeIdx = idx;
+  loopWindow = loopWindowFor(punches[idx]);
+  if (videoEl && state.fps) {
+    videoEl.currentTime = (state.start_sec || 0) + loopWindow.start_frame / state.fps;
+    if (videoEl.paused) {
+      const pr = videoEl.play();
+      if (pr && typeof pr.catch === "function") pr.catch(() => {});
+    }
+  }
+  updateCounter();
+  updateActiveRow();
+}
+
+function installTimeupdateLoop() {
+  if (!videoEl) return;
+  if (timeupdateHandler) videoEl.removeEventListener("timeupdate", timeupdateHandler);
+  timeupdateHandler = () => {
+    if (latestState?.rule?.id !== "hand_return_path") return;
+    if (!loopWindow || !latestState.fps) return;
+    const endTime = (latestState.start_sec || 0) + (loopWindow.end_frame + 0.5) / latestState.fps;
+    if (videoEl.currentTime > endTime) {
+      videoEl.currentTime = (latestState.start_sec || 0) + loopWindow.start_frame / latestState.fps;
+    }
+  };
+  videoEl.addEventListener("timeupdate", timeupdateHandler);
+}
+
+function installKeyHandlers() {
+  // Capture phase so we run before the viewer's bubble-phase keydown
+  // listener and can clamp out-of-loop frame steps before they fire.
+  if (keydownHandler) document.removeEventListener("keydown", keydownHandler, true);
+  keydownHandler = (e) => {
+    if (latestState?.rule?.id !== "hand_return_path") return;
+    const tag = e.target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+    if (e.key === "n" || e.key === "N") { e.preventDefault(); seekToPunch(activeIdx + 1, latestState); return; }
+    if (e.key === "p" || e.key === "P") { e.preventDefault(); seekToPunch(activeIdx - 1, latestState); return; }
+    if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); return; }
+
+    if (!loopWindow) return;
+    let delta = 0;
+    if      (e.key === "ArrowLeft")  delta = -1;
+    else if (e.key === "ArrowRight") delta = +1;
+    else if (e.key === "[")          delta = -10;
+    else if (e.key === "]")          delta = +10;
+    else return;
+    const f = latestState.frame;
+    if (f < loopWindow.start_frame || f > loopWindow.end_frame) return;
+    const target = f + delta;
+    if (target < loopWindow.start_frame || target > loopWindow.end_frame) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  };
+  document.addEventListener("keydown", keydownHandler, true);
+}
+
+function toggleMute() {
+  if (!videoEl) return;
+  videoEl.muted = !videoEl.muted;
+  updateMuteButton();
+}
+
+function updateMuteButton() {
+  const btn = host?.querySelector("#hrp-mute");
+  if (btn && videoEl) btn.textContent = videoEl.muted ? "unmute (M)" : "mute (M)";
+}
+
+function updateCounter() {
+  const el = host?.querySelector("#hrp-counter");
+  if (!el) return;
+  const n = signals?.punches?.length || 0;
+  el.textContent = n
+    ? `${Math.min(activeIdx + 1, n)} / ${n} straights`
+    : "no straights in this round";
+}
+
+// Keep activeIdx / loopWindow valid after a recompute (slider change) so the
+// loop bounds follow the new return window without yanking playback.
+function syncActiveLoop() {
+  const punches = signals?.punches || [];
+  if (!punches.length) { activeIdx = -1; loopWindow = null; updateCounter(); return; }
+  if (activeIdx >= punches.length) activeIdx = punches.length - 1;
+  if (activeIdx >= 0) loopWindow = loopWindowFor(punches[activeIdx]);
+  updateCounter();
+}
+
+function updateActiveRow() {
+  if (!host) return;
+  host.querySelectorAll("tr[data-idx]").forEach(tr => {
+    const on = Number(tr.dataset.idx) === activeIdx;
+    tr.style.background = on ? "rgba(255,210,74,0.14)" : "";
+    tr.style.fontWeight = on ? "600" : "normal";
+  });
+}
+
 // ─── draw ──────────────────────────────────────────────────────────────────
 
 function drawReturnPath(ctx, p, scale) {
@@ -738,10 +909,18 @@ function renderTemplate(sig, cfg) {
 
     <h3>Per-punch (straights only)</h3>
     <p class="hint">
-      Clickable rows seek to the max-sag frame. ${hasLabels
+      The video loops within each straight (throw → return). Step with the
+      buttons or <code>N</code>/<code>P</code>, <code>M</code> mutes, or
+      click a row to jump to it. ${hasLabels
         ? "Verdict shows labeler vs predicted; ✓ when they agree."
         : "<span class='muted'>No <code>rule_hand_ushape</code> labels found — predicted only.</span>"}
     </p>
+    <div class="ol-nav" style="display:flex;gap:8px;align-items:center;margin:6px 0 10px">
+      <button id="hrp-prev" class="orient-btn-action secondary" style="padding:6px 10px">⏮ prev (P)</button>
+      <button id="hrp-next" class="orient-btn-action secondary" style="padding:6px 10px">next (N) ⏭</button>
+      <button id="hrp-mute" class="orient-btn-action secondary" style="padding:6px 10px">mute (M)</button>
+      <span id="hrp-counter" style="margin-left:6px;color:#888;font-size:12px"></span>
+    </div>
     <div id="hrp-table-host"></div>
 
     <h3>Aggregate</h3>
@@ -787,8 +966,7 @@ function renderPunchTable() {
           ? `<td style="color:${p.coverage >= cfg.minCoverage ? COLORS.pass : COLORS.fail};font-variant-numeric:tabular-nums">${Math.round(100 * p.coverage)}%</td>`
           : `<td class="muted">—</td>`;
         const reasonText = (p.reason_text || "").replace(/"/g, '&quot;');
-        const seekFrame = p.sag_frame >= 0 ? p.sag_frame : (p.peak_valid ? p.peak_frame : p.start_frame);
-        return `<tr data-frame="${seekFrame}" style="cursor:pointer">
+        return `<tr data-idx="${p.idx}" style="cursor:pointer">
           <td>${tsStr}s</td>
           <td>${p.punch_type}</td>
           <td>${pill(p.predicted)}</td>
@@ -831,6 +1009,7 @@ function renderPunchTable() {
       </tr></thead>
       <tbody>${tbody}</tbody>
     </table>`;
+  updateActiveRow();
 }
 
 function renderAggregate() {
