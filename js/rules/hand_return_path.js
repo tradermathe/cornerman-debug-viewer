@@ -11,11 +11,12 @@
 //   peak  = most-extended frame in the punch window (max reach =
 //           |shoulder→wrist| / torso, same pick as arm_extension) — the
 //           start of the return.
-//   window= [peak, cap], cap = min(peak + maxReturnSec, next same-hand
-//           punch − 1, cache end). NOT re-guard — the verdict reads the
-//           recovery off the trajectory, so it only needs a roomy window,
-//           not a precise end. Re-guard is computed for the readout / loop
-//           bound only.
+//   window= [peak, cap], cap = min(peak + maxReturnSec (1.5s), next
+//           same-hand punch − 1 + cutGraceSec, cache end). The grace past
+//           the next punch covers labellers marking its start at the windup.
+//           NOT re-guard — the verdict reads the recovery off the
+//           trajectory, so it only needs a roomy window, not a precise end.
+//           Re-guard is computed for the readout / loop bound only.
 //   drop  = the U-dip's PROMINENCE, against the SAME-SIDE SHOULDER so
 //           whole-body vertical motion cancels. Per frame (smoothed),
 //           offset = wrist_y − shoulder_y (bigger = fist lower). The low is
@@ -55,7 +56,8 @@ import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 const DEFAULTS = {
   dropFail:     0.20,   // fail if U-dip prominence ≥ this (torsos)
   reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard (cosmetic)
-  maxReturnSec: 1.0,    // window cap after the peak frame
+  maxReturnSec: 1.5,    // window cap after the peak frame
+  cutGraceSec:  0.12,   // grace past the next same-hand punch before cutting
   smoothSec:    0.08,   // moving-average window on the offset signal
   minCoverage:  0.60,   // min fraction of valid wrist frames inside the return window
   axialityGate: true,
@@ -421,12 +423,16 @@ function buildPunch(d, stance, side, idx, ctx) {
   // reads recovery from the trajectory, so it only needs a roomy window, not
   // a precise end. capByPunch tracks whether a combo cut it short.
   const maxRetCap = Math.min(N - 1, peakFrame + Math.round(cfg.maxReturnSec * fps));
+  const graceFrames = Math.round((cfg.cutGraceSec || 0) * fps);
   let cap = maxRetCap, capByPunch = false;
   for (const { d: od, side: oside } of all) {
     if (oside !== side) continue;
-    if (od.start_frame > peakFrame && od.start_frame - 1 < cap) {
-      cap = od.start_frame - 1; capByPunch = true;
-    }
+    if (od.start_frame <= peakFrame) continue;
+    // Grace past the next same-hand punch's labelled start — labellers often
+    // mark the start at the windup, which can begin while this hand is still
+    // settling back. Never extend past the time cap or cache end.
+    const cut = Math.min(maxRetCap, od.start_frame - 1 + graceFrames);
+    if (cut < cap) { cap = cut; capByPunch = true; }
   }
   p.cap = cap;
   if (cap <= peakFrame) { rescorePunch(p, cfg); return p; }   // no return window
