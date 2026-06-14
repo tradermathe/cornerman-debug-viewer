@@ -939,20 +939,23 @@ function drawSparkline(p, state) {
     return;
   }
   const arm = signals.arms[p.side];
+  // Plot the whole punch start→cap, but only peak→cap is scored. The throw
+  // (start→peak) is drawn greyed as context, with a marker at the peak.
   const peak = p.peak_frame, cap = p.cap, tm = p.torso_med;
+  const lo = Math.max(0, p.start_frame);
   const half = Math.max(0, Math.round((cfg.smoothSec * (signals.fps || 30) - 1) / 2));
-  const offS = smoothOffset(arm, peak, cap, half);
+  const offS = smoothOffset(arm, lo, cap, half);
 
   const baseV = p.base_offset / tm;
   const thrV  = baseV + cfg.dropFail;
   let vmin = Math.min(0, baseV), vmax = Math.max(thrV, 0);
-  for (let f = peak; f <= cap; f++) {
+  for (let f = lo; f <= cap; f++) {
     const o = offS[f]; if (!Number.isFinite(o)) continue;
     const v = o / tm; if (v < vmin) vmin = v; if (v > vmax) vmax = v;
   }
   vmin -= 0.05; vmax += 0.05;
   const padX = 6, padT = 6, padB = 6;
-  const X = f => padX + (cap > peak ? (f - peak) / (cap - peak) : 0) * (W - 2 * padX);
+  const X = f => padX + (cap > lo ? (f - lo) / (cap - lo) : 0) * (W - 2 * padX);
   const Y = v => padT + (vmax > vmin ? (v - vmin) / (vmax - vmin) : 0.5) * (H - padT - padB);
   const col = COLORS[p.predicted] || COLORS.unclear;
 
@@ -965,22 +968,33 @@ function drawSparkline(p, state) {
   hl(baseV, COLORS.baseLine, [4, 3]);               // prominence baseline
   hl(thrV, COLORS.fail, [2, 3]);                    // fail threshold
 
+  // peak marker (where scoring starts)
+  ctx.strokeStyle = "rgba(255,255,255,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(X(peak), padT); ctx.lineTo(X(peak), H - padB); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "11px ui-monospace, monospace";
+  ctx.fillText("peak", X(peak) + 3, padT + 11);
+
   // current-frame cursor
-  if (state && Number.isFinite(state.frame) && state.frame >= peak && state.frame <= cap) {
+  if (state && Number.isFinite(state.frame) && state.frame >= lo && state.frame <= cap) {
     ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(X(state.frame), padT); ctx.lineTo(X(state.frame), H - padB); ctx.stroke();
   }
 
-  // offset curve
-  ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath();
-  let pen = false;
-  for (let f = peak; f <= cap; f++) {
-    const o = offS[f];
-    if (!Number.isFinite(o)) { pen = false; continue; }
-    const px = X(f), py = Y(o / tm);
-    if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
-  }
-  ctx.stroke();
+  // offset curve — throw (start→peak) greyed, return (peak→cap) verdict-colored.
+  const seg = (f0, f1, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
+    let pen = false;
+    for (let f = f0; f <= f1; f++) {
+      const o = offS[f];
+      if (!Number.isFinite(o)) { pen = false; continue; }
+      const px = X(f), py = Y(o / tm);
+      if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  };
+  seg(lo, peak, "rgba(255,255,255,0.28)");          // throw (not scored)
+  seg(peak, cap, col);                              // return (scored)
 
   // detected-low ✕
   if (p.low_frame >= 0 && Number.isFinite(offS[p.low_frame])) {
@@ -1048,9 +1062,11 @@ function renderTemplate(sig, cfg) {
     <canvas id="hrp-spark" width="520" height="120"
       style="width:100%;height:120px;background:#111;border:1px solid #2a2a2a;border-radius:4px;display:block"></canvas>
     <p class="hint muted small" style="margin:4px 0 0 0">
-      wrist below shoulder (torsos) across the return. Flat ≈ hand stayed up;
-      a spike that returns = the dip. <span style="color:${COLORS.baseLine}">blue</span> = prominence
-      baseline, <span style="color:${COLORS.fail}">red</span> = fail threshold,
+      wrist below shoulder (torsos) across the punch. The
+      <span style="color:rgba(255,255,255,0.45)">grey</span> lead-in is the throw
+      (start→peak, not scored); scoring starts at the <code>peak</code> marker.
+      <span style="color:${COLORS.baseLine}">blue</span> = prominence baseline,
+      <span style="color:${COLORS.fail}">red</span> = fail threshold,
       <span style="color:${COLORS.lowMark}">✕</span> = detected low. A single sharp
       spike is usually a wrist-tracking glitch, not a real drop.
     </p>
