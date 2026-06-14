@@ -280,9 +280,25 @@ export const HandReturnPathRule = {
     setNoseDist("hrp-l-dist", signals.arms.L.noseDist[f], cfg);
     setNoseDist("hrp-r-dist", signals.arms.R.noseDist[f], cfg);
     const ap = activePunchAt(signals.punches, f);
+
+    // Live wrist-below-shoulder offset (torsos) for the active side.
+    let offVal = NaN;
+    if (ap) {
+      const arm = signals.arms[ap.side];
+      const t = signals.torso[f];
+      if (Number.isFinite(arm.wy[f]) && Number.isFinite(arm.shy[f]) && t > 0) {
+        offVal = (arm.wy[f] - arm.shy[f]) / t;
+      }
+    }
+    const offEl = host?.querySelector("#hrp-off");
+    if (offEl) offEl.textContent = Number.isFinite(offVal)
+      ? (offVal >= 0 ? "+" : "") + offVal.toFixed(2) : "—";
+
     setText("hrp-active", ap
       ? `${ap.punch_type} · drop ${Number.isFinite(ap.drop) ? ap.drop.toFixed(2) + "t" : "—"} · ${ap.predicted}`
       : "—");
+
+    drawSparkline(ap, state);
   },
 
   unmount() {
@@ -383,6 +399,7 @@ function buildPunch(d, stance, side, idx, ctx) {
     cap: -1,
     low_frame: -1,
     base_offset: NaN,
+    torso_med: NaN,
     re_guarded: false,
     has_return: false,
     chopped: false,
@@ -466,6 +483,7 @@ function buildPunch(d, stance, side, idx, ctx) {
     if (Number.isFinite(torso[f])) tVals.push(torso[f]);
   }
   const tMed = median(tVals);
+  p.torso_med = tMed;
   p.drop = (Number.isFinite(tMed) && tMed > 0 && nValid > 0 && Number.isFinite(baseOff))
     ? uPx / tMed
     : NaN;
@@ -655,7 +673,7 @@ function activePunchAt(punches, frame) {
   // whole point is what happens after the peak.
   return punches.find(p =>
     frame >= p.start_frame
-    && frame <= Math.max(p.end_frame, p.b_frame >= 0 ? p.b_frame : p.end_frame)
+    && frame <= Math.max(p.end_frame, p.cap >= 0 ? p.cap : p.end_frame)
   ) || null;
 }
 
@@ -686,7 +704,9 @@ function updateAxialStatus() {
 // Window the video loops within for a punch: the throw plus the full
 // return (peak → re-guard / closest approach), so you watch the retract.
 function loopWindowFor(p) {
-  const end = Math.max(p.end_frame, p.b_frame >= 0 ? p.b_frame : p.end_frame);
+  // Loop the whole metric window (through cap), so the low — which can fall
+  // after re-guard — is on screen.
+  const end = Math.max(p.end_frame, p.cap >= 0 ? p.cap : p.end_frame);
   return { start_frame: p.start_frame, end_frame: end };
 }
 
@@ -706,6 +726,7 @@ function seekToPunch(idx, state) {
   }
   updateCounter();
   updateActiveRow();
+  drawSparkline(punches[idx], latestState);
 }
 
 function installTimeupdateLoop() {
@@ -900,6 +921,78 @@ function drawTrail(ctx, arm, f0, f1, color, width, dash, scale) {
   ctx.restore();
 }
 
+// Sidebar sparkline of the offset signal (wrist below shoulder, torsos) over
+// the active punch's return window — so spikes (tracking glitches) and real
+// dip-and-recover shapes are both visible at a glance.
+function drawSparkline(p, state) {
+  const cv = host?.querySelector("#hrp-spark");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#111"; ctx.fillRect(0, 0, W, H);
+
+  if (!p || !p.peak_valid || !p.has_return || p.cap < 0 || !(p.torso_med > 0)) {
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.font = "12px ui-monospace, monospace";
+    ctx.fillText("no active punch", 10, H / 2);
+    return;
+  }
+  const arm = signals.arms[p.side];
+  const peak = p.peak_frame, cap = p.cap, tm = p.torso_med;
+  const half = Math.max(0, Math.round((cfg.smoothSec * (signals.fps || 30) - 1) / 2));
+  const offS = smoothOffset(arm, peak, cap, half);
+
+  const baseV = p.base_offset / tm;
+  const thrV  = baseV + cfg.dropFail;
+  let vmin = Math.min(0, baseV), vmax = Math.max(thrV, 0);
+  for (let f = peak; f <= cap; f++) {
+    const o = offS[f]; if (!Number.isFinite(o)) continue;
+    const v = o / tm; if (v < vmin) vmin = v; if (v > vmax) vmax = v;
+  }
+  vmin -= 0.05; vmax += 0.05;
+  const padX = 6, padT = 6, padB = 6;
+  const X = f => padX + (cap > peak ? (f - peak) / (cap - peak) : 0) * (W - 2 * padX);
+  const Y = v => padT + (vmax > vmin ? (v - vmin) / (vmax - vmin) : 0.5) * (H - padT - padB);
+  const col = COLORS[p.predicted] || COLORS.unclear;
+
+  const hl = (v, color, dash) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash || []);
+    ctx.beginPath(); ctx.moveTo(padX, Y(v)); ctx.lineTo(W - padX, Y(v)); ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  hl(0, "rgba(255,255,255,0.18)");                  // shoulder height
+  hl(baseV, COLORS.baseLine, [4, 3]);               // prominence baseline
+  hl(thrV, COLORS.fail, [2, 3]);                    // fail threshold
+
+  // current-frame cursor
+  if (state && Number.isFinite(state.frame) && state.frame >= peak && state.frame <= cap) {
+    ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(X(state.frame), padT); ctx.lineTo(X(state.frame), H - padB); ctx.stroke();
+  }
+
+  // offset curve
+  ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath();
+  let pen = false;
+  for (let f = peak; f <= cap; f++) {
+    const o = offS[f];
+    if (!Number.isFinite(o)) { pen = false; continue; }
+    const px = X(f), py = Y(o / tm);
+    if (!pen) { ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // detected-low ✕
+  if (p.low_frame >= 0 && Number.isFinite(offS[p.low_frame])) {
+    const px = X(p.low_frame), py = Y(offS[p.low_frame] / tm), r = 4;
+    ctx.strokeStyle = COLORS.lowMark; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
+    ctx.moveTo(px - r, py + r); ctx.lineTo(px + r, py - r);
+    ctx.stroke();
+  }
+}
+
 // ─── render ────────────────────────────────────────────────────────────────
 
 function renderTemplate(sig, cfg) {
@@ -942,10 +1035,25 @@ function renderTemplate(sig, cfg) {
         <div class="metric-val" id="hrp-r-dist">—</div>
       </div>
       <div class="metric">
+        <div class="metric-label">wrist ↓ shoulder</div>
+        <div class="metric-val" id="hrp-off">—</div>
+      </div>
+      <div class="metric">
         <div class="metric-label">active punch</div>
         <div class="metric-val" id="hrp-active" style="font-size:14px">—</div>
       </div>
     </div>
+
+    <h3>Offset trace · active punch</h3>
+    <canvas id="hrp-spark" width="520" height="120"
+      style="width:100%;height:120px;background:#111;border:1px solid #2a2a2a;border-radius:4px;display:block"></canvas>
+    <p class="hint muted small" style="margin:4px 0 0 0">
+      wrist below shoulder (torsos) across the return. Flat ≈ hand stayed up;
+      a spike that returns = the dip. <span style="color:${COLORS.baseLine}">blue</span> = prominence
+      baseline, <span style="color:${COLORS.fail}">red</span> = fail threshold,
+      <span style="color:${COLORS.lowMark}">✕</span> = detected low. A single sharp
+      spike is usually a wrist-tracking glitch, not a real drop.
+    </p>
 
     <h3>Drop fail threshold</h3>
     <div class="slider-row">
