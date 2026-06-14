@@ -766,8 +766,9 @@ function installTimeupdateLoop() {
 }
 
 function installKeyHandlers() {
-  // Capture phase so we run before the viewer's bubble-phase keydown
-  // listener and can clamp out-of-loop frame steps before they fire.
+  // N/P step between straights, M mutes. Arrows / brackets are NOT clamped to
+  // the loop window — they fall through to the viewer's own frame-step so you
+  // can scrub past the punch's boundaries.
   if (keydownHandler) document.removeEventListener("keydown", keydownHandler, true);
   keydownHandler = (e) => {
     if (latestState?.rule?.id !== "hand_return_path") return;
@@ -777,21 +778,7 @@ function installKeyHandlers() {
     if (e.key === "n" || e.key === "N") { e.preventDefault(); seekToPunch(activeIdx + 1, latestState); return; }
     if (e.key === "p" || e.key === "P") { e.preventDefault(); seekToPunch(activeIdx - 1, latestState); return; }
     if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); return; }
-
-    if (!loopWindow) return;
-    let delta = 0;
-    if      (e.key === "ArrowLeft")  delta = -1;
-    else if (e.key === "ArrowRight") delta = +1;
-    else if (e.key === "[")          delta = -10;
-    else if (e.key === "]")          delta = +10;
-    else return;
-    const f = latestState.frame;
-    if (f < loopWindow.start_frame || f > loopWindow.end_frame) return;
-    const target = f + delta;
-    if (target < loopWindow.start_frame || target > loopWindow.end_frame) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    }
+    // Everything else (arrows, brackets) passes through unclamped.
   };
   document.addEventListener("keydown", keydownHandler, true);
 }
