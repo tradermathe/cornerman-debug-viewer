@@ -244,8 +244,12 @@ export const HandReturnPathRule = {
       }
     }
 
-    const active = activePunchAt(signals.punches, f);
-    if (active) drawReturnPath(ctx, active, s, f);
+    // Combos overlap — draw every live punch (others dimmed), the selected
+    // one on top, so a jab→cross shows both and clicking a row always works.
+    const actives = punchesActiveAt(signals.punches, f);
+    const primary = primaryActive(signals.punches, f);
+    for (const ap of actives) if (ap !== primary) drawReturnPath(ctx, ap, s, f, true);
+    if (primary) drawReturnPath(ctx, primary, s, f, false);
   },
 
   update(state) {
@@ -279,7 +283,7 @@ export const HandReturnPathRule = {
 
     setNoseDist("hrp-l-dist", signals.arms.L.noseDist[f], cfg);
     setNoseDist("hrp-r-dist", signals.arms.R.noseDist[f], cfg);
-    const ap = activePunchAt(signals.punches, f);
+    const ap = primaryActive(signals.punches, f);
 
     // Live wrist-below-shoulder offset (torsos) for the active side.
     let offVal = NaN;
@@ -668,13 +672,31 @@ function median(arr) {
   return s[Math.floor(s.length / 2)];
 }
 
+function inPunchWindow(p, frame) {
+  // Active through the whole metric window, not just the labelled punch.
+  return frame >= p.start_frame
+    && frame <= Math.max(p.end_frame, p.cap >= 0 ? p.cap : p.end_frame);
+}
+
 function activePunchAt(punches, frame) {
-  // Active through the return, not just the labelled window — the lens'
-  // whole point is what happens after the peak.
-  return punches.find(p =>
-    frame >= p.start_frame
-    && frame <= Math.max(p.end_frame, p.cap >= 0 ? p.cap : p.end_frame)
-  ) || null;
+  return punches.find(p => inPunchWindow(p, frame)) || null;
+}
+
+// All punches whose window contains the frame — combos overlap (jab→cross),
+// so more than one can be live at once.
+function punchesActiveAt(punches, frame) {
+  return punches.filter(p => inPunchWindow(p, frame));
+}
+
+// The punch the overlay / chart should feature: the SELECTED (looped) one if
+// the cursor is inside it, so clicking a row works even when an earlier
+// punch's window overlaps it; otherwise the first one under the cursor.
+function primaryActive(punches, frame) {
+  if (activeIdx >= 0 && activeIdx < punches.length
+      && inPunchWindow(punches[activeIdx], frame)) {
+    return punches[activeIdx];
+  }
+  return activePunchAt(punches, frame);
 }
 
 // The axiality sidecar loads async — recompute the join when it lands.
@@ -822,28 +844,31 @@ function updateActiveRow() {
 //   + a caliper, frozen at the low frame, from the prominence baseline
 //     (shoulder-at-low + max(peak, recovery) offset) down to the low — that
 //     gap IS the U-dip. + the live wrist dot.
-function drawReturnPath(ctx, p, scale, frame) {
+function drawReturnPath(ctx, p, scale, frame, dim) {
   if (!p.peak_valid || !p.has_return) return;
   const arm = signals.arms[p.side];
   const col = COLORS[p.predicted] || COLORS.unclear;
   const W = ctx.canvas.width;
   const peak = p.peak_frame, low = p.low_frame, end = p.cap >= 0 ? p.cap : p.b_frame;
 
-  // Faint context: the actual wrist trail through the return window.
-  drawTrail(ctx, arm, peak, end, COLORS.outPath, 1.5, [3, 3], scale);
-
-  // 1. shoulder at peak (frozen) · 2. shoulder now (live).
-  hline(ctx, arm.shy[peak], W, COLORS.shoulderPk, 1 * scale, [6 * scale, 5 * scale]);
-  hline(ctx, arm.shy[frame], W, COLORS.shoulderNow, 1.2 * scale, null);
+  // Full-width lines + trail + live dot only for the featured punch — a dimmed
+  // overlapping punch shows just its localized caliper/✕ so the frame doesn't
+  // fill with duplicate shoulder lines.
+  if (!dim) {
+    drawTrail(ctx, arm, peak, end, COLORS.outPath, 1.5, [3, 3], scale);
+    hline(ctx, arm.shy[peak], W, COLORS.shoulderPk, 1 * scale, [6 * scale, 5 * scale]);
+    hline(ctx, arm.shy[frame], W, COLORS.shoulderNow, 1.2 * scale, null);
+  }
 
   // 3. + caliper, frozen at the low frame.
   if (low >= 0 && Number.isFinite(arm.wy[low]) && Number.isFinite(arm.shy[low]) && Number.isFinite(p.base_offset)) {
     const wxLow = arm.wx[low], wyLow = arm.wy[low];
     const baseY = arm.shy[low] + p.base_offset;    // prominence baseline at the low frame's shoulder
 
-    hline(ctx, wyLow, W, col, 1.2 * scale, [6 * scale, 5 * scale]);
+    if (!dim) hline(ctx, wyLow, W, col, 1.2 * scale, [6 * scale, 5 * scale]);
 
     ctx.save();
+    if (dim) ctx.globalAlpha = 0.5;
     // baseline tick around the low point
     ctx.strokeStyle = COLORS.baseLine;
     ctx.lineWidth = 1.5 * scale;
@@ -884,8 +909,8 @@ function drawReturnPath(ctx, p, scale, frame) {
     ctx.restore();
   }
 
-  // Live wrist dot.
-  if (Number.isFinite(arm.wx[frame])) {
+  // Live wrist dot (featured punch only).
+  if (!dim && Number.isFinite(arm.wx[frame])) {
     ctx.save();
     ctx.fillStyle = COLORS.wristNow;
     ctx.beginPath(); ctx.arc(arm.wx[frame], arm.wy[frame], 5 * scale, 0, Math.PI * 2); ctx.fill();
