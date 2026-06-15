@@ -313,6 +313,7 @@ function buildReference(pose) {
   return {
     torsoRef: torso,
     legR:       legLen / torso,
+    shinR:      (shin.length >= min ? med(shin) : 0.5 * legLen) / torso,  // for the knee→ankle fallback
     headR:      headBlock / torso,
     shoulderWR: med(shoulderW) / torso,
     hipWR:      med(hipW) / torso,
@@ -355,24 +356,36 @@ function torsoAt(pose, frame, r) {
 // Where to plant the stance this frame: the real feet when this frame's ankles
 // are confident (and the clip floor came from ankles), else the stable clip
 // floor centred under the boxer's hips.
-function frameAnchor(pose, frame, r, stanceWidth) {
+function frameAnchor(pose, frame, r, t) {
   const g = cfg.minAnchorConfidence;
   const i = frame * 17;
   const pt = j => ({ x: pose.skeleton[(i + j) * 2], y: pose.skeleton[(i + j) * 2 + 1] });
-  const lOk = pose.conf[i + J.L_ANKLE] >= g, rOk = pose.conf[i + J.R_ANKLE] >= g;
-  const hipsOk = pose.conf[i + J.L_HIP] >= g && pose.conf[i + J.R_HIP] >= g;
+  const shin = r.shinR * t;
+  const stanceWidth = r.hipWR * t * 1.8;
 
+  // Per foot, best available evidence: the ankle, else the knee extended down by
+  // one shin length, else nothing for this side.
+  const foot = (ankleJ, kneeJ) => {
+    if (pose.conf[i + ankleJ] >= g) return { p: pt(ankleJ), ankle: true };
+    if (pose.conf[i + kneeJ]  >= g) { const k = pt(kneeJ); return { p: { x: k.x, y: k.y + shin }, ankle: false }; }
+    return null;
+  };
+  const L = foot(J.L_ANKLE, J.L_KNEE), R = foot(J.R_ANKLE, J.R_KNEE);
+
+  const hipsOk = pose.conf[i + J.L_HIP] >= g && pose.conf[i + J.R_HIP] >= g;
   let centerX;
   if (hipsOk) centerX = (pt(J.L_HIP).x + pt(J.R_HIP).x) / 2;
-  else if (lOk || rOk) centerX = ((lOk ? pt(J.L_ANKLE).x : pt(J.R_ANKLE).x) + (rOk ? pt(J.R_ANKLE).x : pt(J.L_ANKLE).x)) / 2;
+  else if (L || R) centerX = ((L || R).p.x + (R || L).p.x) / 2;
   else centerX = r.centerX;
 
-  if ((lOk || rOk) && r.floorSource === "ankles") {
-    const floorY = Math.max(lOk ? pt(J.L_ANKLE).y : -Infinity, rOk ? pt(J.R_ANKLE).y : -Infinity);
-    const L = lOk ? pt(J.L_ANKLE) : { x: centerX - stanceWidth / 2, y: floorY };
-    const R = rOk ? pt(J.R_ANKLE) : { x: centerX + stanceWidth / 2, y: floorY };
-    return { L, R, floorY, centerX, source: "ankles" };
+  if (L || R) {
+    const floorY = Math.max(L ? L.p.y : -Infinity, R ? R.p.y : -Infinity);
+    const Lp = L ? L.p : { x: centerX - stanceWidth / 2, y: floorY };
+    const Rp = R ? R.p : { x: centerX + stanceWidth / 2, y: floorY };
+    const source = (L && L.ankle) || (R && R.ankle) ? "ankles" : "knees";
+    return { L: Lp, R: Rp, floorY, centerX, source };
   }
+  // Neither ankle nor knee this frame — fall back to the clip floor under the hips.
   const floorY = r.floorY;
   return {
     L: { x: centerX - stanceWidth / 2, y: floorY },
@@ -396,8 +409,7 @@ function stanceAt(pose, frame, r) {
     foreArm:   r.foreArmR * t,
   };
   const legLen = r.legR * t;
-  const stanceWidth = r.hipWR * t * 1.8;
-  const a = frameAnchor(pose, frame, r, stanceWidth);
+  const a = frameAnchor(pose, frame, r, t);
   const floorY = a.floorY, centerX = a.centerX;
 
   const hipY = floorY - legLen;
