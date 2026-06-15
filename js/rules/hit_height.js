@@ -36,7 +36,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 const DEFAULTS = {
   // Head zone margins (× standing height) around the stance crown / chin.
   headTopMargin: 0.04,   // head zone extends this far ABOVE the crown
-  chinMargin:    0.03,   // head zone extends this far BELOW the chin
+  chinMargin:    0.06,   // head zone extends this far BELOW the chin
   minWristConfidence:  0.20,
   minAnchorConfidence: 0.20,
 };
@@ -44,7 +44,7 @@ const DEFAULTS = {
 // Stance shaping (applied to the boxer's REAL measured segment lengths — these
 // are pose angles / sub-segment ratios, not body-size assumptions).
 const KNEE_BEND      = 0.95;  // legs ~95% extended → slight athletic sink
-const SOLAR_OF_TORSO = 0.55;  // solar plexus ≈ 55% up the torso from the hips
+const SOLAR_OF_TORSO = 0.65;  // solar plexus ≈ 65% up the torso from the hips
 const NECK_OF_S2N    = 0.50;  // shoulder→chin ≈ 0.5 × shoulder→nose (real)
 const HEAD_OF_S2N    = 1.30;  // chin→crown   ≈ 1.3 × shoulder→nose (real)
 
