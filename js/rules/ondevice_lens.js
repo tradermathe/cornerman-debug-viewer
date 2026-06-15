@@ -355,12 +355,13 @@ function buildHitHeightBlock(hh, state) {
       </div>`;
   }
 
+  const axialN = perPunch.filter(p => (p.skip_reason || "").startsWith("axial")).length;
   return `${header}
     <div style="font-size:13px; line-height:1.6">
       off-target: <code>${x.flaggedCount ?? "—"} / ${x.scoredCount ?? "—"}</code> scored ·
       ratio: <code>${fmt(hh.violationRatio, 2)}</code> ·
       weighted: <code>${x.weightedScore != null ? fmt(x.weightedScore, 2) : "—"}</code> <span class="muted">(count × depth → severity)</span><br>
-      <span class="muted">${x.straightCount ?? 0} straights · head &amp; body on-target; over-head / shoulder / below-belt flagged</span><br>
+      <span class="muted">${x.straightCount ?? 0} straights${axialN ? ` · ${axialN} axial (skipped)` : ""} · head &amp; body on-target; over-head / shoulder / below-belt flagged</span><br>
       <em style="color:#ccc">${hh.coachCue || ""}</em>
       ${table}
     </div>`;

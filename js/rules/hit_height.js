@@ -32,11 +32,15 @@
 
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
+// Axiality gate (same as arm_extension): a straight down the camera axis
+// foreshortens, so the 2D landing frame + fist height can't be trusted — skip it.
+import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 
 const DEFAULTS = {
   // Head zone margins (× standing height) around the stance crown / chin.
   headTopMargin: 0.04,   // head zone extends this far ABOVE the crown
   chinMargin:    0.08,   // head zone extends this far BELOW the chin
+  axialityMax:   Math.SQRT1_2,   // ≈0.7071 = cos 45°; skip straights more axial
   minWristConfidence:  0.20,
   minAnchorConfidence: 0.20,
 };
@@ -162,6 +166,9 @@ export const HitHeightRule = {
       slider.dispatchEvent(new Event("input"));
     });
 
+    // Load the axiality predictions (async); refresh the table + overlay when
+    // they land so the gate applies.
+    ensureAxialityModel(state, () => { renderTable(state); seekHack(state, state.frame); });
     renderTable(state);
   },
 
@@ -190,6 +197,9 @@ export const HitHeightRule = {
 
     const punch = activePunch(state);
     if (!punch) return;
+    // Don't draw a verdict for an axial punch — its height read is untrustworthy.
+    const ax = axialityForPunch(punch.punch_uuid)?.predAxiality;
+    if (ax == null || !Number.isFinite(ax) || ax > cfg.axialityMax) return;
     const w = wristXY(p, state.frame, JOINTS_FOR_SIDE[sideFor(punch)], cfg);
     if (!w) return;
     const z = zoneFor(w.y, B);
@@ -489,8 +499,15 @@ function computePunches(state) {
 
     const w = wristXY(p, landFrame, joints, cfg);
     const S = r ? stanceAt(p, landFrame, r) : null;
-    let frac = NaN, zone = null;
-    if (S && w) {
+    // Axiality gate (joined by punch_uuid from the trained model). Skip too-axial
+    // straights — missing score fails closed, same as arm_extension.
+    const ax = axialityForPunch(d.punch_uuid)?.predAxiality;
+    let frac = NaN, zone = null, skip = "";
+    if (ax == null || !Number.isFinite(ax)) {
+      skip = "axial?";
+    } else if (ax > cfg.axialityMax) {
+      skip = "axial";
+    } else if (S && w) {
       zone = zoneFor(w.y, boundaries(S));
       frac = (S.floorY - w.y) / S.H;
     }
@@ -499,8 +516,10 @@ function computePunches(state) {
       land_frame: landFrame,
       timestamp: d.timestamp,
       punch_type: d.punch_type || "?",
+      axiality: (ax == null || !Number.isFinite(ax)) ? null : ax,
       frac,
       zone,
+      skip,
     };
   });
 }
@@ -558,17 +577,20 @@ function renderTable(state) {
   }
   const scored = punches.filter(p => p.zone);
   const flagged = scored.filter(p => p.zone.flag).length;
+  const axialN = punches.filter(p => p.skip === "axial" || p.skip === "axial?").length;
   sumEl.innerHTML = scored.length
     ? `<b>${flagged}</b> / ${scored.length} punches flagged off-target` +
-      (scored.length < punches.length ? ` · ${punches.length - scored.length} unscored` : "")
-    : "No punches could be scored (no standing reference).";
+      (axialN ? ` · ${axialN} axial (skipped)` : "") +
+      (scored.length + axialN < punches.length ? ` · ${punches.length - scored.length - axialN} unscored` : "")
+    : `No punches could be scored${axialN ? ` (${axialN} skipped as axial)` : " (no standing reference)"}.`;
 
   const rows = punches.map(p => {
     const t = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
     if (!p.zone) {
+      const why = p.skip ? p.skip : "unscored";
       return `<tr data-frame="${p.land_frame}">
         <td>${p.idx + 1}</td><td>${t}</td><td>${p.punch_type}</td>
-        <td colspan="2" class="muted">unscored</td></tr>`;
+        <td colspan="2" class="muted">${why}</td></tr>`;
     }
     const col = p.zone.flag ? COLORS.flag : COLORS.ok;
     return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
