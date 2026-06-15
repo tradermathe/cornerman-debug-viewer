@@ -45,6 +45,7 @@ const DEFAULTS = {
 // pose angles / sub-segment ratios, not body-size assumptions).
 const SOLAR_OF_TORSO = 0.65;  // solar plexus ≈ 65% up the torso from the hips
 const STANCE_WIDTH_TORSO = 0.6; // ghost feet drawn this many torsos apart (cosmetic)
+const STANCE_CROUCH = 0.90;   // hips sit at this × leg length (bent-knee stance sink)
 const HEAD_BLOCK_K   = 1.50;  // shoulder→crown ≈ 1.5 × the vertical nose rise (real)
 const LEAN_TAN       = 0.16;  // forward lean ≈ 9° from the hips up (boxing stance)
 // Fallback only: torso (shoulder_mid→hip_mid) ÷ standing height. Used to place
@@ -416,44 +417,55 @@ function stanceAt(pose, frame, r) {
   const a = frameAnchor(pose, frame, r, t);
   const floorY = a.floorY, centerX = a.centerX;
 
-  const hipY = floorY - legLen;
-  const kneeY = floorY - 0.5 * legLen;
-  const shoulderY = hipY - s.torso;
-  const chinY = shoulderY - s.neck;
-  const crownY = chinY - s.headLen;
-  const solarY = hipY - SOLAR_OF_TORSO * s.torso;
+  // Boxing stance, not bolt upright. Two posture effects lower the standing
+  // height to a stance height WITHOUT shortening any bone: (1) bent knees sit the
+  // hips below full leg length (STANCE_CROUCH); (2) a forward lean applied as a
+  // ROTATION about the hips, so the torso/head keep their full LENGTH but their
+  // vertical projection shortens and they tip forward (a shear would keep full
+  // height — the bug we had). upY/upX place an upper-body point from its
+  // along-body height above the hip (h) and sideways offset (dx).
+  const hipY = floorY - legLen * STANCE_CROUCH;
+  const kneeY = (floorY + hipY) / 2;
+  const theta = Math.atan(LEAN_TAN);
+  const cosT = Math.cos(theta), sinT = Math.sin(theta);
+  const upY = h => hipY - h * cosT;
+  const upX = (dx, h) => centerX + dx + r.forwardSign * h * sinT;
+
+  const shoulderH = s.torso;
+  const chinH = s.torso + s.neck;
+  const crownH = s.torso + s.neck + s.headLen;
+  const solarH = SOLAR_OF_TORSO * s.torso;
+  const elbowH = s.torso - 0.55 * s.upperArm;
+  const wristH = chinH - 0.15 * s.headLen;
+
+  const shoulderY = upY(shoulderH);
+  const chinY = upY(chinH);
+  const crownY = upY(crownH);
+  const solarY = upY(solarH);
   const beltY = hipY;
   const H = floorY - crownY;
 
-  // Forward lean: tilt everything above the hips forward (head leans most),
-  // pivoting at the hip line. Legs / feet stay planted.
-  const lean = (x, y) => x + (y < hipY ? r.forwardSign * LEAN_TAN * (hipY - y) : 0);
-
   const hw = s.hipW / 2, sw = s.shoulderW / 2;
-  // Stand tall on a normal-width stance. The feet are drawn at a normal width
-  // under the body (0.6·torso apart) — purely cosmetic, since no zone depends on
-  // foot x — while the GROUND height (floorY) still comes from the real feet. The
-  // legs stay roughly vertical, so hipY = floorY − legLen is the true standing hip
-  // height no matter how wide / sunk the boxer's actual stance is.
-  const footHalf = (STANCE_WIDTH_TORSO / 2) * s.torso;   // feet 0.6·torso apart
+  // Feet drawn 0.6·torso apart under the body — purely cosmetic (no zone depends
+  // on foot x); the GROUND height (floorY) still comes from the real feet.
+  const footHalf = (STANCE_WIDTH_TORSO / 2) * s.torso;
   const Lank = { x: centerX - footHalf, y: floorY };
   const Rank = { x: centerX + footHalf, y: floorY };
+  const kneeFwd = r.forwardSign * 0.05 * t;   // knees nudge forward (bent)
   const joints = {
     Lank, Rank,
-    Lkne: { x: (Lank.x + centerX - hw) / 2, y: kneeY }, Rkne: { x: (Rank.x + centerX + hw) / 2, y: kneeY },
+    Lkne: { x: (Lank.x + centerX - hw) / 2 + kneeFwd, y: kneeY },
+    Rkne: { x: (Rank.x + centerX + hw) / 2 + kneeFwd, y: kneeY },
     Lhip: { x: centerX - hw, y: hipY }, Rhip: { x: centerX + hw, y: hipY },
     pelvis: { x: centerX, y: hipY },
-    chest: { x: lean(centerX, solarY), y: solarY },
-    neck: { x: lean(centerX, shoulderY), y: shoulderY },
-    Lsh: { x: lean(centerX - sw, shoulderY), y: shoulderY }, Rsh: { x: lean(centerX + sw, shoulderY), y: shoulderY },
-    Lel: { x: lean(centerX - sw * 0.7, shoulderY + 0.55 * s.upperArm), y: shoulderY + 0.55 * s.upperArm },
-    Rel: { x: lean(centerX + sw * 0.7, shoulderY + 0.55 * s.upperArm), y: shoulderY + 0.55 * s.upperArm },
-    Lwr: { x: lean(centerX - sw * 0.45, chinY + 0.15 * s.headLen), y: chinY + 0.15 * s.headLen },   // gloves up by the cheeks
-    Rwr: { x: lean(centerX + sw * 0.45, chinY + 0.15 * s.headLen), y: chinY + 0.15 * s.headLen },
-    chin: { x: lean(centerX, chinY), y: chinY },
+    chest: { x: upX(0, solarH), y: solarY },
+    neck: { x: upX(0, shoulderH), y: shoulderY },
+    Lsh: { x: upX(-sw, shoulderH), y: shoulderY }, Rsh: { x: upX(sw, shoulderH), y: shoulderY },
+    Lel: { x: upX(-sw * 0.7, elbowH), y: upY(elbowH) }, Rel: { x: upX(sw * 0.7, elbowH), y: upY(elbowH) },
+    Lwr: { x: upX(-sw * 0.45, wristH), y: upY(wristH) }, Rwr: { x: upX(sw * 0.45, wristH), y: upY(wristH) },  // gloves up by the cheeks
+    chin: { x: upX(0, chinH), y: chinY },
   };
-  const headCenterY = (chinY + crownY) / 2;
-  const headX = lean(centerX, headCenterY);
+  const headX = upX(0, (chinH + crownH) / 2);
   return { joints, crownY, chinY, solarY, beltY, floorY, centerX, headX, H, legLen, floorSource: a.source, headLen: s.headLen };
 }
 
