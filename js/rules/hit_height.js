@@ -41,12 +41,15 @@ const DEFAULTS = {
   minAnchorConfidence: 0.20,
 };
 
-// Stance shaping (applied to the boxer's REAL measured segment lengths — these
-// are pose angles / sub-segment ratios, not body-size assumptions).
-const KNEE_BEND      = 0.95;  // legs ~95% extended → slight athletic sink
+// Stance shaping (applied to the boxer's REAL measured dimensions — these are
+// pose angles / sub-segment ratios, not body-size assumptions).
 const SOLAR_OF_TORSO = 0.65;  // solar plexus ≈ 65% up the torso from the hips
 const NECK_OF_S2N    = 0.50;  // shoulder→chin ≈ 0.5 × shoulder→nose (real)
 const HEAD_OF_S2N    = 1.30;  // chin→crown   ≈ 1.3 × shoulder→nose (real)
+// Fallback only: torso (shoulder_mid→hip_mid) ÷ standing height. Used to place
+// the floor / height when the legs & feet are too unreliable to measure
+// directly (e.g. a side-on clip where the lower legs drop out).
+const TORSO_FRACTION = 0.29;
 
 const COLORS = {
   ok:       "#5fd97a",
@@ -200,7 +203,7 @@ export const HitHeightRule = {
     const r = getReference(p);
     const S = r ? stanceAt(p, state.frame, r) : null;
     setText("hh-H", S ? S.H.toFixed(0) : "—");
-    setText("hh-leg", r ? (r.seg.shin + r.seg.thigh).toFixed(0) : "—");
+    setText("hh-leg", r ? r.legLen.toFixed(0) : "—");
     setText("hh-floor", S ? S.floorSource : `<span class="muted">unknown</span>`);
 
     const punch = activePunch(state);
@@ -232,23 +235,21 @@ function getReference(pose) {
   return ref;
 }
 
-// Clip-median of every limb length the boxer actually shows, plus where the feet
-// typically are. Medians so jitter / dropouts in a few frames don't wobble it.
+// Measure the boxer's real dimensions from the clip. Height is taken floor-to-
+// head (the genuine span the camera sees), with a torso-ratio fallback for
+// clips where the lower body is too unreliable to trust. Medians / quantiles so
+// jitter and dropouts in a few frames don't wobble it.
 function buildReference(pose) {
   const N = pose.n_frames;
   const g = cfg.minAnchorConfidence;
-  const acc = { shin: [], thigh: [], torso: [], shoulderW: [], hipW: [], s2n: [], upperArm: [], foreArm: [] };
-  const feetL = [], feetR = [], hips = [];
+  const acc = { torso: [], shoulderW: [], hipW: [], s2n: [], upperArm: [], foreArm: [] };
+  const headTops = [], floors = [], feetL = [], feetR = [], hips = [], centers = [];
 
   const xy = (f, j) => [pose.skeleton[(f * 17 + j) * 2], pose.skeleton[(f * 17 + j) * 2 + 1]];
   const ok = (f, j) => pose.conf[f * 17 + j] >= g;
   const seg = (f, a, b) => { const [ax, ay] = xy(f, a), [bx, by] = xy(f, b); return Math.hypot(ax - bx, ay - by); };
 
   for (let f = 0; f < N; f++) {
-    if (ok(f, J.L_KNEE) && ok(f, J.L_ANKLE)) acc.shin.push(seg(f, J.L_KNEE, J.L_ANKLE));
-    if (ok(f, J.R_KNEE) && ok(f, J.R_ANKLE)) acc.shin.push(seg(f, J.R_KNEE, J.R_ANKLE));
-    if (ok(f, J.L_HIP) && ok(f, J.L_KNEE)) acc.thigh.push(seg(f, J.L_HIP, J.L_KNEE));
-    if (ok(f, J.R_HIP) && ok(f, J.R_KNEE)) acc.thigh.push(seg(f, J.R_HIP, J.R_KNEE));
     if (ok(f, J.L_SHOULDER) && ok(f, J.L_ELBOW)) acc.upperArm.push(seg(f, J.L_SHOULDER, J.L_ELBOW));
     if (ok(f, J.R_SHOULDER) && ok(f, J.R_ELBOW)) acc.upperArm.push(seg(f, J.R_SHOULDER, J.R_ELBOW));
     if (ok(f, J.L_ELBOW) && ok(f, J.L_WRIST)) acc.foreArm.push(seg(f, J.L_ELBOW, J.L_WRIST));
@@ -263,78 +264,101 @@ function buildReference(pose) {
       acc.shoulderW.push(Math.hypot(lsx - rsx, lsy - rsy));
       acc.hipW.push(Math.hypot(lhx - rhx, lhy - rhy));
       hips.push({ x: hmx, y: hmy });
+      centers.push((smx + hmx) / 2);
       if (ok(f, J.NOSE)) {
         const [nx, ny] = xy(f, J.NOSE);
         acc.s2n.push(Math.hypot(smx - nx, smy - ny));
+        headTops.push(ny - 0.5 * (smy - ny));   // crown ≈ nose minus half the nose→shoulder rise
       }
     }
-    if (ok(f, J.L_ANKLE)) { const [x, y] = xy(f, J.L_ANKLE); feetL.push({ x, y }); }
-    if (ok(f, J.R_ANKLE)) { const [x, y] = xy(f, J.R_ANKLE); feetR.push({ x, y }); }
+    let foot = -Infinity;
+    if (ok(f, J.L_ANKLE)) { const [x, y] = xy(f, J.L_ANKLE); foot = Math.max(foot, y); feetL.push({ x, y }); }
+    if (ok(f, J.R_ANKLE)) { const [x, y] = xy(f, J.R_ANKLE); foot = Math.max(foot, y); feetR.push({ x, y }); }
+    if (foot > -Infinity) floors.push(foot);
   }
 
   if (!acc.torso.length) return null;
   const med = a => a.length ? median(a) : 0;
-  const torso = med(acc.torso);
-  const s2n = acc.s2n.length ? med(acc.s2n) : 0.45 * torso;   // head from real nose; fall back to torso
-  const seg2 = {
-    shin:      acc.shin.length  ? med(acc.shin)  : 0.85 * torso,
-    thigh:     acc.thigh.length ? med(acc.thigh) : 0.85 * torso,
-    torso,
-    shoulderW: med(acc.shoulderW),
-    hipW:      med(acc.hipW),
-    upperArm:  acc.upperArm.length ? med(acc.upperArm) : 0.6 * torso,
-    foreArm:   acc.foreArm.length  ? med(acc.foreArm)  : 0.55 * torso,
-    neck:    NECK_OF_S2N * s2n,
-    headLen: HEAD_OF_S2N * s2n,
-  };
-
   const medPt = arr => ({ x: median(arr.map(p => p.x)), y: median(arr.map(p => p.y)) });
-  const haveFeet = feetL.length || feetR.length;
-  const stanceWidth = seg2.hipW * 1.8;   // feet a touch wider than the hips
+  const torso = med(acc.torso);
+  const s2n = acc.s2n.length ? med(acc.s2n) : 0.45 * torso;
+  const neck = NECK_OF_S2N * s2n, headLen = HEAD_OF_S2N * s2n;
+  const upper = torso + neck + headLen;      // crown → hip
+  const hip = hips.length ? medPt(hips) : null;
+
+  // Standing height: real floor-to-head when the feet are seen often enough and
+  // the result is plausible; otherwise fall back to torso ÷ TORSO_FRACTION and
+  // place the floor below the hips by the implied leg length.
+  const ankleEnough = floors.length >= Math.max(8, 0.15 * N) && headTops.length;
+  let H, floorY, floorSource;
+  if (ankleEnough) {
+    const f0 = median(floors), top = quantile(headTops, 0.10);
+    H = f0 - top;
+    if (H >= upper * 1.05) { floorY = f0; floorSource = "ankles"; }
+    else { H = torso / TORSO_FRACTION; floorY = (hip ? hip.y : f0) + (H - upper); floorSource = "estimated"; }
+  } else {
+    H = torso / TORSO_FRACTION;
+    floorY = (hip ? hip.y : 0) + (H - upper);
+    floorSource = "estimated";
+  }
+  const legLen = Math.max(0.2 * H, H - upper);
 
   return {
-    seg: seg2,
-    stanceWidth,
+    H, floorY, legLen, floorSource,
+    seg: {
+      torso, neck, headLen,
+      shoulderW: med(acc.shoulderW),
+      hipW:      med(acc.hipW),
+      upperArm:  acc.upperArm.length ? med(acc.upperArm) : 0.6 * torso,
+      foreArm:   acc.foreArm.length  ? med(acc.foreArm)  : 0.55 * torso,
+    },
     feetL: feetL.length ? medPt(feetL) : null,
     feetR: feetR.length ? medPt(feetR) : null,
-    hip:   hips.length  ? medPt(hips)  : null,
-    haveFeet,
+    hip,
+    centerX: centers.length ? median(centers) : pose.width / 2,
+    stanceWidth: med(acc.hipW) * 1.8,
   };
 }
 
-// Real feet for this frame: where we actually see them, with a clip-median
-// fallback per foot, and a hip-derived estimate when the feet are never visible.
-function frameFeet(pose, frame, r) {
+// Where to plant the stance this frame: the real feet when this frame's ankles
+// are confident (and the clip floor came from ankles), else the stable clip
+// floor centred under the boxer's hips.
+function frameAnchor(pose, frame, r) {
   const g = cfg.minAnchorConfidence;
   const i = frame * 17;
   const pt = j => ({ x: pose.skeleton[(i + j) * 2], y: pose.skeleton[(i + j) * 2 + 1] });
-  let L = pose.conf[i + J.L_ANKLE] >= g ? pt(J.L_ANKLE) : (r.feetL || null);
-  let R = pose.conf[i + J.R_ANKLE] >= g ? pt(J.R_ANKLE) : (r.feetR || null);
-  let source = "ankles";
+  const lOk = pose.conf[i + J.L_ANKLE] >= g, rOk = pose.conf[i + J.R_ANKLE] >= g;
+  const hipsOk = pose.conf[i + J.L_HIP] >= g && pose.conf[i + J.R_HIP] >= g;
 
-  if (!L && !R) {
-    if (!r.hip) return null;
-    const floorY = r.hip.y + (r.seg.shin + r.seg.thigh);   // estimate floor under the hips
-    L = { x: r.hip.x - r.stanceWidth / 2, y: floorY };
-    R = { x: r.hip.x + r.stanceWidth / 2, y: floorY };
-    return { L, R, source: "hip-estimate" };
+  let centerX;
+  if (hipsOk) centerX = (pt(J.L_HIP).x + pt(J.R_HIP).x) / 2;
+  else if (lOk || rOk) centerX = ((lOk ? pt(J.L_ANKLE).x : pt(J.R_ANKLE).x) + (rOk ? pt(J.R_ANKLE).x : pt(J.L_ANKLE).x)) / 2;
+  else centerX = r.centerX;
+
+  if ((lOk || rOk) && r.floorSource === "ankles") {
+    const floorY = Math.max(lOk ? pt(J.L_ANKLE).y : -Infinity, rOk ? pt(J.R_ANKLE).y : -Infinity);
+    const L = lOk ? pt(J.L_ANKLE) : { x: centerX - r.stanceWidth / 2, y: floorY };
+    const R = rOk ? pt(J.R_ANKLE) : { x: centerX + r.stanceWidth / 2, y: floorY };
+    return { L, R, floorY, centerX, source: "ankles" };
   }
-  if (!L) { L = { x: R.x - r.stanceWidth, y: R.y }; source = "1 foot"; }
-  if (!R) { R = { x: L.x + r.stanceWidth, y: L.y }; source = "1 foot"; }
-  return { L, R, source };
+  const floorY = r.floorY;
+  return {
+    L: { x: centerX - r.stanceWidth / 2, y: floorY },
+    R: { x: centerX + r.stanceWidth / 2, y: floorY },
+    floorY, centerX, source: r.floorSource,
+  };
 }
 
-// Stand the real-sized skeleton up on the real feet → joint pixel coords +
-// landmark Ys. Knees slightly bent (athletic stance), guard up.
+// Stand the real-sized skeleton up on the feet → joint pixel coords + landmark
+// Ys. Legs are the remainder (floor → hip) so the figure always spans the full
+// measured height instead of collapsing when leg detection is poor.
 function stanceAt(pose, frame, r) {
-  const feet = frameFeet(pose, frame, r);
-  if (!feet) return null;
+  const a = frameAnchor(pose, frame, r);
   const s = r.seg;
-  const floorY = Math.max(feet.L.y, feet.R.y);
-  const centerX = (feet.L.x + feet.R.x) / 2;
+  const floorY = a.floorY, centerX = a.centerX;
 
-  const kneeY = floorY - KNEE_BEND * s.shin;
-  const hipY = kneeY - KNEE_BEND * s.thigh;
+  const hipY = floorY - r.legLen;
+  const kneeY = floorY - 0.5 * r.legLen;
   const shoulderY = hipY - s.torso;
   const chinY = shoulderY - s.neck;
   const crownY = chinY - s.headLen;
@@ -344,8 +368,8 @@ function stanceAt(pose, frame, r) {
 
   const hw = s.hipW / 2, sw = s.shoulderW / 2;
   const joints = {
-    Lank: feet.L, Rank: feet.R,
-    Lkne: { x: feet.L.x, y: kneeY }, Rkne: { x: feet.R.x, y: kneeY },
+    Lank: a.L, Rank: a.R,
+    Lkne: { x: (a.L.x + centerX - hw) / 2, y: kneeY }, Rkne: { x: (a.R.x + centerX + hw) / 2, y: kneeY },
     Lhip: { x: centerX - hw, y: hipY }, Rhip: { x: centerX + hw, y: hipY },
     pelvis: { x: centerX, y: hipY },
     chest: { x: centerX, y: solarY },
@@ -357,7 +381,7 @@ function stanceAt(pose, frame, r) {
     Rwr: { x: centerX + sw * 0.45, y: chinY + 0.15 * s.headLen },
     chin: { x: centerX, y: chinY },
   };
-  return { joints, crownY, chinY, solarY, beltY, floorY, centerX, H, floorSource: feet.source, headLen: s.headLen };
+  return { joints, crownY, chinY, solarY, beltY, floorY, centerX, H, floorSource: a.source, headLen: s.headLen };
 }
 
 const STANCE_BONES = [
@@ -576,6 +600,12 @@ function median(arr) {
   const a = arr.slice().sort((x, y) => x - y);
   const n = a.length;
   return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+
+function quantile(arr, q) {
+  const a = arr.slice().sort((x, y) => x - y);
+  const idx = Math.max(0, Math.min(a.length - 1, Math.round(q * (a.length - 1))));
+  return a[idx];
 }
 
 function setText(id, value, color) {
