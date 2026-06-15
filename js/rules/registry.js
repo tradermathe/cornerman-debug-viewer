@@ -15,6 +15,7 @@ import { GuardDropRule } from "./guard_drop.js";
 import { GuardHeightRule } from "./guard_height.js";
 import { ArmExtensionRule } from "./arm_extension.js";
 import { HandReturnPathRule } from "./hand_return_path.js";
+import { HitHeightRule } from "./hit_height.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { WristSwapRule } from "./wrist_swap.js";
 import { CombinedCompareRule } from "./combined_compare.js";
@@ -42,6 +43,7 @@ export const RULES = [
   GuardHeightRule,
   HandReturnPathRule,
   HipRotationReviewRule,
+  HitHeightRule,
   OnDeviceLensRule,
   PunchClassifierRule,
   PunchPredictionsRule,
