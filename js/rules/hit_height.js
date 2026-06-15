@@ -426,9 +426,16 @@ function stanceAt(pose, frame, r) {
   const lean = (x, y) => x + (y < hipY ? r.forwardSign * LEAN_TAN * (hipY - y) : 0);
 
   const hw = s.hipW / 2, sw = s.shoulderW / 2;
+  // Stand tall on a normal-width stance. The feet are drawn at a normal width
+  // under the body (≈ shoulder width) — purely cosmetic, since no zone depends on
+  // foot x — while the GROUND height (floorY) still comes from the real feet. The
+  // legs stay roughly vertical, so hipY = floorY − legLen is the true standing hip
+  // height no matter how wide / sunk the boxer's actual stance is.
+  const Lank = { x: centerX - sw, y: floorY };
+  const Rank = { x: centerX + sw, y: floorY };
   const joints = {
-    Lank: a.L, Rank: a.R,
-    Lkne: { x: (a.L.x + centerX - hw) / 2, y: kneeY }, Rkne: { x: (a.R.x + centerX + hw) / 2, y: kneeY },
+    Lank, Rank,
+    Lkne: { x: (Lank.x + centerX - hw) / 2, y: kneeY }, Rkne: { x: (Rank.x + centerX + hw) / 2, y: kneeY },
     Lhip: { x: centerX - hw, y: hipY }, Rhip: { x: centerX + hw, y: hipY },
     pelvis: { x: centerX, y: hipY },
     chest: { x: lean(centerX, solarY), y: solarY },
