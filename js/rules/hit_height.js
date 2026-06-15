@@ -277,10 +277,10 @@ function buildReference(pose) {
         if (smy > ny) noseRise.push(smy - ny); // vertical nose rise above the shoulders
       }
     }
-    let foot = -Infinity;
-    if (ok(f, J.L_ANKLE)) { const [x, y] = xy(f, J.L_ANKLE); foot = Math.max(foot, y); feetL.push({ x, y }); }
-    if (ok(f, J.R_ANKLE)) { const [x, y] = xy(f, J.R_ANKLE); foot = Math.max(foot, y); feetR.push({ x, y }); }
-    if (foot > -Infinity) floors.push(foot);
+    const footYs = [];
+    if (ok(f, J.L_ANKLE)) { const [x, y] = xy(f, J.L_ANKLE); footYs.push(y); feetL.push({ x, y }); }
+    if (ok(f, J.R_ANKLE)) { const [x, y] = xy(f, J.R_ANKLE); footYs.push(y); feetR.push({ x, y }); }
+    if (footYs.length) floors.push(footYs.reduce((a, b) => a + b, 0) / footYs.length);
   }
 
   if (!torsoA.length) return null;
@@ -379,7 +379,10 @@ function frameAnchor(pose, frame, r, t) {
   else centerX = r.centerX;
 
   if (L || R) {
-    const floorY = Math.max(L ? L.p.y : -Infinity, R ? R.p.y : -Infinity);
+    // Ground under the body = the average of the two feet, not the lower one —
+    // camera angle / a staggered stance puts the near foot lower in the frame
+    // even on a flat floor, and the body sits between them.
+    const floorY = (L && R) ? (L.p.y + R.p.y) / 2 : (L || R).p.y;
     const Lp = L ? L.p : { x: centerX - stanceWidth / 2, y: floorY };
     const Rp = R ? R.p : { x: centerX + stanceWidth / 2, y: floorY };
     const source = (L && L.ankle) || (R && R.ankle) ? "ankles" : "knees";
