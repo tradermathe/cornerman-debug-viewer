@@ -476,7 +476,7 @@ function computePunches(state) {
   const p = pickPose(state);
   const r = getReference(p);
   const N = p.n_frames;
-  const dets = (state.labels?.detections || []).filter(d => !isUppercut(d));
+  const dets = (state.labels?.detections || []).filter(d => !skipType(d));
   return dets.map((d, idx) => {
     const sf = Math.max(0, d.start_frame);
     const ef = Math.min(N - 1, d.end_frame);
@@ -534,16 +534,17 @@ function sideFor(d) {
   return SIDE_FOR[d.hand]?.[stance] || "L";
 }
 
-// Uppercuts travel upward to the chin/body by design, so a hit-height verdict is
-// meaningless for them — skip them entirely.
-function isUppercut(d) {
-  return /uppercut/i.test(d.punch_type || "");
+// Only straights (jab/cross) are scored. Uppercuts travel up to the chin/body by
+// design, and hooks land with a bent arm, so the peak-reach impact frame is
+// unreliable for both — skip them entirely for now.
+function skipType(d) {
+  return /uppercut|hook/i.test(d.punch_type || "");
 }
 
 function activePunch(state) {
   const f = state.frame;
   const dets = state.labels?.detections || [];
-  return dets.find(d => f >= d.start_frame && f <= d.end_frame && !isUppercut(d)) || null;
+  return dets.find(d => f >= d.start_frame && f <= d.end_frame && !skipType(d)) || null;
 }
 
 // ─── render ──────────────────────────────────────────────────────────────────
