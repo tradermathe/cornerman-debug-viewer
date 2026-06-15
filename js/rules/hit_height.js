@@ -63,7 +63,8 @@ const COLORS = {
   bandOk:   "rgba(95,217,122,0.08)",
   bandFlag: "rgba(232,90,90,0.09)",
   line:     "rgba(255,255,255,0.55)",
-  ghost:    "#5fd0e6",
+  ghost:    "#5fd0e6",   // floor = average of the two feet
+  ghost2:   "#f5a623",   // floor = lowest foot (A/B comparison)
 };
 
 const SIDE_FOR = {
@@ -107,6 +108,8 @@ export const HitHeightRule = {
         <b style="color:${COLORS.flag}">over the head</b>,
         <b style="color:${COLORS.flag}">shoulder height</b>, and
         <b style="color:${COLORS.flag}">below the belt</b> are flagged.</p>
+      <p class="hint">Floor A/B: <b style="color:${COLORS.ghost}">cyan</b> = average of the two
+        feet · <b style="color:${COLORS.ghost2}">amber</b> = lowest foot. Zones / scoring use cyan.</p>
 
       <h3>Standing reference</h3>
       <div class="metric-grid">
@@ -169,7 +172,7 @@ export const HitHeightRule = {
     const p = pickPose(state);
     const r = getReference(p);
     if (!r) return;
-    const S = stanceAt(p, state.frame, r);
+    const S = stanceAt(p, state.frame, r, "avg");
     if (!S) return;
     const W = ctx.canvas.width;
     const s = state.renderScale || 1;
@@ -181,7 +184,10 @@ export const HitHeightRule = {
     fillBand(ctx, B.bodyTop,   B.belt,     W, COLORS.bandOk);   // body
     fillBand(ctx, B.belt,      1e4,        W, COLORS.bandFlag); // below belt
 
-    drawStanceSkeleton(ctx, S, s);
+    // A/B floor comparison: amber = lowest-foot floor, cyan = average-feet floor.
+    const Slow = stanceAt(p, state.frame, r, "lowest");
+    if (Slow) drawStanceSkeleton(ctx, Slow, s, COLORS.ghost2);
+    drawStanceSkeleton(ctx, S, s, COLORS.ghost);
 
     labeledLine(ctx, B.overHead, W, "over head ↑", s);
     labeledLine(ctx, B.head,     W, "chin",         s);
@@ -367,7 +373,7 @@ function torsoAt(pose, frame, r) {
 // Where to plant the stance this frame: the real feet when this frame's ankles
 // are confident (and the clip floor came from ankles), else the stable clip
 // floor centred under the boxer's hips.
-function frameAnchor(pose, frame, r, t) {
+function frameAnchor(pose, frame, r, t, floorMode) {
   const g = cfg.minAnchorConfidence;
   const i = frame * 17;
   const pt = j => ({ x: pose.skeleton[(i + j) * 2], y: pose.skeleton[(i + j) * 2 + 1] });
@@ -390,10 +396,13 @@ function frameAnchor(pose, frame, r, t) {
   else centerX = r.centerX;
 
   if (L || R) {
-    // Ground under the body = the average of the two feet, not the lower one —
+    // Ground under the body. "avg" (default): the midpoint of the two feet —
     // camera angle / a staggered stance puts the near foot lower in the frame
-    // even on a flat floor, and the body sits between them.
-    const floorY = (L && R) ? (L.p.y + R.p.y) / 2 : (L || R).p.y;
+    // even on a flat floor. "lowest": the lower foot (max y) — better when one
+    // foot is lifted (e.g. a deep lunge). Drawn side by side for comparison.
+    const floorY = (L && R)
+      ? (floorMode === "lowest" ? Math.max(L.p.y, R.p.y) : (L.p.y + R.p.y) / 2)
+      : (L || R).p.y;
     const Lp = L ? L.p : { x: centerX - stanceWidth / 2, y: floorY };
     const Rp = R ? R.p : { x: centerX + stanceWidth / 2, y: floorY };
     const source = (L && L.ankle) || (R && R.ankle) ? "ankles" : "knees";
@@ -411,7 +420,7 @@ function frameAnchor(pose, frame, r, t) {
 // Stand the real-sized skeleton up on the feet → joint pixel coords + landmark
 // Ys. Sized to the fighter's CURRENT-frame torso (clip-stable proportions ×
 // per-frame scale) so it tracks him moving toward / away from the camera.
-function stanceAt(pose, frame, r) {
+function stanceAt(pose, frame, r, floorMode) {
   const t = torsoAt(pose, frame, r);
   const s = {
     torso:     t,
@@ -423,7 +432,7 @@ function stanceAt(pose, frame, r) {
     foreArm:   r.foreArmR * t,
   };
   const legLen = r.legR * t;
-  const a = frameAnchor(pose, frame, r, t);
+  const a = frameAnchor(pose, frame, r, t, floorMode);
   const floorY = a.floorY, centerX = a.centerX;
 
   // Boxing stance, not bolt upright. Two posture effects lower the standing
@@ -623,11 +632,11 @@ function renderTable(state) {
 
 // ─── canvas helpers ──────────────────────────────────────────────────────────
 
-function drawStanceSkeleton(ctx, S, s) {
+function drawStanceSkeleton(ctx, S, s, color = COLORS.ghost) {
   ctx.save();
   ctx.globalAlpha = 0.85;
-  ctx.strokeStyle = COLORS.ghost;
-  ctx.fillStyle = COLORS.ghost;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
   ctx.lineWidth = 2.5 * s;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
