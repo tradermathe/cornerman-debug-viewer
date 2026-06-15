@@ -52,6 +52,10 @@ const LEAN_TAN       = 0.16;  // forward lean ≈ 9° from the hips up (boxing s
 // the floor / height when the legs & feet are too unreliable to measure
 // directly (e.g. a side-on clip where the lower legs drop out).
 const TORSO_FRACTION = 0.29;
+// Rigid limb lengths are taken at this percentile of their per-frame projected
+// length (not the median): foreshortening only shortens the 2D projection, so the
+// near-longest frame ≈ the true bone length. The median reads too short.
+const LENGTH_PCTL = 0.90;
 
 const COLORS = {
   ok:       "#5fd97a",
@@ -288,19 +292,22 @@ function buildReference(pose) {
   if (!torsoA.length) return null;
   const med = a => a.length ? median(a) : 0;
   const medPt = arr => ({ x: median(arr.map(p => p.x)), y: median(arr.map(p => p.y)) });
-  const torso = med(torsoA);
+  // Rigid lengths: high percentile (≈ longest projection ≈ true bone length).
+  // Positions (floor, hip, centre) stay on the median.
+  const len = a => a.length ? pctl(a, LENGTH_PCTL) : 0;
+  const torso = len(torsoA);
   const hip = hips.length ? medPt(hips) : null;
 
-  // Head block (shoulder→crown) from the real VERTICAL nose rise — robust to the
-  // sideways lean that inflates a Euclidean shoulder→nose length.
-  const headBlock = noseRise.length >= min ? HEAD_BLOCK_K * median(noseRise) : 0.33 * torso;
+  // Head block (shoulder→crown) from the real VERTICAL nose rise — high percentile
+  // so a lean/look-down frame doesn't shrink it.
+  const headBlock = noseRise.length >= min ? HEAD_BLOCK_K * pctl(noseRise, LENGTH_PCTL) : 0.33 * torso;
   const neck = 0.45 * headBlock, headLen = 0.55 * headBlock;
 
   // Legs from the real measured segments (avg L/R via pooled medians). Fall back
   // to a torso-ratio leg only when the lower body is too rarely seen to trust.
   const legsReliable = shin.length >= min && thigh.length >= min;
   let legLen, legSource;
-  if (legsReliable) { legLen = med(shin) + med(thigh); legSource = "measured"; }
+  if (legsReliable) { legLen = len(shin) + len(thigh); legSource = "measured"; }
   else { legLen = Math.max(0.2 * torso, torso / TORSO_FRACTION - torso - headBlock); legSource = "estimated"; }
 
   // Floor: median lowest ankle when seen often enough; else hips + leg length.
@@ -315,12 +322,12 @@ function buildReference(pose) {
   return {
     torsoRef: torso,
     legR:       legLen / torso,
-    shinR:      (shin.length >= min ? med(shin) : 0.5 * legLen) / torso,  // for the knee→ankle fallback
+    shinR:      (shin.length >= min ? len(shin) : 0.5 * legLen) / torso,  // for the knee→ankle fallback
     headR:      headBlock / torso,
-    shoulderWR: med(shoulderW) / torso,
-    hipWR:      med(hipW) / torso,
-    upperArmR:  (upperArm.length ? med(upperArm) : 0.6 * torso) / torso,
-    foreArmR:   (foreArm.length  ? med(foreArm)  : 0.55 * torso) / torso,
+    shoulderWR: len(shoulderW) / torso,
+    hipWR:      len(hipW) / torso,
+    upperArmR:  (upperArm.length ? len(upperArm) : 0.6 * torso) / torso,
+    foreArmR:   (foreArm.length  ? len(foreArm)  : 0.55 * torso) / torso,
     legSource, floorSource,
     floorY,                 // clip-median fallback floor (when this frame's feet are missing)
     feetL: feetL.length ? medPt(feetL) : null,
@@ -352,7 +359,9 @@ function torsoAt(pose, frame, r) {
     }
   }
   if (!vals.length) return r.torsoRef;
-  return Math.max(0.6 * r.torsoRef, Math.min(1.6 * r.torsoRef, median(vals)));
+  // High percentile (≈ least-foreshortened recent frame) so the scale tracks
+  // distance without shrinking on bladed/leaning frames.
+  return Math.max(0.6 * r.torsoRef, Math.min(1.6 * r.torsoRef, pctl(vals, LENGTH_PCTL)));
 }
 
 // Where to plant the stance this frame: the real feet when this frame's ankles
@@ -692,6 +701,12 @@ function median(arr) {
   const a = arr.slice().sort((x, y) => x - y);
   const n = a.length;
   return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+
+function pctl(arr, q) {
+  const a = arr.slice().sort((x, y) => x - y);
+  const idx = Math.max(0, Math.min(a.length - 1, Math.round(q * (a.length - 1))));
+  return a[idx];
 }
 
 function setText(id, value, color) {
