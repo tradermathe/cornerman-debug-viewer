@@ -203,7 +203,7 @@ export const HitHeightRule = {
     const r = getReference(p);
     const S = r ? stanceAt(p, state.frame, r) : null;
     setText("hh-H", S ? S.H.toFixed(0) : "—");
-    setText("hh-leg", r ? r.legLen.toFixed(0) + (r.legSource === "estimated" ? " est" : "") : "—");
+    setText("hh-leg", S ? S.legLen.toFixed(0) + (r.legSource === "estimated" ? " est" : "") : "—");
     setText("hh-floor", S ? S.floorSource : `<span class="muted">unknown</span>`);
 
     const punch = activePunch(state);
@@ -301,35 +301,61 @@ function buildReference(pose) {
   if (legsReliable) { legLen = med(shin) + med(thigh); legSource = "measured"; }
   else { legLen = Math.max(0.2 * torso, torso / TORSO_FRACTION - torso - headBlock); legSource = "estimated"; }
 
-  const H = legLen + torso + headBlock;
-
   // Floor: median lowest ankle when seen often enough; else hips + leg length.
   let floorY, floorSource;
   if (floors.length >= min) { floorY = median(floors); floorSource = "ankles"; }
   else { floorY = (hip ? hip.y : 0) + legLen; floorSource = "estimated"; }
 
+  // Store the body shape as RATIOS to torso (clip-stable) plus a reference torso.
+  // The absolute scale is taken per-frame from the fighter's current torso
+  // (torsoAt), so the ghost tracks the fighter moving toward / away from the
+  // camera instead of being frozen at one clip-wide size.
   return {
-    H, floorY, legLen, legSource, floorSource,
-    seg: {
-      torso, neck, headLen,
-      shoulderW: med(shoulderW),
-      hipW:      med(hipW),
-      upperArm:  upperArm.length ? med(upperArm) : 0.6 * torso,
-      foreArm:   foreArm.length  ? med(foreArm)  : 0.55 * torso,
-    },
+    torsoRef: torso,
+    legR:       legLen / torso,
+    headR:      headBlock / torso,
+    shoulderWR: med(shoulderW) / torso,
+    hipWR:      med(hipW) / torso,
+    upperArmR:  (upperArm.length ? med(upperArm) : 0.6 * torso) / torso,
+    foreArmR:   (foreArm.length  ? med(foreArm)  : 0.55 * torso) / torso,
+    legSource, floorSource,
+    floorY,                 // clip-median fallback floor (when this frame's feet are missing)
     feetL: feetL.length ? medPt(feetL) : null,
     feetR: feetR.length ? medPt(feetR) : null,
     hip,
     centerX: centers.length ? median(centers) : pose.width / 2,
-    stanceWidth: med(hipW) * 1.8,
     forwardSign: noseDX.length ? (Math.sign(median(noseDX)) || 1) : 1,
   };
+}
+
+// The fighter's apparent scale THIS frame: torso (shoulder-centre→hip-centre),
+// median-smoothed over a small window so detection jitter doesn't pulse the
+// ghost, and clamped near the clip median so a badly foreshortened frame can't
+// blow it up or collapse it. Torso is a rigid segment, so it tracks distance
+// but stays steady through ducks / leans. Falls back to the clip torso.
+function torsoAt(pose, frame, r) {
+  const g = cfg.minAnchorConfidence;
+  const W = 5;
+  const vals = [];
+  for (let f = Math.max(0, frame - W); f <= Math.min(pose.n_frames - 1, frame + W); f++) {
+    const i = f * 17;
+    if (pose.conf[i + J.L_SHOULDER] >= g && pose.conf[i + J.R_SHOULDER] >= g &&
+        pose.conf[i + J.L_HIP] >= g && pose.conf[i + J.R_HIP] >= g) {
+      const smx = (pose.skeleton[(i + J.L_SHOULDER) * 2] + pose.skeleton[(i + J.R_SHOULDER) * 2]) / 2;
+      const smy = (pose.skeleton[(i + J.L_SHOULDER) * 2 + 1] + pose.skeleton[(i + J.R_SHOULDER) * 2 + 1]) / 2;
+      const hmx = (pose.skeleton[(i + J.L_HIP) * 2] + pose.skeleton[(i + J.R_HIP) * 2]) / 2;
+      const hmy = (pose.skeleton[(i + J.L_HIP) * 2 + 1] + pose.skeleton[(i + J.R_HIP) * 2 + 1]) / 2;
+      vals.push(Math.hypot(smx - hmx, smy - hmy));
+    }
+  }
+  if (!vals.length) return r.torsoRef;
+  return Math.max(0.6 * r.torsoRef, Math.min(1.6 * r.torsoRef, median(vals)));
 }
 
 // Where to plant the stance this frame: the real feet when this frame's ankles
 // are confident (and the clip floor came from ankles), else the stable clip
 // floor centred under the boxer's hips.
-function frameAnchor(pose, frame, r) {
+function frameAnchor(pose, frame, r, stanceWidth) {
   const g = cfg.minAnchorConfidence;
   const i = frame * 17;
   const pt = j => ({ x: pose.skeleton[(i + j) * 2], y: pose.skeleton[(i + j) * 2 + 1] });
@@ -343,28 +369,39 @@ function frameAnchor(pose, frame, r) {
 
   if ((lOk || rOk) && r.floorSource === "ankles") {
     const floorY = Math.max(lOk ? pt(J.L_ANKLE).y : -Infinity, rOk ? pt(J.R_ANKLE).y : -Infinity);
-    const L = lOk ? pt(J.L_ANKLE) : { x: centerX - r.stanceWidth / 2, y: floorY };
-    const R = rOk ? pt(J.R_ANKLE) : { x: centerX + r.stanceWidth / 2, y: floorY };
+    const L = lOk ? pt(J.L_ANKLE) : { x: centerX - stanceWidth / 2, y: floorY };
+    const R = rOk ? pt(J.R_ANKLE) : { x: centerX + stanceWidth / 2, y: floorY };
     return { L, R, floorY, centerX, source: "ankles" };
   }
   const floorY = r.floorY;
   return {
-    L: { x: centerX - r.stanceWidth / 2, y: floorY },
-    R: { x: centerX + r.stanceWidth / 2, y: floorY },
+    L: { x: centerX - stanceWidth / 2, y: floorY },
+    R: { x: centerX + stanceWidth / 2, y: floorY },
     floorY, centerX, source: r.floorSource,
   };
 }
 
 // Stand the real-sized skeleton up on the feet → joint pixel coords + landmark
-// Ys. Legs are the remainder (floor → hip) so the figure always spans the full
-// measured height instead of collapsing when leg detection is poor.
+// Ys. Sized to the fighter's CURRENT-frame torso (clip-stable proportions ×
+// per-frame scale) so it tracks him moving toward / away from the camera.
 function stanceAt(pose, frame, r) {
-  const a = frameAnchor(pose, frame, r);
-  const s = r.seg;
+  const t = torsoAt(pose, frame, r);
+  const s = {
+    torso:     t,
+    neck:      0.45 * r.headR * t,
+    headLen:   0.55 * r.headR * t,
+    shoulderW: r.shoulderWR * t,
+    hipW:      r.hipWR * t,
+    upperArm:  r.upperArmR * t,
+    foreArm:   r.foreArmR * t,
+  };
+  const legLen = r.legR * t;
+  const stanceWidth = r.hipWR * t * 1.8;
+  const a = frameAnchor(pose, frame, r, stanceWidth);
   const floorY = a.floorY, centerX = a.centerX;
 
-  const hipY = floorY - r.legLen;
-  const kneeY = floorY - 0.5 * r.legLen;
+  const hipY = floorY - legLen;
+  const kneeY = floorY - 0.5 * legLen;
   const shoulderY = hipY - s.torso;
   const chinY = shoulderY - s.neck;
   const crownY = chinY - s.headLen;
@@ -393,7 +430,7 @@ function stanceAt(pose, frame, r) {
   };
   const headCenterY = (chinY + crownY) / 2;
   const headX = lean(centerX, headCenterY);
-  return { joints, crownY, chinY, solarY, beltY, floorY, centerX, headX, H, floorSource: a.source, headLen: s.headLen };
+  return { joints, crownY, chinY, solarY, beltY, floorY, centerX, headX, H, legLen, floorSource: a.source, headLen: s.headLen };
 }
 
 const STANCE_BONES = [
