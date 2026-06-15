@@ -44,6 +44,7 @@ const DEFAULTS = {
 // Stance shaping (applied to the boxer's REAL measured dimensions — these are
 // pose angles / sub-segment ratios, not body-size assumptions).
 const SOLAR_OF_TORSO = 0.65;  // solar plexus ≈ 65% up the torso from the hips
+const STANCE_WIDTH_TORSO = 0.6; // ghost feet drawn this many torsos apart (cosmetic)
 const HEAD_BLOCK_K   = 1.50;  // shoulder→crown ≈ 1.5 × the vertical nose rise (real)
 const LEAN_TAN       = 0.16;  // forward lean ≈ 9° from the hips up (boxing stance)
 // Fallback only: torso (shoulder_mid→hip_mid) ÷ standing height. Used to place
@@ -430,12 +431,13 @@ function stanceAt(pose, frame, r) {
 
   const hw = s.hipW / 2, sw = s.shoulderW / 2;
   // Stand tall on a normal-width stance. The feet are drawn at a normal width
-  // under the body (≈ shoulder width) — purely cosmetic, since no zone depends on
+  // under the body (0.6·torso apart) — purely cosmetic, since no zone depends on
   // foot x — while the GROUND height (floorY) still comes from the real feet. The
   // legs stay roughly vertical, so hipY = floorY − legLen is the true standing hip
   // height no matter how wide / sunk the boxer's actual stance is.
-  const Lank = { x: centerX - sw, y: floorY };
-  const Rank = { x: centerX + sw, y: floorY };
+  const footHalf = (STANCE_WIDTH_TORSO / 2) * s.torso;   // feet 0.6·torso apart
+  const Lank = { x: centerX - footHalf, y: floorY };
+  const Rank = { x: centerX + footHalf, y: floorY };
   const joints = {
     Lank, Rank,
     Lkne: { x: (Lank.x + centerX - hw) / 2, y: kneeY }, Rkne: { x: (Rank.x + centerX + hw) / 2, y: kneeY },
