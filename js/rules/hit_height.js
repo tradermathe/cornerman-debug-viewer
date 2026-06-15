@@ -6,48 +6,75 @@
 // crouches must NOT move the target — a duck lowers your fist, it doesn't lower
 // the other guy's head. So the reference is fixed for the clip, not per-frame.
 //
+// The reference is drawn on the overlay as a ghost stance skeleton — knees bent,
+// slight crouch, hands up in guard (NOT bolt upright) — and the zone lines are
+// read straight off that skeleton's own landmarks, so the lines and the body
+// always agree.
+//
 // Building the standing reference (camera-distance insensitive, posture-proof):
-//   - Scale: torso length (shoulder_mid → hip_mid). This is a rigid segment —
-//     it doesn't change when the knees bend — so it survives ducks. Standing
-//     height H = torso / TORSO_FRACTION (torso ≈ 0.29 of standing height).
-//     Taken as the clip median so a few bad frames don't skew it; it tracks the
-//     boxer's apparent size, so camera distance cancels.
+//   - Scale: torso length (shoulder_mid → hip_mid). A rigid segment — it doesn't
+//     change when the knees bend, so it survives ducks. Standing height
+//     H = torso / TORSO_FRACTION (torso ≈ 0.29 of standing height). Clip median
+//     so a few bad frames don't skew it; tracks apparent size ⇒ camera distance
+//     cancels.
 //   - Floor: the ankle line (feet stay planted through a duck). Clip median of
 //     the lowest confident ankle. Falls back to a hip-based estimate when the
 //     feet are cropped out of frame.
+//   - Center: clip-median hip-midpoint x — where the ghost stance is drawn.
 //
-// Two on-target zones, as fractions of standing height above the floor:
-//   HEAD   slightly below the chin → slightly above the crown   (≈ 0.84 … 1.03)
-//   BODY   solar plexus → belt                                  (≈ 0.55 … 0.65)
-//
-// Everything else is flagged:
-//   over the head   frac > overHeadCut
-//   shoulder/neck   between the chin and the solar plexus (the dead zone)
-//   below the belt  frac < belt
+// Two on-target zones, read off the stance skeleton:
+//   HEAD   slightly below the chin → slightly above the crown
+//   BODY   solar plexus → belt
+// Everything else flagged: over the head, the shoulder/neck dead zone (chin →
+// solar plexus), below the belt.
 //
 // Landing frame = most-extended frame in the punch window (max |shoulder→wrist|).
-// Punching side maps from (hand, stance) like guard_drop / arm_extension; wrist
-// source prefers the v6 glove-baked wrist, then a legacy glove sidecar, then pose.
+// Side maps from (hand, stance) like guard_drop / arm_extension; wrist source
+// prefers the v6 glove-baked wrist, then a legacy glove sidecar, then pose.
 
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
 
 const DEFAULTS = {
-  // Zone boundaries, as fraction of standing height above the floor.
-  overHeadCut: 1.03,   // crown ≈ 1.00; flag anything above this
-  headBottom:  0.84,   // chin ≈ 0.87; head zone floor (slightly below chin)
-  bodyTop:     0.65,   // solar plexus ≈ 0.63; body zone ceiling
-  belt:        0.55,   // belt ≈ 0.55; body zone floor (flag below)
-  // Anthropometry: torso (shoulder_mid→hip_mid) as a fraction of standing
-  // height. Standing height H = torso / this. Lower ⇒ taller reconstruction.
+  // Head zone margins (× standing height) around the stance skeleton's crown /
+  // chin. Body zone uses the skeleton's solar-plexus / belt landmarks directly.
+  headTopMargin: 0.04,   // head zone extends this far ABOVE the crown
+  chinMargin:    0.03,   // head zone extends this far BELOW the chin
+  // Torso (shoulder_mid→hip_mid) as a fraction of standing height.
+  // Standing height H = torso / this. Lower ⇒ taller reconstruction.
   torsoFraction: 0.29,
   minWristConfidence:  0.20,
   minAnchorConfidence: 0.20,
 };
 
-// Hip joint sits ≈ 0.53 of standing height above the floor — used only to
-// estimate the floor when the ankles are out of frame.
-const HIP_ABOVE_FLOOR = 0.53;
+// Canonical boxing stance, in fractions of standing height H above the floor
+// (f) and x-offset from center in units of H (dx, +right). Knees bent, slight
+// crouch (crown ≈ 0.95 H, not 1.0), feet apart + staggered, hands up in guard.
+const CANON = {
+  joints: {
+    chin:   { f: 0.83, dx: 0.00 },
+    neck:   { f: 0.80, dx: 0.00 },
+    Lsh:    { f: 0.78, dx: -0.11 }, Rsh: { f: 0.78, dx: 0.11 },
+    Lel:    { f: 0.60, dx: -0.08 }, Rel: { f: 0.60, dx: 0.08 },  // elbows tucked to the ribs
+    Lwr:    { f: 0.82, dx: -0.06 }, Rwr: { f: 0.82, dx: 0.06 },  // gloves up by the cheeks
+    chest:  { f: 0.60, dx: 0.00 },                                // solar plexus
+    pelvis: { f: 0.52, dx: 0.00 },
+    Lhip:   { f: 0.48, dx: -0.07 }, Rhip: { f: 0.48, dx: 0.07 },
+    // Knees bent + pushed out, ankles tucked back under — a sunk, athletic
+    // stance (not straight legs). Slight L/R asymmetry = staggered feet.
+    Lkne:   { f: 0.28, dx: -0.16 }, Rkne: { f: 0.28, dx: 0.15 },
+    Lank:   { f: 0.02, dx: -0.11 }, Rank: { f: 0.02, dx: 0.13 },
+  },
+  bones: [
+    ["chin", "neck"], ["neck", "chest"], ["chest", "pelvis"],
+    ["neck", "Lsh"], ["neck", "Rsh"],
+    ["Lsh", "Lel"], ["Lel", "Lwr"], ["Rsh", "Rel"], ["Rel", "Rwr"],
+    ["pelvis", "Lhip"], ["pelvis", "Rhip"],
+    ["Lhip", "Lkne"], ["Lkne", "Lank"], ["Rhip", "Rkne"], ["Rkne", "Rank"],
+  ],
+  crownFrac: 0.95, chinFrac: 0.83, solarPlexusFrac: 0.60, beltFrac: 0.50,
+  headCenterFrac: 0.89, headRadiusFrac: 0.06,
+};
 
 const COLORS = {
   ok:       "#5fd97a",
@@ -55,6 +82,7 @@ const COLORS = {
   bandOk:   "rgba(95,217,122,0.08)",
   bandFlag: "rgba(232,90,90,0.09)",
   line:     "rgba(255,255,255,0.55)",
+  ghost:    "#5fd0e6",   // the reference opponent
 };
 
 const SIDE_FOR = {
@@ -66,10 +94,12 @@ const JOINTS_FOR_SIDE = {
   R: { shoulder: J.R_SHOULDER, wrist: J.R_WRIST, gloveSide: 1 },
 };
 
+const HIP_ABOVE_FLOOR = 0.53;   // hip joint ≈ 0.53 H above floor (feet-cropped fallback)
+
 let host;
 let cfg = { ...DEFAULTS };
-let ref = null;        // cached standing reference {H, floorY, floorSource, torso}
-let refPose = null;    // pose the reference was built from
+let ref = null;        // cached standing reference {H, floorY, centerX, floorSource, torso}
+let refPose = null;
 
 export const HitHeightRule = {
   id: "hit_height",
@@ -89,7 +119,8 @@ export const HitHeightRule = {
     host.innerHTML = `
       <h2>Hit height</h2>
       <p class="hint">Where the punching fist peaks, against a same-size opponent
-        standing in a normal stance. The boxer's own ducks don't move the zones —
+        standing in a normal stance (the <b style="color:${COLORS.ghost}">ghost
+        skeleton</b> on the overlay). The boxer's own ducks don't move the zones —
         the reference is anchored to the floor and the boxer's standing height
         (torso-derived), so it's camera-distance insensitive.
         <b style="color:${COLORS.ok}">Head</b> &amp;
@@ -114,30 +145,22 @@ export const HitHeightRule = {
       <div id="hh-summary" class="hint"></div>
       <div id="hh-table"></div>
 
-      <h3>Zone boundaries <span class="hint">(× standing height)</span></h3>
+      <h3>Tuning</h3>
       <label class="slider">
-        <span>over-head cut = <output id="hh-o1">${cfg.overHeadCut.toFixed(2)}</output></span>
-        <input type="range" id="hh-s1" min="0.9" max="1.2" step="0.01" value="${cfg.overHeadCut}">
+        <span>head zone above crown = <output id="hh-o1">${cfg.headTopMargin.toFixed(2)}</output></span>
+        <input type="range" id="hh-s1" min="0" max="0.15" step="0.01" value="${cfg.headTopMargin}">
       </label>
       <label class="slider">
-        <span>head zone floor (chin) = <output id="hh-o2">${cfg.headBottom.toFixed(2)}</output></span>
-        <input type="range" id="hh-s2" min="0.7" max="0.95" step="0.01" value="${cfg.headBottom}">
+        <span>head zone below chin = <output id="hh-o2">${cfg.chinMargin.toFixed(2)}</output></span>
+        <input type="range" id="hh-s2" min="0" max="0.15" step="0.01" value="${cfg.chinMargin}">
       </label>
       <label class="slider">
-        <span>body zone ceiling (solar plexus) = <output id="hh-o3">${cfg.bodyTop.toFixed(2)}</output></span>
-        <input type="range" id="hh-s3" min="0.55" max="0.8" step="0.01" value="${cfg.bodyTop}">
+        <span>torso ÷ standing height = <output id="hh-o3">${cfg.torsoFraction.toFixed(3)}</output></span>
+        <input type="range" id="hh-s3" min="0.22" max="0.36" step="0.005" value="${cfg.torsoFraction}">
       </label>
       <label class="slider">
-        <span>body zone floor (belt) = <output id="hh-o4">${cfg.belt.toFixed(2)}</output></span>
-        <input type="range" id="hh-s4" min="0.4" max="0.62" step="0.01" value="${cfg.belt}">
-      </label>
-      <label class="slider">
-        <span>torso ÷ standing height = <output id="hh-o5">${cfg.torsoFraction.toFixed(2)}</output></span>
-        <input type="range" id="hh-s5" min="0.22" max="0.36" step="0.005" value="${cfg.torsoFraction}">
-      </label>
-      <label class="slider">
-        <span>min wrist confidence = <output id="hh-o6">${cfg.minWristConfidence.toFixed(2)}</output></span>
-        <input type="range" id="hh-s6" min="0" max="1" step="0.01" value="${cfg.minWristConfidence}">
+        <span>min wrist confidence = <output id="hh-o4">${cfg.minWristConfidence.toFixed(2)}</output></span>
+        <input type="range" id="hh-s4" min="0" max="1" step="0.01" value="${cfg.minWristConfidence}">
       </label>
     `;
 
@@ -152,12 +175,10 @@ export const HitHeightRule = {
         seekHack(state, state.frame);
       });
     };
-    wire("#hh-s1", "#hh-o1", "overHeadCut");
-    wire("#hh-s2", "#hh-o2", "headBottom");
-    wire("#hh-s3", "#hh-o3", "bodyTop");
-    wire("#hh-s4", "#hh-o4", "belt");
-    wire("#hh-s5", "#hh-o5", "torsoFraction", v => v.toFixed(3));
-    wire("#hh-s6", "#hh-o6", "minWristConfidence");
+    wire("#hh-s1", "#hh-o1", "headTopMargin");
+    wire("#hh-s2", "#hh-o2", "chinMargin");
+    wire("#hh-s3", "#hh-o3", "torsoFraction", v => v.toFixed(3));
+    wire("#hh-s4", "#hh-o4", "minWristConfidence");
 
     host.addEventListener("click", (ev) => {
       const tr = ev.target.closest("tr[data-frame]");
@@ -186,10 +207,12 @@ export const HitHeightRule = {
     fillBand(ctx, B.bodyTop,   B.belt,     W, COLORS.bandOk);   // body
     fillBand(ctx, B.belt,      1e4,        W, COLORS.bandFlag); // below belt
 
+    drawStanceSkeleton(ctx, r, s);
+
     labeledLine(ctx, B.overHead, W, "over head ↑", s);
-    labeledLine(ctx, B.head,     W, "chin",        s);
+    labeledLine(ctx, B.head,     W, "chin",         s);
     labeledLine(ctx, B.bodyTop,  W, "solar plexus", s);
-    labeledLine(ctx, B.belt,     W, "belt ↓",      s);
+    labeledLine(ctx, B.belt,     W, "belt ↓",       s);
 
     // Mark the punching fist if the current frame is inside a punch window.
     const punch = activePunch(state);
@@ -244,11 +267,12 @@ function getReference(pose) {
 }
 
 // Clip-stable standing reference: median torso → standing height, median ankle
-// line → floor. Both medians so ducks / dropouts in a few frames don't shift it.
+// line → floor, median hip x → center. Medians so ducks / dropouts in a few
+// frames don't shift it.
 function buildReference(pose) {
   const N = pose.n_frames;
   const g = cfg.minAnchorConfidence;
-  const torsos = [], floors = [], hipYs = [];
+  const torsos = [], floors = [], hipYs = [], centerXs = [];
 
   for (let f = 0; f < N; f++) {
     const i = f * 17;
@@ -261,6 +285,7 @@ function buildReference(pose) {
       const hpy = (pose.skeleton[(i + J.L_HIP) * 2 + 1] + pose.skeleton[(i + J.R_HIP) * 2 + 1]) / 2;
       torsos.push(Math.hypot(shx - hpx, shy - hpy));
       hipYs.push(hpy);
+      centerXs.push((shx + hpx) / 2);
     }
     const laC = pose.conf[i + J.L_ANKLE], raC = pose.conf[i + J.R_ANKLE];
     let foot = -Infinity;
@@ -272,35 +297,48 @@ function buildReference(pose) {
   if (!torsos.length) return null;
   const torso = median(torsos);
   const H = torso / cfg.torsoFraction;
+  const centerX = median(centerXs);
 
   let floorY, floorSource;
   if (floors.length) {
     floorY = median(floors);
     floorSource = "ankles";
   } else if (hipYs.length) {
-    floorY = median(hipYs) + HIP_ABOVE_FLOOR * H;   // feet cropped → estimate
+    floorY = median(hipYs) + HIP_ABOVE_FLOOR * H;
     floorSource = "hip-estimate";
   } else {
     return null;
   }
-  return { H, floorY, floorSource, torso };
+  return { H, floorY, centerX, floorSource, torso };
+}
+
+// Zone thresholds as fractions of H, read off the stance skeleton's landmarks.
+function zoneThresholds() {
+  return {
+    overHead:   CANON.crownFrac + cfg.headTopMargin,
+    headBottom: CANON.chinFrac  - cfg.chinMargin,
+    bodyTop:    CANON.solarPlexusFrac,
+    belt:       CANON.beltFrac,
+  };
 }
 
 function boundaries(r) {
+  const T = zoneThresholds();
   return {
-    overHead: r.floorY - cfg.overHeadCut * r.H,
-    head:     r.floorY - cfg.headBottom  * r.H,
-    bodyTop:  r.floorY - cfg.bodyTop     * r.H,
-    belt:     r.floorY - cfg.belt        * r.H,
+    overHead: r.floorY - T.overHead   * r.H,
+    head:     r.floorY - T.headBottom * r.H,
+    bodyTop:  r.floorY - T.bodyTop    * r.H,
+    belt:     r.floorY - T.belt       * r.H,
   };
 }
 
 function zoneFor(frac) {
-  if (frac > cfg.overHeadCut)  return { key: "over_head",  label: "over the head",   flag: true };
-  if (frac >= cfg.headBottom)  return { key: "head",       label: "head",            flag: false };
-  if (frac >= cfg.bodyTop)     return { key: "shoulder",   label: "shoulder height", flag: true };
-  if (frac >= cfg.belt)        return { key: "body",       label: "body / stomach",  flag: false };
-  return                              { key: "below_belt", label: "below the belt",  flag: true };
+  const T = zoneThresholds();
+  if (frac > T.overHead)   return { key: "over_head",  label: "over the head",   flag: true };
+  if (frac >= T.headBottom)return { key: "head",       label: "head",            flag: false };
+  if (frac >= T.bodyTop)   return { key: "shoulder",   label: "shoulder height", flag: true };
+  if (frac >= T.belt)      return { key: "body",       label: "body / stomach",  flag: false };
+  return                          { key: "below_belt", label: "below the belt",  flag: true };
 }
 
 // ─── per-punch ───────────────────────────────────────────────────────────────
@@ -315,7 +353,6 @@ function computePunches(state) {
     const ef = Math.min(N - 1, d.end_frame);
     const joints = JOINTS_FOR_SIDE[sideFor(d)];
 
-    // Landing = most-extended frame in the window (max raw |shoulder→wrist|).
     let bestReach = -Infinity, landFrame = sf;
     for (let f = sf; f <= ef; f++) {
       const w = wristXY(p, f, joints, cfg);
@@ -415,6 +452,45 @@ function renderTable(state) {
 }
 
 // ─── canvas helpers ──────────────────────────────────────────────────────────
+
+// The reference opponent: a canonical boxing stance scaled to H, anchored at the
+// floor and the boxer's median center x. Drawn translucent so the boxer's own
+// skeleton stays readable on top.
+function drawStanceSkeleton(ctx, r, s) {
+  const pt = (name) => {
+    const j = CANON.joints[name];
+    return { x: r.centerX + j.dx * r.H, y: r.floorY - j.f * r.H };
+  };
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = COLORS.ghost;
+  ctx.fillStyle = COLORS.ghost;
+  ctx.lineWidth = 2.5 * s;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  for (const [a, b] of CANON.bones) {
+    const A = pt(a), B = pt(b);
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y);
+    ctx.lineTo(B.x, B.y);
+    ctx.stroke();
+  }
+
+  // Head (chin → crown).
+  ctx.beginPath();
+  ctx.arc(r.centerX, r.floorY - CANON.headCenterFrac * r.H, CANON.headRadiusFrac * r.H, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Joint dots.
+  for (const name in CANON.joints) {
+    const P = pt(name);
+    ctx.beginPath();
+    ctx.arc(P.x, P.y, 3 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 
 function fillBand(ctx, y0, y1, w, color) {
   ctx.save();
