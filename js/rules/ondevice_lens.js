@@ -303,6 +303,68 @@ function buildArmExtensionBlock(ae, state) {
     </div>`;
 }
 
+function buildHitHeightBlock(hh, state) {
+  if (!hh) {
+    return `<p class="muted" style="margin-top:18px">No hit_height rule in this sidecar — record a fresh round with the latest build.</p>`;
+  }
+  const header = `
+    <h3 style="margin:18px 0 6px; font-size:14px">Hit height (straights)
+      <span class="muted" style="font-size:11px">v${hh.version}</span>
+      <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(hh.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${hh.severity}</span>
+    </h3>`;
+
+  const x = hh.extras || {};
+  const ZONE_LABEL = {
+    over_head: "over the head", head: "head", shoulder: "shoulder height",
+    body: "body / stomach", below_belt: "below the belt",
+  };
+  const zoneCell = p => {
+    if (!p.zone) return `<span class="muted">${p.skip_reason || "—"}</span>`;
+    const col = p.flag ? "#e85a5a" : "#5fd97a";
+    return `<span style="color:${col}; font-weight:700">${ZONE_LABEL[p.zone] || p.zone}</span>`;
+  };
+
+  const perPunch = hh.perPunch || [];
+  const rows = perPunch.map(p => {
+    const ht = p.height_frac == null ? "—" : Number(p.height_frac).toFixed(2);
+    const seek = p.land_frame ?? p.start_frame ?? 0;
+    return `
+      <tr data-seek="${seek}" style="cursor:pointer">
+        <td>${fmt(p.timestamp, 2)}s</td>
+        <td>${(p.punch_type || "?").replace(/_/g, " ")}</td>
+        <td>${p.hand || "?"}</td>
+        <td>${ht}</td>
+        <td>${zoneCell(p)}</td>
+      </tr>`;
+  }).join("");
+  const table = perPunch.length ? `
+    <details style="margin-top:6px">
+      <summary style="cursor:pointer">${perPunch.length} straights</summary>
+      <table class="sps-tbl" style="font-size:11px">
+        <thead><tr><th>t</th><th>Type</th><th>Hand</th><th>Ht</th><th>Zone</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>` : "";
+
+  if (hh.skipReason) {
+    return `${header}
+      <div style="font-size:13px; line-height:1.6">
+        <span class="muted">Skipped: <code>${hh.skipReason}</code>
+        (${x.punchCount ?? 0} punches, ${x.straightCount ?? 0} straights, ${x.scoredCount ?? 0} scored)</span>
+        ${table}
+      </div>`;
+  }
+
+  return `${header}
+    <div style="font-size:13px; line-height:1.6">
+      off-target: <code>${x.flaggedCount ?? "—"} / ${x.scoredCount ?? "—"}</code> scored ·
+      ratio: <code>${fmt(hh.violationRatio, 2)}</code><br>
+      <span class="muted">${x.straightCount ?? 0} straights · head &amp; body on-target; over-head / shoulder / below-belt flagged</span><br>
+      <em style="color:#ccc">${hh.coachCue || ""}</em>
+      ${table}
+    </div>`;
+}
+
 function wirePivotSeek() {
   if (!host) return;
   host.querySelectorAll("tr[data-seek]").forEach(tr => {
@@ -352,6 +414,9 @@ function renderSidebar(state) {
   // Arm extension (straights, axiality-gated).
   const armExtHtml = buildArmExtensionBlock(a.rules.arm_extension, state);
 
+  // Hit height (straights — where the fist peaks vs a standing reference).
+  const hitHeightHtml = buildHitHeightBlock(a.rules.hit_height, state);
+
   // DEPRECATED: legacy LogReg orientation, tucked into a collapsed details.
   const deprecatedBlock = a.orientation
     ? `<details style="margin-top:18px">
@@ -372,6 +437,7 @@ function renderSidebar(state) {
     ${stanceHtml}
     ${pivotHtml}
     ${armExtHtml}
+    ${hitHeightHtml}
     ${deprecatedBlock}
   `;
   wirePivotSeek();
