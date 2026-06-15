@@ -36,7 +36,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 const DEFAULTS = {
   // Head zone margins (× standing height) around the stance crown / chin.
   headTopMargin: 0.04,   // head zone extends this far ABOVE the crown
-  chinMargin:    0.06,   // head zone extends this far BELOW the chin
+  chinMargin:    0.08,   // head zone extends this far BELOW the chin
   minWristConfidence:  0.20,
   minAnchorConfidence: 0.20,
 };
