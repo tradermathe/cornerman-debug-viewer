@@ -142,6 +142,59 @@ function ratingPill(r) {
   return pill(String(r), RATING_COLORS[r] || COLOR_MUTED);
 }
 
+// The four rating anchors on the 0–100 score scale (1→0, 2→33, 3→67, 4→100),
+// mirroring the model's normalized levels (rating-1)/3 ×100.
+const ANCHORS = [0, 100 / 3, 200 / 3, 100];
+
+// 0–1 model score → 0–100. The model regresses this scalar then snaps to the
+// nearest anchor for the bucket rating — same recipe as axiality/direction.
+function scorePct(p) {
+  return Number.isFinite(p.score) ? p.score * 100 : NaN;
+}
+
+// Ordinal hesitation readout: where the continuous score sits between two
+// ADJACENT anchors. Because the scale is ordinal the model can only be torn
+// between neighbouring levels, so position-between-anchors fully captures it.
+function hesitation(pct) {
+  if (!Number.isFinite(pct)) return { text: "—", lo: null, hi: null };
+  let lo = 0;
+  for (let i = 0; i < 3; i++) if (pct >= ANCHORS[i]) lo = i;
+  const hi = Math.min(3, lo + 1);
+  const loR = lo + 1, hiR = hi + 1;
+  if (hi === lo) return { text: `confident ${loR}`, lo: loR, hi: loR };
+  const frac = (pct - ANCHORS[lo]) / (ANCHORS[hi] - ANCHORS[lo]); // 0→loR, 1→hiR
+  const NEAR = 0.18;
+  if (frac < NEAR)     return { text: `confident ${loR}`, lo: loR, hi: hiR };
+  if (frac > 1 - NEAR) return { text: `confident ${hiR}`, lo: loR, hi: hiR };
+  const lean = frac < 0.5 ? loR : hiR;
+  return { text: `between ${loR} & ${hiR} (leaning ${lean})`, lo: loR, hi: hiR };
+}
+
+// Horizontal 0–100 score bar with the four rating anchors ticked, a GT diamond,
+// and the predicted-score marker. Lets you eyeball per-punch ambiguity directly.
+function scoreBarHTML(pct, gtRating) {
+  const predCol = Number.isFinite(pct) ? RATING_COLORS[Math.round(hesitation(pct).lo)] || COLOR_HIP : COLOR_MUTED;
+  const ticks = ANCHORS.map((a, i) =>
+    `<div style="position:absolute; left:${a}%; top:0; transform:translateX(-50%);
+        font-size:10px; color:${RATING_COLORS[i + 1]};">|</div>
+     <div style="position:absolute; left:${a}%; top:13px; transform:translateX(-50%);
+        font-size:9px; color:#888;">${i + 1}</div>`).join("");
+  const gtPct = Number.isFinite(gtRating) ? ANCHORS[gtRating - 1] : null;
+  const gtMark = gtPct != null
+    ? `<div title="GT ${gtRating}" style="position:absolute; left:${gtPct}%; top:-3px;
+        transform:translateX(-50%); color:${RATING_COLORS[gtRating]}; font-size:13px;">◆</div>` : "";
+  const predMark = Number.isFinite(pct)
+    ? `<div style="position:absolute; left:${pct}%; top:1px; transform:translateX(-50%);
+        width:3px; height:10px; background:${predCol}; box-shadow:0 0 3px ${predCol};"></div>` : "";
+  return `
+    <div style="position:relative; height:30px; margin:6px 0 2px;">
+      <div style="position:absolute; top:5px; left:0; right:0; height:4px;
+          border-radius:2px; background:linear-gradient(90deg,
+          ${RATING_COLORS[1]}55, ${RATING_COLORS[2]}55, ${RATING_COLORS[3]}55, ${RATING_COLORS[4]}55);"></div>
+      ${ticks}${gtMark}${predMark}
+    </div>`;
+}
+
 // ─── build this round's punch list ──────────────────────────────────────────
 
 function rebuildPunches(state) {
@@ -278,6 +331,11 @@ function buildSidebarSkeleton() {
       <span style="color:${COLOR_OK}">✓ exact</span> ·
       <span style="color:${COLOR_NEAR}">≈ off by 1</span> ·
       <span style="color:${COLOR_MISS}">✗ off by 2+</span>.
+      The <b>0–100 score</b> is the model's raw regression output (ratings snap
+      to anchors 0/33/67/100); its position between anchors is what it's
+      "hesitating between". <span style="color:${COLOR_NEAR}">Caveat:</span> the
+      within-video-shuffle control shows ~¾ of this model's signal is
+      video-level bias, so read the per-punch score as indicative, not gospel.
     </p>
     <div id="hrm-card" class="hint" style="margin:8px 0; padding:8px 10px; border:1px solid #2a2a2a; border-radius:6px; font-family:ui-monospace,monospace; font-size:12px;"></div>
     <div class="ol-nav" style="display:flex; gap:8px; align-items:center; margin:10px 0 8px;">
@@ -331,7 +389,7 @@ function renderPunchTable() {
   const rows = punches.map((p, i) => {
     const typeStr = (p.punch_type || "?").replace(/_/g, " ");
     const tStr = Number.isFinite(p.timestamp) ? p.timestamp.toFixed(2) + "s" : "—";
-    const scoreStr = Number.isFinite(p.score) ? p.score.toFixed(2) : "—";
+    const scoreStr = Number.isFinite(p.score) ? scorePct(p).toFixed(0) : "—";
     const col = agreeColor(p.gt, p.pred);
     const sym = agreeSym(p.gt, p.pred);
     return `<tr data-idx="${i}" style="border-bottom:1px solid rgba(255,255,255,0.04);">
@@ -354,7 +412,7 @@ function renderPunchTable() {
           <th style="padding:4px 6px; font-weight:600;">type</th>
           <th style="padding:4px 6px; text-align:center; font-weight:600;">GT</th>
           <th style="padding:4px 6px; text-align:center; font-weight:600;">pred</th>
-          <th style="padding:4px 6px; text-align:right; font-weight:600;">score</th>
+          <th style="padding:4px 6px; text-align:right; font-weight:600;">score/100</th>
           <th style="padding:4px 6px; text-align:center; font-weight:600;">✓</th>
         </tr>
       </thead>
@@ -453,14 +511,17 @@ function rebuildSidebar(state) {
   if (!p) { el.innerHTML = ""; return; }
   const col = agreeColor(p.gt, p.pred);
   const sym = agreeSym(p.gt, p.pred);
-  const scoreStr = Number.isFinite(p.score) ? p.score.toFixed(3) : "—";
+  const pct = scorePct(p);
+  const pctStr = Number.isFinite(pct) ? pct.toFixed(0) : "—";
+  const hes = hesitation(pct);
   el.innerHTML = [
     `<b>${p.punch_type.replace(/_/g, " ")}</b> · <code>${p.hand}</code> · stance <code>${p.stance || "?"}</code>`,
     `label window <code>${p.start_frame}-${p.end_frame}</code>`,
     "",
     `<b>GT:</b> ${ratingPill(p.gt)}  &nbsp; <b>pred:</b> ${ratingPill(p.pred)} `
       + `<span style="color:${col}; font-weight:700">${sym}</span>`,
-    `pred score (0–1) = <code>${scoreStr}</code>  → snapped to rating <code>${p.pred}</code>`,
+    `<b>score:</b> <code>${pctStr} / 100</code> · ${pill(hes.text, RATING_COLORS[hes.lo] || COLOR_HIP)}`,
+    scoreBarHTML(pct, p.gt) + `<span class="muted" style="font-size:11px;">◆ GT · ▎ predicted score</span>`,
   ].join("<br>");
 }
 
@@ -471,8 +532,10 @@ function drawHud(ctx, p, s) {
   const titleTxt = `${p.hand} ${p.punch_type.replace(/_/g, " ")}  ·  ${p.stance || "?"}`;
   const gtTxt    = `GT: ${Number.isFinite(p.gt) ? p.gt : "—"}`;
   const predTxt  = `pred: ${Number.isFinite(p.pred) ? p.pred : "—"}  ${agreeSym(p.gt, p.pred)}`;
-  const scoreTxt = `score ${Number.isFinite(p.score) ? p.score.toFixed(2) : "—"}/1.0`;
-  const lines = [titleTxt, gtTxt, predTxt, scoreTxt];
+  const pct = scorePct(p);
+  const scoreTxt = `score ${Number.isFinite(pct) ? pct.toFixed(0) : "—"}/100`;
+  const hesTxt   = Number.isFinite(pct) ? hesitation(pct).text : "—";
+  const lines = [titleTxt, gtTxt, predTxt, scoreTxt, hesTxt];
 
   const fontPx = 15 * s, lineH = 22 * s, padX = 14 * s, padY = 10 * s;
   const x0 = 24 * s, y0 = 24 * s;
@@ -498,7 +561,9 @@ function drawHud(ctx, p, s) {
   ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(titleTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = RATING_COLORS[p.gt] || COLOR_MUTED; ctx.fillText(gtTxt, x0 + padX, y); y += lineH;
   ctx.fillStyle = col; ctx.fillText(predTxt, x0 + padX, y); y += lineH;
-  ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.fillText(scoreTxt, x0 + padX, y);
+  ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.fillText(scoreTxt, x0 + padX, y); y += lineH;
+  const hesLo = Number.isFinite(pct) ? hesitation(pct).lo : null;
+  ctx.fillStyle = RATING_COLORS[hesLo] || "rgba(255,255,255,0.7)"; ctx.fillText(hesTxt, x0 + padX, y);
   ctx.restore();
 }
 
