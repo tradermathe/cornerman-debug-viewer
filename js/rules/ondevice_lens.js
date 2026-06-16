@@ -303,6 +303,67 @@ function buildArmExtensionBlock(ae, state) {
     </div>`;
 }
 
+// On-device hand_return_path — the U-dip prominence rule. Dumb display of the
+// sidecar's per_punch (computed on the phone), mirroring the labeled-data lens.
+function buildHandReturnPathBlock(hr, state) {
+  if (!hr) {
+    return `<p class="muted" style="margin-top:18px">No hand_return_path rule in this sidecar — record a fresh round with the latest build.</p>`;
+  }
+  const header = `
+    <h3 style="margin:18px 0 6px; font-size:14px">Hand return path (straights)
+      <span class="muted" style="font-size:11px">v${hr.version}</span>
+      <span style="display:inline-block; padding:1px 8px; border-radius:10px; background:${severityColor(hr.severity)}; color:#000; font-size:11px; font-weight:700; text-transform:uppercase">${hr.severity}</span>
+    </h3>`;
+  const x = hr.extras || {};
+  const VERDICT_COLOR = { pass: "#5fd97a", fail: "#e85a5a", skip: "#7ec8ff", unclear: "#f5b945" };
+  const pill = v => `<span style="color:${VERDICT_COLOR[v] || "#888"}; font-weight:700">${v}</span>`;
+
+  const perPunch = hr.perPunch || [];
+  const rows = perPunch.map(p => {
+    const dipTxt = p.u_dip == null ? "—" : Number(p.u_dip).toFixed(2);
+    const axTxt  = p.axiality == null ? "—" : Number(p.axiality).toFixed(2);
+    const seek = p.low_frame ?? p.peak_frame ?? p.start_frame ?? 0;
+    return `
+      <tr data-seek="${seek}" style="cursor:pointer">
+        <td>${fmt(p.timestamp, 2)}s</td>
+        <td>${(p.punch_type || "?").replace(/_/g, " ")}</td>
+        <td>${p.hand || "?"}</td>
+        <td>${dipTxt}${p.spike_removed ? ` <span class="muted" title="a wrist-tracking spike was filtered">✦</span>` : ""}</td>
+        <td>${axTxt}</td>
+        <td>${pill(p.verdict)}${p.skip_reason ? ` <span class="muted">${p.skip_reason}</span>` : ""}</td>
+      </tr>`;
+  }).join("");
+  const table = perPunch.length ? `
+    <details style="margin-top:6px">
+      <summary style="cursor:pointer">${perPunch.length} straights</summary>
+      <table class="sps-tbl" style="font-size:11px">
+        <thead><tr><th>t</th><th>Type</th><th>Hand</th><th>U-dip</th><th>Axiality</th><th>Verdict</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>` : "";
+
+  if (hr.skipReason) {
+    return `${header}
+      <div style="font-size:13px; line-height:1.6">
+        <span class="muted">Skipped: <code>${hr.skipReason}</code>
+        (${x.punchCount ?? 0} punches, ${x.straightCount ?? 0} straights, ${x.scoredCount ?? 0} scored)</span>
+        ${table}
+      </div>`;
+  }
+
+  const skipped = perPunch.filter(p => p.verdict === "skip").length;
+  const unclear = perPunch.filter(p => p.verdict === "unclear").length;
+  const spikes  = perPunch.filter(p => p.spike_removed).length;
+  return `${header}
+    <div style="font-size:13px; line-height:1.6">
+      fails: <code>${x.failCount ?? "—"} / ${x.scoredCount ?? "—"}</code> scored ·
+      ratio: <code>${fmt(hr.violationRatio, 2)}</code><br>
+      <span class="muted">${x.straightCount ?? 0} straights · ${skipped} gated · ${unclear} unclear · ${spikes} spike-filtered · fail U-dip ≥ ${x.dropFail ?? "?"}</span><br>
+      <em style="color:#ccc">${hr.coachCue || ""}</em>
+      ${table}
+    </div>`;
+}
+
 function buildHitHeightBlock(hh, state) {
   if (!hh) {
     return `<p class="muted" style="margin-top:18px">No hit_height rule in this sidecar — record a fresh round with the latest build.</p>`;
@@ -419,6 +480,9 @@ function renderSidebar(state) {
   // Hit height (straights — where the fist peaks vs a standing reference).
   const hitHeightHtml = buildHitHeightBlock(a.rules.hit_height, state);
 
+  // Hand return path (straights — U-dip prominence on the way back to guard).
+  const handReturnHtml = buildHandReturnPathBlock(a.rules.hand_return_path, state);
+
   // DEPRECATED: legacy LogReg orientation, tucked into a collapsed details.
   const deprecatedBlock = a.orientation
     ? `<details style="margin-top:18px">
@@ -440,6 +504,7 @@ function renderSidebar(state) {
     ${pivotHtml}
     ${armExtHtml}
     ${hitHeightHtml}
+    ${handReturnHtml}
     ${deprecatedBlock}
   `;
   wirePivotSeek();
