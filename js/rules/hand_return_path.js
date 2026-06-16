@@ -11,12 +11,13 @@
 //   peak  = most-extended frame in the punch window (max reach =
 //           |shoulder→wrist| / torso, same pick as arm_extension) — the
 //           start of the return.
-//   window= [peak, cap], cap = min(peak + maxReturnSec (1.5s), next
-//           same-hand punch − 1 + cutGraceSec, cache end). The grace past
-//           the next punch covers labellers marking its start at the windup.
-//           NOT re-guard — the verdict reads the recovery off the
-//           trajectory, so it only needs a roomy window, not a precise end.
-//           Re-guard is computed for the readout / loop bound only.
+//   window= [peak, cap]. cap ends at the FIRST re-guard (wrist→nose ≤
+//           reGuardDist) + postGuardSec — once the fist is back the return
+//           is over, so later bobbing isn't scored. Outer fallback when the
+//           hand never re-guards: min(peak + maxReturnSec (1.5s), next
+//           same-hand punch − 1 + cutGraceSec, cache end). Re-guard only
+//           BOUNDS the search; the verdict still reads recovery off the
+//           trajectory, so a few frames of re-guard error don't move it.
 //   drop  = the U-dip's PROMINENCE, against the SAME-SIDE SHOULDER so
 //           whole-body vertical motion cancels. Per frame (smoothed),
 //           offset = wrist_y − shoulder_y (bigger = fist lower). The low is
@@ -61,6 +62,7 @@ const DEFAULTS = {
   smoothSec:    0.08,   // moving-average window on the offset signal
   spikeVel:     0.50,   // raw wrist jump near the low ≥ this (torsos/frame) = tracking spike → excise
   spikeWidthSec: 0.10,  // half-window excised around a spike low
+  postGuardSec: 0.12,   // buffer past the first re-guard before ending the dip search
   minCoverage:  0.60,   // min fraction of valid wrist frames inside the return window
   axialityGate: true,
   axialityMax:  Math.SQRT1_2,   // ≈0.7071 = cos 45° — same cut as arm_extension
@@ -456,6 +458,14 @@ function buildPunch(d, stance, side, idx, ctx) {
   p.return_sec = (p.b_frame - peakFrame) / fps;
   p.closest_dist = p.re_guarded ? arm.noseDist[p.b_frame] : minDist;
 
+  // End the dip search at the first re-guard (+ small buffer): once the fist
+  // is back within reGuardDist of the nose the return is over, so later
+  // motion (bobbing, prepping the next move) isn't scored. The generous cap
+  // stays as the fallback when the hand never gets back to the nose.
+  if (p.re_guarded) {
+    cap = Math.min(cap, bFrame + Math.round((cfg.postGuardSec || 0) * fps));
+  }
+
   // Smoothed shoulder-relative offset (wrist_y − shoulder_y; bigger = fist
   // lower). Smoothing stops one jittery glove frame faking a dip / recovery.
   const half = Math.max(0, Math.round((cfg.smoothSec * fps - 1) / 2));
@@ -516,9 +526,9 @@ function buildPunch(d, stance, side, idx, ctx) {
     const o = offS[f];
     if (Number.isFinite(o) && o < recoHigh) recoHigh = o;
   }
-  // Chopped: a combo cut the window before any recovery could be observed →
-  // can't tell whether it would have climbed back.
-  p.chopped = capByPunch && (cap - lowFrame) <= Math.max(1, half);
+  // Chopped: only if the hand never re-guarded AND a combo cut the window
+  // before any recovery could be observed → can't tell if it would climb back.
+  p.chopped = capByPunch && !p.re_guarded && (cap - lowFrame) <= Math.max(1, half);
 
   // Prominence: it's a U only if the fist BOTH fell below extension AND
   // climbed back. Score the smaller of the two (= dip prominence). The
