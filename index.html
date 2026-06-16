@@ -75,6 +75,11 @@
         the <em>On-device analysis (from phone)</em> lens to render the
         sidecar's exact per-frame numbers.
       </p>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px">
+        <button type="button" id="fb-signin">Sign in with Google</button>
+        <button type="button" id="fb-signout" class="muted small" hidden>Sign out</button>
+        <span id="fb-user" class="muted small">— sign in with the account used on the phone (or the debug admin)</span>
+      </div>
       <label class="folder-pick">
         <span>Session id</span>
         <input type="text" id="fb-session-id" placeholder="e.g. session_1779803489515" style="max-width:380px">

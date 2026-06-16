@@ -4,13 +4,16 @@
 // skeleton JSON, and on-device analysis sidecar from Firebase Storage
 // for a given (sessionId, roundNumber).
 //
-// All assets live behind RTDB rules that require `auth != null`, so we
-// sign in anonymously at module load. The web Firebase config is public
-// by design (browser can't keep secrets) — same values the iOS app
-// embeds in src/services/firebase.ts.
+// Session media + RTDB are owner-scoped (storage.rules / database.rules.json
+// in cornerman-ios check ownerUid against the caller's uid). Anonymous sign-in
+// no longer works — its fresh uid never matches the device's real account. So
+// the viewer signs in with Google: sign in with the SAME account used on the
+// phone to read your own sessions, or the debug-admin account (matheee.wieme,
+// uid G5ZEk…) granted read-all in the deployed rules. The web Firebase config
+// is public by design — same values the iOS app embeds in firebase.ts.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
-import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
 import { getStorage, ref as storageRef, getBlob } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-storage.js";
 import { getDatabase, ref as dbRef, get, query, orderByKey, limitToLast } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js";
 
@@ -28,29 +31,52 @@ let app = null;
 let auth = null;
 let storage = null;
 let db = null;
-let authPromise = null;
 
-// Idempotent — calling twice is fine.
+// Idempotent — calling twice is fine. Initialises the SDK but does NOT sign
+// in; reads require an explicit Google sign-in (see signIn()).
 export function init() {
-  if (app) return authPromise;
+  if (app) return;
   app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   storage = getStorage(app);
   db = getDatabase(app);
-  authPromise = signInAnonymously(auth).then(
-    () => { console.log("[firebase-source] anon sign-in OK, uid:", auth.currentUser?.uid); },
-    (err) => {
-      console.error("[firebase-source] anon sign-in failed:", err);
-      throw err;
-    }
-  );
-  return authPromise;
+}
+
+// Pop the Google sign-in flow. Returns the signed-in user.
+export async function signIn() {
+  init();
+  const cred = await signInWithPopup(auth, new GoogleAuthProvider());
+  console.log("[firebase-source] signed in:", cred.user.email, cred.user.uid);
+  return cred.user;
+}
+
+export async function signOutViewer() {
+  init();
+  await signOut(auth);
+}
+
+export function currentUser() {
+  return auth?.currentUser ?? null;
+}
+
+// Notify the caller on every auth-state change (and once on subscribe).
+export function onAuthChange(cb) {
+  init();
+  return onAuthStateChanged(auth, cb);
+}
+
+// Throw a clear, actionable error if the caller tries to read before signing in.
+function requireAuth() {
+  init();
+  if (!auth.currentUser) {
+    throw new Error("not signed in — click “Sign in with Google” first");
+  }
 }
 
 // List the N most recent sessions (by sessionId, which is timestamp-prefixed).
 // Returns an array of { sessionId, meta, rounds } sorted newest-first.
 export async function listRecentSessions(limit = 20) {
-  await init();
+  requireAuth();
   const snap = await get(query(dbRef(db, "sessions"), orderByKey(), limitToLast(limit)));
   const out = [];
   snap.forEach((sessionSnap) => {
@@ -66,7 +92,7 @@ export async function listRecentSessions(limit = 20) {
 // Read the per-round RTDB metadata. Used to verify a round has finished
 // uploading before we try to fetch the blobs.
 export async function getRoundMeta(sessionId, roundNumber) {
-  await init();
+  requireAuth();
   const snap = await get(dbRef(db, `sessions/${sessionId}/rounds/${roundNumber}`));
   return snap.val();
 }
@@ -81,15 +107,20 @@ export async function getRoundMeta(sessionId, roundNumber) {
 // Analysis sidecar may not exist on older sessions — returns null there
 // rather than throwing so the viewer can still load video + skeleton.
 export async function fetchRoundBlobs(sessionId, roundNumber) {
-  await init();
+  requireAuth();
   const base = `sessions/${sessionId}/round_${roundNumber}`;
   const videoPath    = `${base}.mp4`;
   const skeletonPath = `${base}_skeleton.json`;
   const analysisPath = `${base}_ondevice_analysis.json`;
 
   const [videoBlob, skeletonBlob, analysisBlob] = await Promise.all([
+    // Video may not have finished uploading (it's a large fire-and-forget
+    // upload) — non-fatal so a skeleton+analysis-only round still loads.
     getBlob(storageRef(storage, videoPath))
-      .catch((err) => { throw new Error(`video fetch failed at ${videoPath}: ${err.message}`); }),
+      .catch((err) => {
+        console.warn(`[firebase-source] no video at ${videoPath}: ${err.message}`);
+        return null;
+      }),
     getBlob(storageRef(storage, skeletonPath))
       .catch((err) => { throw new Error(`skeleton fetch failed at ${skeletonPath}: ${err.message}`); }),
     getBlob(storageRef(storage, analysisPath))

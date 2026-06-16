@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-06-16.2";
+const BUILD = "2026-06-16.3";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -67,6 +67,9 @@ const els = {
   fbListRecent:  document.getElementById("fb-list-recent"),
   fbRecent:      document.getElementById("fb-recent-sessions"),
   fbStatus:      document.getElementById("fb-status"),
+  fbSignin:      document.getElementById("fb-signin"),
+  fbSignout:     document.getElementById("fb-signout"),
+  fbUser:        document.getElementById("fb-user"),
   odVideo:       document.getElementById("od-video"),
   odSkeleton:    document.getElementById("od-skeleton"),
   odAnalysis:    document.getElementById("od-analysis"),
@@ -145,6 +148,31 @@ if (els.fbLoad)          els.fbLoad.addEventListener("click", onFirebaseLoad);
 if (els.fbListRecent)    els.fbListRecent.addEventListener("click", onFirebaseListRecent);
 if (els.fbRecent)        els.fbRecent.addEventListener("change", onFirebaseRecentPick);
 if (els.odLoad)          els.odLoad.addEventListener("click", onLocalOnDeviceLoad);
+if (els.fbSignin)        els.fbSignin.addEventListener("click", onFirebaseSignIn);
+if (els.fbSignout)       els.fbSignout.addEventListener("click", () => firebaseSource.signOutViewer());
+
+// Reflect Google auth state in the Firebase panel (button visibility + uid).
+firebaseSource.onAuthChange((user) => {
+  if (!els.fbUser) return;
+  if (user) {
+    els.fbUser.textContent = `— signed in as ${user.email}`;
+    if (els.fbSignin) els.fbSignin.hidden = true;
+    if (els.fbSignout) els.fbSignout.hidden = false;
+  } else {
+    els.fbUser.textContent = "— sign in with the account used on the phone (or the debug admin)";
+    if (els.fbSignin) els.fbSignin.hidden = false;
+    if (els.fbSignout) els.fbSignout.hidden = true;
+  }
+});
+
+async function onFirebaseSignIn() {
+  try {
+    await firebaseSource.signIn();
+  } catch (err) {
+    console.error("[firebase sign-in]", err);
+    els.fbStatus.textContent = `— sign-in failed: ${err.message}`;
+  }
+}
 
 // On boot, hide the Drive section entirely if the API isn't there (Safari /
 // Firefox today). Otherwise try to silently restore the last folder handle.
@@ -633,6 +661,11 @@ async function onFirebaseLoad() {
 // three blobs (video required, analysis optional) and feed them into start()
 // the same way. `idLabel`/`roundN` are identity hints for lenses + status.
 async function startOnDeviceRound(blobs, idLabel, roundN, statusEl, token) {
+  if (!blobs.videoBlob) {
+    throw new Error(
+      "round has no uploaded video yet (skeleton/analysis only) — retry once the video finishes uploading",
+    );
+  }
   // Wrap the video blob in a File so loadVideo's pattern matches existing
   // call sites (it only uses the Blob interface, but giving it a name keeps
   // state.videoFileName meaningful).
