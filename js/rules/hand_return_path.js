@@ -301,7 +301,7 @@ export const HandReturnPathRule = {
       ? (offVal >= 0 ? "+" : "") + offVal.toFixed(2) : "—";
 
     setText("hrp-active", ap
-      ? `${ap.punch_type} · drop ${Number.isFinite(ap.drop) ? ap.drop.toFixed(2) + "t" : "—"} · ${ap.predicted}`
+      ? `${ap.punch_type} · U-dip ${Number.isFinite(ap.drop) ? ap.drop.toFixed(2) + "t" : "—"} · ${ap.predicted}`
       : "—");
 
     drawSparkline(ap, state);
@@ -1032,7 +1032,7 @@ function renderTemplate(sig, cfg) {
   return `
     <h2>Hand return path (straights)</h2>
     <p class="hint">
-      <b>drop</b> = the U-dip's prominence vs the same-side shoulder, in
+      <b>U-dip</b> = the dip's prominence vs the same-side shoulder, in
       torsos: the fist must BOTH fall below its extension height AND climb
       back. We score the smaller half, so a clean retrace to a low guard
       (falls, never climbs) and a body shot (low at peak, only rises) both
@@ -1089,11 +1089,11 @@ function renderTemplate(sig, cfg) {
       spike is usually a wrist-tracking glitch, not a real drop.
     </p>
 
-    <h3>Drop fail threshold</h3>
+    <h3>U-dip fail threshold</h3>
     <div class="slider-row">
       <input type="range" id="hrp-drop" min="0.05" max="0.50" step="0.01" value="${cfg.dropFail}" />
       <output id="hrp-drop-out">${cfg.dropFail.toFixed(2)}</output>
-      <span class="muted small">drop below extension height (torsos) — at or above = dropped hand</span>
+      <span class="muted small">U-dip prominence (torsos) — at or above = dipped and recovered</span>
     </div>
 
     <h3>Return window</h3>
@@ -1251,7 +1251,7 @@ function renderPunchTable() {
       <thead><tr>
         <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
         <th title="which gate decided this punch — hover for the numbers that fired it">why</th>
-        <th title="how far the fist dropped below its extension height, vs the same-side shoulder (torsos)">drop</th>
+        <th title="U-dip prominence — the fist must dip below extension AND climb back, vs the same-side shoulder (torsos)">U-dip</th>
         <th title="peak → return end; ⃠ = never re-guarded inside the cap (closest approach used)">ret</th>
         <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — above the cut = arc not visible, skipped">axiality</th>
         <th title="valid wrist frames inside the return window">cov</th>
@@ -1285,7 +1285,7 @@ function renderAggregate() {
     <div class="metric">
       <div class="metric-label">predicted pass</div>
       <div class="metric-val">${passed}</div>
-      <div class="metric-sub">${Math.round(100 * passed / scored.length)}% · drop &lt; ${cfg.dropFail.toFixed(2)}</div>
+      <div class="metric-sub">${Math.round(100 * passed / scored.length)}% · U-dip &lt; ${cfg.dropFail.toFixed(2)}</div>
     </div>
     <div class="metric">
       <div class="metric-label">skipped (axial)</div>
@@ -1293,7 +1293,7 @@ function renderAggregate() {
       <div class="metric-sub">head-on, gated out</div>
     </div>
     <div class="metric">
-      <div class="metric-label">mean drop</div>
+      <div class="metric-label">mean U-dip</div>
       <div class="metric-val">${meanDrop.toFixed(3)}</div>
       <div class="metric-sub">torsos (scored only)</div>
     </div>
