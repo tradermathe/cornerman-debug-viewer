@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-06-16.1";
+const BUILD = "2026-06-16.2";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -67,6 +67,12 @@ const els = {
   fbListRecent:  document.getElementById("fb-list-recent"),
   fbRecent:      document.getElementById("fb-recent-sessions"),
   fbStatus:      document.getElementById("fb-status"),
+  odVideo:       document.getElementById("od-video"),
+  odSkeleton:    document.getElementById("od-skeleton"),
+  odAnalysis:    document.getElementById("od-analysis"),
+  odRound:       document.getElementById("od-round"),
+  odLoad:        document.getElementById("od-load"),
+  odStatus:      document.getElementById("od-status"),
 };
 
 // Cache index built from the folder picker (or the Drive folder walker):
@@ -138,6 +144,7 @@ if (els.videoPick)       els.videoPick.addEventListener("change", onDriveVideoPi
 if (els.fbLoad)          els.fbLoad.addEventListener("click", onFirebaseLoad);
 if (els.fbListRecent)    els.fbListRecent.addEventListener("click", onFirebaseListRecent);
 if (els.fbRecent)        els.fbRecent.addEventListener("change", onFirebaseRecentPick);
+if (els.odLoad)          els.odLoad.addEventListener("click", onLocalOnDeviceLoad);
 
 // On boot, hide the Drive section entirely if the API isn't there (Safari /
 // Firefox today). Otherwise try to silently restore the last folder handle.
@@ -613,57 +620,86 @@ async function onFirebaseLoad() {
   try {
     const blobs = await firebaseSource.fetchRoundBlobs(sessionId, roundN);
     if (token !== currentLoadToken) return;
-
-    // Wrap the video blob in a File so loadVideo's pattern matches existing
-    // call sites (it only uses the Blob interface, but giving it a name
-    // keeps state.videoFileName meaningful).
-    const videoFile = new File(
-      [blobs.videoBlob],
-      `${sessionId}_r${roundN}.mp4`,
-      { type: "video/mp4" }
-    );
-    await loadVideo(videoFile);
-    if (token !== currentLoadToken) return;
-
-    const pose = await loadOnDeviceSkeleton(blobs.skeletonBlob);
-    if (token !== currentLoadToken) return;
-    pose.engine = pose.engine || "apple_vision_2d";
-
-    let analysis = null;
-    if (blobs.analysisBlob) {
-      try {
-        analysis = await loadOnDeviceAnalysis(blobs.analysisBlob);
-      } catch (err) {
-        console.error("[firebase load] analysis parse failed:", err);
-      }
-    }
-    if (token !== currentLoadToken) return;
-
-    // Identity hints used by some lenses (orientation_lens reads cacheBasename
-    // to pull Sheet labels; on-device lens doesn't need them but we set them
-    // anyway for consistency).
-    state.cacheBasename = sessionId;
-    state.cacheRound = roundN;
-
-    // Pull punches out of the analysis sidecar so the existing punch
-    // rendering pipeline (3rd start() arg) lights up for Firebase-loaded
-    // sessions just like it does for training-cache loads.
-    const punches = analysis?.punches ?? null;
-    start(pose, null, punches, null, null, null, analysis);
-
-    const punchNote = punches
-      ? `· ${punches.detections.length} punches`
-      : "";
-    const sidecarNote = analysis
-      ? `with on-device analysis (${Object.keys(analysis.rules).length} rules${punchNote})`
-      : `no analysis sidecar — record a new round to populate`;
-    els.fbStatus.textContent = `— loaded ${sessionId} r${roundN}, ${sidecarNote}`;
-    els.loadStatus.textContent = "";
+    await startOnDeviceRound(blobs, sessionId, roundN, els.fbStatus, token);
   } catch (err) {
     if (token !== currentLoadToken) return;
     console.error("[firebase load]", err);
     els.fbStatus.textContent = `— error: ${err.message}`;
     els.loadStatus.textContent = `Firebase load failed: ${err.message}`;
+  }
+}
+
+// Shared by the Firebase loader and the local on-device picker: take the
+// three blobs (video required, analysis optional) and feed them into start()
+// the same way. `idLabel`/`roundN` are identity hints for lenses + status.
+async function startOnDeviceRound(blobs, idLabel, roundN, statusEl, token) {
+  // Wrap the video blob in a File so loadVideo's pattern matches existing
+  // call sites (it only uses the Blob interface, but giving it a name keeps
+  // state.videoFileName meaningful).
+  const videoFile = new File([blobs.videoBlob], `${idLabel}_r${roundN}.mp4`, { type: "video/mp4" });
+  await loadVideo(videoFile);
+  if (token !== currentLoadToken) return;
+
+  const pose = await loadOnDeviceSkeleton(blobs.skeletonBlob);
+  if (token !== currentLoadToken) return;
+  pose.engine = pose.engine || "apple_vision_2d";
+
+  let analysis = null;
+  if (blobs.analysisBlob) {
+    try {
+      analysis = await loadOnDeviceAnalysis(blobs.analysisBlob);
+    } catch (err) {
+      console.error("[on-device load] analysis parse failed:", err);
+    }
+  }
+  if (token !== currentLoadToken) return;
+
+  // Identity hints used by some lenses (orientation_lens reads cacheBasename
+  // to pull Sheet labels; on-device lens doesn't need them but we set them
+  // anyway for consistency).
+  state.cacheBasename = idLabel;
+  state.cacheRound = roundN;
+
+  // Pull punches out of the analysis sidecar so the existing punch rendering
+  // pipeline (3rd start() arg) lights up just like it does for training-cache
+  // loads.
+  const punches = analysis?.punches ?? null;
+  start(pose, null, punches, null, null, null, analysis);
+
+  const punchNote = punches ? `· ${punches.detections.length} punches` : "";
+  const sidecarNote = analysis
+    ? `with on-device analysis (${Object.keys(analysis.rules).length} rules${punchNote})`
+    : `no analysis sidecar`;
+  if (statusEl) statusEl.textContent = `— loaded ${idLabel} r${roundN}, ${sidecarNote}`;
+  els.loadStatus.textContent = "";
+}
+
+// Local-file twin of onFirebaseLoad: read the on-device round straight from
+// disk (video + skeleton + optional analysis sidecar). Sidesteps Storage
+// owner-scope auth entirely — used for rounds pulled off the phone.
+async function onLocalOnDeviceLoad() {
+  const videoFile = els.odVideo.files?.[0];
+  const skeletonFile = els.odSkeleton.files?.[0];
+  const analysisFile = els.odAnalysis.files?.[0] ?? null;
+  if (!videoFile || !skeletonFile) {
+    els.odStatus.textContent = "— pick at least a video + skeleton JSON";
+    return;
+  }
+  const roundN = parseInt(els.odRound.value, 10) || 0;
+  const idLabel = videoFile.name.replace(/\.mp4$/i, "");
+  els.odStatus.textContent = `— loading ${videoFile.name}…`;
+  els.loadStatus.textContent = "Loading on-device round from local files…";
+  const token = ++currentLoadToken;
+  try {
+    await startOnDeviceRound(
+      { videoBlob: videoFile, skeletonBlob: skeletonFile, analysisBlob: analysisFile },
+      idLabel, roundN, els.odStatus, token,
+    );
+  } catch (err) {
+    if (token !== currentLoadToken) return;
+    console.error("[local on-device load]", err);
+    els.odStatus.textContent = `— error: ${err.message}`;
+    els.loadStatus.textContent = `Local load failed: ${err.message}`;
   }
 }
 

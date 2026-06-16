@@ -92,6 +92,36 @@
       </select>
     </details>
 
+    <details id="ondevice-section">
+      <summary><span class="section-label">On-device round (local files)</span> <span id="od-status" class="muted small">— pick the video + skeleton (analysis optional)</span></summary>
+      <p class="muted small" style="margin:0 0 8px">
+        For a round pulled off the phone (or whose cloud upload didn't
+        finish). Same data as the Firebase loader but read straight from
+        disk — no Storage auth needed. Pick the <code>round_N.mp4</code>,
+        its <code>_skeleton.json</code>, and optionally the
+        <code>_ondevice_analysis.json</code> sidecar.
+      </p>
+      <label class="folder-pick">
+        <span>Video <code>.mp4</code></span>
+        <input type="file" id="od-video" accept="video/*">
+      </label>
+      <label class="folder-pick">
+        <span>Skeleton <code>_skeleton.json</code></span>
+        <input type="file" id="od-skeleton" accept=".json,application/json">
+      </label>
+      <label class="folder-pick">
+        <span>Analysis sidecar <span class="muted">(optional)</span></span>
+        <input type="file" id="od-analysis" accept=".json,application/json">
+      </label>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px">
+        <label style="display:flex; gap:6px; align-items:center">
+          <span>Round</span>
+          <input type="number" id="od-round" min="0" value="1" style="width:80px">
+        </label>
+        <button type="button" id="od-load">Load</button>
+      </div>
+    </details>
+
     <details class="manual-fallback">
       <summary>Manual file pick (no folder)</summary>
       <label>
