@@ -59,6 +59,8 @@ const DEFAULTS = {
   maxReturnSec: 1.5,    // window cap after the peak frame
   cutGraceSec:  0.12,   // grace past the next same-hand punch before cutting
   smoothSec:    0.08,   // moving-average window on the offset signal
+  spikeVel:     0.50,   // raw wrist jump near the low ≥ this (torsos/frame) = tracking spike → excise
+  spikeWidthSec: 0.10,  // half-window excised around a spike low
   minCoverage:  0.60,   // min fraction of valid wrist frames inside the return window
   axialityGate: true,
   axialityMax:  Math.SQRT1_2,   // ≈0.7071 = cos 45° — same cut as arm_extension
@@ -181,6 +183,7 @@ export const HandReturnPathRule = {
     wireSlider("hrp-cov",     "hrp-cov-out",     "minCoverage", rescoreAndRefresh);
     wireSlider("hrp-pose-gate",  "hrp-pose-gate-out",  "minPoseConf", recomputeAndRefresh);
     wireSlider("hrp-glove-gate", "hrp-glove-gate-out", "minGloveConf", recomputeAndRefresh);
+    wireSlider("hrp-spike",      "hrp-spike-out",      "spikeVel", recomputeAndRefresh);
 
     // Axiality gate toggle + cut — verdict-only, like arm_extension.
     const axialToggle = host.querySelector("#hrp-axial-toggle");
@@ -406,6 +409,7 @@ function buildPunch(d, stance, side, idx, ctx) {
     low_frame: -1,
     base_offset: NaN,
     torso_med: NaN,
+    spike_removed: false,
     re_guarded: false,
     has_return: false,
     chopped: false,
@@ -458,17 +462,53 @@ function buildPunch(d, stance, side, idx, ctx) {
   const offS = smoothOffset(arm, peakFrame, cap, half);
   const offPeak = offS[peakFrame];
 
-  // Low = lowest fist (max offset) over the return; coverage tally.
-  let lowFrame = peakFrame, offLow = Number.isFinite(offPeak) ? offPeak : -Infinity;
-  let nValid = 0; const nTotal = cap - peakFrame;
-  for (let f = peakFrame + 1; f <= cap; f++) {
-    const o = offS[f];
-    if (!Number.isFinite(o)) continue;
-    nValid++;
-    if (o > offLow) { offLow = o; lowFrame = f; }
+  // Torso normalizer (also needed for the spike velocity test).
+  const tVals = [];
+  for (let f = peakFrame; f <= cap; f++) {
+    if (Number.isFinite(torso[f])) tVals.push(torso[f]);
   }
+  const tMed = median(tVals);
+  p.torso_med = tMed;
+
+  // Coverage over the whole window (before any spike excision).
+  let nValid = 0; const nTotal = cap - peakFrame;
+  for (let f = peakFrame + 1; f <= cap; f++) if (Number.isFinite(offS[f])) nValid++;
   p.coverage = nTotal > 0 ? nValid / nTotal : 1;
+
+  // Low = lowest fist (max offset). SPIKE GUARD: a "low" reached by a wrist
+  // teleport — a huge single-frame raw-wrist jump near it — isn't a real dip.
+  // The glove detector reports these confidently (conf 0.4–0.8), so a conf
+  // gate can't catch them; geometry can. Excise the excursion and re-find,
+  // a few passes (combos can have more than one).
+  const findLow = () => {
+    let lf = peakFrame, ol = Number.isFinite(offPeak) ? offPeak : -Infinity;
+    for (let f = peakFrame + 1; f <= cap; f++) {
+      const o = offS[f];
+      if (Number.isFinite(o) && o > ol) { ol = o; lf = f; }
+    }
+    return [lf, ol];
+  };
+  const spikeHalf = Math.max(1, Math.round((cfg.spikeWidthSec || 0.10) * fps));
+  let [lowFrame, offLow] = findLow();
+  let spikeRemoved = false;
+  if (Number.isFinite(tMed) && tMed > 0 && cfg.spikeVel > 0) {
+    for (let iter = 0; iter < 3 && lowFrame > peakFrame; iter++) {
+      let mj = 0;
+      for (let f = Math.max(peakFrame + 1, lowFrame - 2); f <= Math.min(cap, lowFrame + 2); f++) {
+        if (Number.isFinite(arm.wx[f]) && Number.isFinite(arm.wx[f - 1])) {
+          mj = Math.max(mj, Math.hypot(arm.wx[f] - arm.wx[f - 1], arm.wy[f] - arm.wy[f - 1]) / tMed);
+        }
+      }
+      if (mj < cfg.spikeVel) break;          // smooth low → real dip, keep it
+      for (let f = Math.max(peakFrame, lowFrame - spikeHalf); f <= Math.min(cap, lowFrame + spikeHalf); f++) {
+        offS[f] = NaN;
+      }
+      spikeRemoved = true;
+      [lowFrame, offLow] = findLow();
+    }
+  }
   p.low_frame = lowFrame;
+  p.spike_removed = spikeRemoved;
 
   // Recovery = how far the fist climbs back AFTER the low (min offset after).
   let recoHigh = offLow;
@@ -488,12 +528,6 @@ function buildPunch(d, stance, side, idx, ctx) {
   p.base_offset = baseOff;
   const uPx = Math.max(0, offLow - baseOff);
 
-  const tVals = [];
-  for (let f = peakFrame; f <= cap; f++) {
-    if (Number.isFinite(torso[f])) tVals.push(torso[f]);
-  }
-  const tMed = median(tVals);
-  p.torso_med = tMed;
   p.drop = (Number.isFinite(tMed) && tMed > 0 && nValid > 0 && Number.isFinite(baseOff))
     ? uPx / tMed
     : NaN;
@@ -566,9 +600,10 @@ function rescorePunch(p, cfg) {
     p.reason_text = "no valid torso / shoulder in the return window — can't measure the drop";
     return;
   }
-  const tail = p.re_guarded
+  const tail = (p.re_guarded
     ? `re-guarded in ${p.return_sec.toFixed(2)}s`
-    : `never re-guarded inside the cap (closest approach ${p.closest_dist.toFixed(2)}t)`;
+    : `never re-guarded inside the cap (closest approach ${p.closest_dist.toFixed(2)}t)`)
+    + (p.spike_removed ? " · a wrist-tracking spike was filtered out" : "");
   if (p.drop >= cfg.dropFail) {
     p.predicted = "fail";
     p.reason = "u_dip";
@@ -1154,6 +1189,19 @@ function renderTemplate(sig, cfg) {
       <input type="range" id="hrp-glove-gate" min="0.05" max="0.95" step="0.05" value="${cfg.minGloveConf}" />
       <output id="hrp-glove-gate-out">${cfg.minGloveConf.toFixed(2)}</output>
       <span class="muted small">glove conf — below = no wrist detection on v6 rounds</span>
+    </div>
+
+    <h3>Spike guard</h3>
+    <p class="hint">
+      The glove detector sometimes teleports the wrist for a few frames with
+      <em>high</em> confidence (so a conf gate can't catch it), faking a
+      dip-and-recover. A "low" reached by a wrist jump ≥ this (torsos/frame,
+      physically impossible for a hand) is excised and the low re-found.
+    </p>
+    <div class="slider-row">
+      <input type="range" id="hrp-spike" min="0.20" max="1.00" step="0.05" value="${cfg.spikeVel}" />
+      <output id="hrp-spike-out">${cfg.spikeVel.toFixed(2)}</output>
+      <span class="muted small">max real-hand speed near the low — above = tracking spike (0 disables)</span>
     </div>
 
     <h3>Per-punch (straights only)</h3>
