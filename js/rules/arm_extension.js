@@ -55,7 +55,7 @@ const DEFAULTS = {
   // 0–100 mistake score: 0 at the threshold bend, ramping to 100 at mistakeSat,
   // raised to `convexity` so it's gentle near the (noisy) boundary and harsh
   // when egregious. score = 100 · clamp((bend − startBend)/(sat − startBend))^p.
-  mistakeSat:       50,       // bend (deg) that scores a full 100
+  mistakeSat:       60,       // bend (deg) that scores a full 100 (fully failed to extend)
   convexity:        2,        // p — 1 linear, 2 quadratic, higher = worse punished harder
   // Axiality gate — the only gate. Forearm axiality (0 = flat across the
   // image / sideways, 1 = pointing down the camera axis) measures how
