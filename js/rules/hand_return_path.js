@@ -1376,12 +1376,18 @@ function renderAggregate() {
   const agree = labelled.filter(p => p.label === p.predicted).length;
   const agreePct = labelled.length
     ? `${Math.round(100 * agree / labelled.length)}%` : "—";
+  // Round score = mean of the worst 10% of judged punches (rare-event rollup):
+  // a one-off dropped hand dilutes against the clean 0s, a habit lights up.
   const judged = signals.punches.filter(p => p.score != null);
-  const roundScore = judged.length
-    ? judged.reduce((s, p) => s + p.score, 0) / judged.length : null;
+  let roundScore = null;
+  if (judged.length) {
+    const sorted = judged.map(p => p.score).sort((a, b) => b - a);
+    const k = Math.max(1, Math.round(sorted.length / 10));
+    roundScore = sorted.slice(0, k).reduce((a, b) => a + b, 0) / k;
+  }
   host_.innerHTML = `
     <div class="metric">
-      <div class="metric-label">round score (mean)</div>
+      <div class="metric-label">round score (worst 10%)</div>
       <div class="metric-val">${roundScore == null ? "—" : roundScore.toFixed(1)}</div>
       <div class="metric-sub">mean mistake · ${judged.length} judged</div>
     </div>
