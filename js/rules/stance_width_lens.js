@@ -399,6 +399,68 @@ function severityColor(sev) {
   }
 }
 
+// ── 0–100 stance mistake score ──────────────────────────────────────────────
+// Two nonlinear axes (both S-curves): HOW CLOSE (per frame) and HOW LONG (per
+// continuous narrow episode, so 2s unbroken > 2×1s). Episodes combine by
+// saturating accumulate (noisy-OR). Operates on the foreshorten-corrected sep.
+let scoreCfg = {
+  startSep: 0.60,   // sep where narrow starts counting (score lifts off 0)
+  platSep:  0.25,   // sep that's fully closed (closeness 100)
+  closeK:   10,     // closeness sigmoid steepness
+  durMid:   2.0,    // episode seconds at the duration sigmoid's steep midpoint
+  durK:     10,     // duration sigmoid steepness
+};
+
+function sigmoid01(x, k) {
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  return (L(x) - L(0)) / (L(1) - L(0));
+}
+
+export function computeStanceScore(sep, validMask, fps, cfg = scoreCfg) {
+  const n = sep.length;
+  const close = new Array(n).fill(0);
+  for (let f = 0; f < n; f++) {
+    if (validMask[f] && Number.isFinite(sep[f]) && sep[f] < cfg.startSep) {
+      const x = Math.min(1, Math.max(0, (cfg.startSep - sep[f]) / (cfg.startSep - cfg.platSep)));
+      close[f] = sigmoid01(x, cfg.closeK);
+    }
+  }
+  const episodes = [];
+  let i = 0;
+  while (i < n) {
+    if (close[i] > 0) {
+      let j = i, peak = 0;
+      while (j < n && close[j] > 0) { if (close[j] > peak) peak = close[j]; j++; }
+      const durSec = (j - i) / fps;
+      // S-curve on seconds; /(2·durMid) puts the steep midpoint at durMid, so
+      // the 0→durMid range is the accelerating part → 2s unbroken > 2×1s.
+      const durFactor = sigmoid01(Math.min(1, durSec / (2 * cfg.durMid)), cfg.durK);
+      episodes.push({ startFrame: i, endFrame: j - 1, durSec, peakClose: peak, durFactor, badness: peak * durFactor });
+      i = j;
+    } else i++;
+  }
+  let surv = 1;
+  for (const e of episodes) surv *= (1 - e.badness);   // noisy-OR
+  return { score: Math.round(100 * (1 - surv)), episodes, close };
+}
+
+function renderStanceScore() {
+  const el = host && host.querySelector("#sw-score");
+  if (!el || !cache || !cache.sepCorr || !cache.outCorr) return;
+  const r = computeStanceScore(cache.sepCorr, cache.outCorr.debug.validMask, cache.fps);
+  const eps = r.episodes.length
+    ? r.episodes.map(e =>
+        `<li>${(e.startFrame / cache.fps).toFixed(1)}–${(e.endFrame / cache.fps).toFixed(1)}s ·
+         ${e.durSec.toFixed(1)}s · close ${Math.round(100 * e.peakClose)} ·
+         dur ×${e.durFactor.toFixed(2)} → <b>${Math.round(100 * e.badness)}</b></li>`).join("")
+    : `<li class="muted">no narrow episodes this round</li>`;
+  el.innerHTML = `
+    <h3 style="margin:10px 0 4px; font-size:14px">Round score
+      <span class="muted" style="font-size:11px; text-transform:none">(saturating accumulate)</span></h3>
+    <div style="font-size:22px; font-weight:700; color:${severityColor(r.score >= 70 ? "severe" : r.score >= 40 ? "moderate" : r.score >= 15 ? "mild" : "none")}">${r.score}<span class="muted" style="font-size:12px"> / 100</span></div>
+    <ul style="margin:4px 0 0 16px; padding:0; font-size:12px">${eps}</ul>`;
+}
+
 export const StanceWidthLensRule = {
   id: "stance_width_lens",
   label: "Stance width (rule workbench)",
@@ -431,6 +493,20 @@ export const StanceWidthLensRule = {
         <span style="color:${COLOR_INVALID}">filtered</span>.
       </p>
       <div id="sw-round"></div>
+      <div id="sw-score"></div>
+      <details style="margin:6px 0">
+        <summary style="cursor:pointer; font-size:13px">Score tuning</summary>
+        <label class="slider-row" style="display:block; font-size:12px">close start sep = <output id="sw-start-out">0.60</output>
+          <input type="range" id="sw-start" min="0.40" max="0.80" step="0.01" value="0.60"></label>
+        <label class="slider-row" style="display:block; font-size:12px">fully closed sep = <output id="sw-plat-out">0.25</output>
+          <input type="range" id="sw-plat" min="0.10" max="0.55" step="0.01" value="0.25"></label>
+        <label class="slider-row" style="display:block; font-size:12px">closeness steepness = <output id="sw-ck-out">10.0</output>
+          <input type="range" id="sw-ck" min="2" max="20" step="0.5" value="10"></label>
+        <label class="slider-row" style="display:block; font-size:12px">duration midpoint (s) = <output id="sw-dmid-out">2.0</output>
+          <input type="range" id="sw-dmid" min="0.5" max="6" step="0.1" value="2.0"></label>
+        <label class="slider-row" style="display:block; font-size:12px">duration steepness = <output id="sw-dk-out">10.0</output>
+          <input type="range" id="sw-dk" min="2" max="20" step="0.5" value="10"></label>
+      </details>
       <h3>Current frame</h3>
       <div id="sw-frame" style="font-size:13px; line-height:1.6"></div>
       <h3>Sep ratio over time</h3>
@@ -443,6 +519,21 @@ export const StanceWidthLensRule = {
       <div id="sw-clips"></div>
     `;
     mountStageTimeline();
+
+    const wireScore = (id, key, dec) => {
+      const s = host.querySelector(id), o = host.querySelector(id + "-out");
+      if (!s) return;
+      s.addEventListener("input", () => {
+        scoreCfg[key] = parseFloat(s.value);
+        if (o) o.textContent = scoreCfg[key].toFixed(dec);
+        renderStanceScore();
+      });
+    };
+    wireScore("#sw-start", "startSep", 2);
+    wireScore("#sw-plat", "platSep", 2);
+    wireScore("#sw-ck", "closeK", 1);
+    wireScore("#sw-dmid", "durMid", 1);
+    wireScore("#sw-dk", "durK", 1);
   },
 
   update(state) {
@@ -524,6 +615,7 @@ export const StanceWidthLensRule = {
     drawTrace(host.querySelector("#sw-trace"), c, f);
     drawDxDyTrace(host.querySelector("#sw-dxdy"), c, f);
     drawStanceTimeline(document.getElementById("sw-timeline"), c, f);
+    renderStanceScore();
   },
 
   draw(ctx, state) {
