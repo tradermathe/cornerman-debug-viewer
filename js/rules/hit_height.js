@@ -613,11 +613,15 @@ function renderTable(state) {
   const axialN = punches.filter(p => p.skip === "axial" || p.skip === "axial?").length;
   // Round score = plain mean of the per-punch scores over judged punches (the
   // per-punch sigmoid already carries severity, so the rollup stays linear).
+  // Worst-10% rollup (off-target landings are rare → mean would bury them).
   const judged = punches.filter(p => p.score != null);
-  const roundScore = judged.length
-    ? judged.reduce((s, p) => s + p.score, 0) / judged.length
-    : null;
-  const roundPart = roundScore == null ? "" : `<b>round score ${roundScore.toFixed(1)}</b> (mean of ${judged.length}) · `;
+  let roundScore = null;
+  if (judged.length) {
+    const sorted = judged.map(p => p.score).sort((a, b) => b - a);
+    const k = Math.max(1, Math.round(sorted.length / 10));
+    roundScore = sorted.slice(0, k).reduce((a, b) => a + b, 0) / k;
+  }
+  const roundPart = roundScore == null ? "" : `<b>round score ${roundScore.toFixed(1)}</b> (worst 10% of ${judged.length}) · `;
   sumEl.innerHTML = scored.length
     ? roundPart + `<b>${flagged}</b> / ${scored.length} punches flagged off-target` +
       (axialN ? ` · ${axialN} axial (skipped)` : "") +
