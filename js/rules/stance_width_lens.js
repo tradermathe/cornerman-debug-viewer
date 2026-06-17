@@ -429,13 +429,15 @@ export function computeStanceScore(sep, validMask, fps, cfg = scoreCfg) {
   let i = 0;
   while (i < n) {
     if (close[i] > 0) {
-      let j = i, peak = 0;
-      while (j < n && close[j] > 0) { if (close[j] > peak) peak = close[j]; j++; }
-      const durSec = (j - i) / fps;
+      let j = i, total = 0;
+      while (j < n && close[j] > 0) { total += close[j]; j++; }
+      const cnt = j - i;
+      const meanClose = total / cnt;   // sustained closeness over the episode, not the worst frame
+      const durSec = cnt / fps;
       // S-curve on seconds; /(2·durMid) puts the steep midpoint at durMid, so
       // the 0→durMid range is the accelerating part → 2s unbroken > 2×1s.
       const durFactor = sigmoid01(Math.min(1, durSec / (2 * cfg.durMid)), cfg.durK);
-      episodes.push({ startFrame: i, endFrame: j - 1, durSec, peakClose: peak, durFactor, badness: peak * durFactor });
+      episodes.push({ startFrame: i, endFrame: j - 1, durSec, meanClose, durFactor, badness: meanClose * durFactor });
       i = j;
     } else i++;
   }
@@ -451,7 +453,7 @@ function renderStanceScore() {
   const eps = r.episodes.length
     ? r.episodes.map(e =>
         `<li>${(e.startFrame / cache.fps).toFixed(1)}–${(e.endFrame / cache.fps).toFixed(1)}s ·
-         ${e.durSec.toFixed(1)}s · close ${Math.round(100 * e.peakClose)} ·
+         ${e.durSec.toFixed(1)}s · close ${Math.round(100 * e.meanClose)} ·
          dur ×${e.durFactor.toFixed(2)} → <b>${Math.round(100 * e.badness)}</b></li>`).join("")
     : `<li class="muted">no narrow episodes this round</li>`;
   el.innerHTML = `
