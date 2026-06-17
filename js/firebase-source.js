@@ -13,7 +13,7 @@
 // is public by design — same values the iOS app embeds in firebase.ts.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
 import { getStorage, ref as storageRef, getBlob } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-storage.js";
 import { getDatabase, ref as dbRef, get, query, orderByKey, limitToLast } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-database.js";
 
@@ -42,12 +42,48 @@ export function init() {
   db = getDatabase(app);
 }
 
-// Pop the Google sign-in flow. Returns the signed-in user.
+// Google sign-in. Try the popup first (no page reload); fall back to a
+// full-page redirect when the popup is blocked — common in Safari and any
+// browser with a popup blocker, since Firebase's popup does async work that
+// can lose the click gesture. The redirect resolves on return via
+// completeRedirectSignIn(), called once at startup.
 export async function signIn() {
   init();
-  const cred = await signInWithPopup(auth, new GoogleAuthProvider());
-  console.log("[firebase-source] signed in:", cred.user.email, cred.user.uid);
-  return cred.user;
+  const provider = new GoogleAuthProvider();
+  try {
+    const cred = await signInWithPopup(auth, provider);
+    console.log("[firebase-source] signed in (popup):", cred.user.email, cred.user.uid);
+    return cred.user;
+  } catch (err) {
+    const fallback = [
+      "auth/popup-blocked",
+      "auth/popup-closed-by-user",
+      "auth/cancelled-popup-request",
+      "auth/operation-not-supported-in-this-environment",
+    ];
+    if (fallback.includes(err?.code)) {
+      console.warn(`[firebase-source] popup unavailable (${err.code}), redirecting…`);
+      await signInWithRedirect(auth, provider); // navigates away; completes on return
+      return null;
+    }
+    throw err;
+  }
+}
+
+// Complete a redirect-based sign-in if the page just came back from one.
+// No-op on a normal load. Call once at startup.
+export async function completeRedirectSignIn() {
+  init();
+  try {
+    const res = await getRedirectResult(auth);
+    if (res?.user) {
+      console.log("[firebase-source] signed in (redirect):", res.user.email, res.user.uid);
+    }
+    return res?.user ?? null;
+  } catch (err) {
+    console.error("[firebase-source] redirect sign-in failed:", err);
+    return null;
+  }
 }
 
 export async function signOutViewer() {

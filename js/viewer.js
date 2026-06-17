@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-06-16.4";
+const BUILD = "2026-06-16.5";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -164,6 +164,10 @@ firebaseSource.onAuthChange((user) => {
     if (els.fbSignout) els.fbSignout.hidden = true;
   }
 });
+
+// If we just came back from a redirect sign-in (popup fallback), finish it —
+// onAuthChange above then updates the panel.
+firebaseSource.completeRedirectSignIn();
 
 async function onFirebaseSignIn() {
   try {
