@@ -56,7 +56,9 @@ import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
 
 const DEFAULTS = {
-  dropFail:     0.20,   // fail if U-dip prominence ≥ this (torsos)
+  dropFail:     0.20,   // U-dip prominence (torsos) where it starts being a mistake (score 0 below)
+  dropSat:      0.50,   // U-dip prominence that scores a full 100
+  steepness:    10,     // score sigmoid k (shared shape with arm_extension)
   reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard (cosmetic)
   maxReturnSec: 1.0,    // window cap after the peak frame
   cutGraceSec:  0.12,   // grace past the next same-hand punch before cutting
@@ -180,6 +182,8 @@ export const HandReturnPathRule = {
 
     // dropFail only moves the verdict — rescore, no window recompute.
     wireSlider("hrp-drop", "hrp-drop-out", "dropFail", rescoreAndRefresh);
+    wireSlider("hrp-sat", "hrp-sat-out", "dropSat", rescoreAndRefresh);
+    wireSlider("hrp-steep", "hrp-steep-out", "steepness", rescoreAndRefresh, 1);
     // These reshape the return window — full recompute.
     wireSlider("hrp-reguard", "hrp-reguard-out", "reGuardDist", recomputeAndRefresh);
     wireSlider("hrp-maxret",  "hrp-maxret-out",  "maxReturnSec", recomputeAndRefresh, 1);
@@ -564,9 +568,27 @@ function smoothOffset(arm, lo, hi, half) {
   return out;
 }
 
+// Normalised logistic on x∈[0,1]: 0→0, 1→1, steep in the middle. Shared score
+// shape with the arm_extension / hit_height lenses.
+function sigmoid01(x, k) {
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  return (L(x) - L(0)) / (L(1) - L(0));
+}
+
+// 0–100 mistake score from the U-dip prominence: 0 up to dropFail, sigmoid ramp
+// to 100 at dropSat. null when the dip is unmeasurable.
+function dropScore(drop, cfg) {
+  if (!Number.isFinite(drop)) return null;
+  const start = cfg.dropFail, sat = cfg.dropSat;
+  if (drop <= start) return 0;
+  if (sat <= start || drop >= sat) return 100;
+  return Math.round(100 * sigmoid01((drop - start) / (sat - start), cfg.steepness));
+}
+
 function rescorePunch(p, cfg) {
   // Single source of truth for predicted/reason — same contract as
   // arm_extension.rescorePunch.
+  p.score = null;
   if (!p.peak_valid) {
     p.predicted = "unclear";
     p.reason = "no_peak";
@@ -624,6 +646,7 @@ function rescorePunch(p, cfg) {
     p.reason = "no_dip";
     p.reason_text = `U-dip ${p.drop.toFixed(2)}t < ${cfg.dropFail.toFixed(2)} — no drop-and-recover; ${tail}`;
   }
+  p.score = dropScore(p.drop, cfg);
 }
 
 // Per-frame wrist track + reach + wrist→nose distance for one side.
@@ -1135,11 +1158,21 @@ function renderTemplate(sig, cfg) {
       spike is usually a wrist-tracking glitch, not a real drop.
     </p>
 
-    <h3>U-dip fail threshold</h3>
+    <h3>Mistake scoring</h3>
     <div class="slider-row">
       <input type="range" id="hrp-drop" min="0.05" max="0.50" step="0.01" value="${cfg.dropFail}" />
       <output id="hrp-drop-out">${cfg.dropFail.toFixed(2)}</output>
-      <span class="muted small">U-dip prominence (torsos) — at or above = dipped and recovered</span>
+      <span class="muted small">U-dip (torsos) where it starts being a mistake</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="hrp-sat" min="0.10" max="0.80" step="0.01" value="${cfg.dropSat}" />
+      <output id="hrp-sat-out">${cfg.dropSat.toFixed(2)}</output>
+      <span class="muted small">U-dip that's a full mistake (score 100)</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="hrp-steep" min="2" max="20" step="0.5" value="${cfg.steepness}" />
+      <output id="hrp-steep-out">${cfg.steepness.toFixed(1)}</output>
+      <span class="muted small">steepness — sharper mid cliff</span>
     </div>
 
     <h3>Return window</h3>
@@ -1258,6 +1291,12 @@ function renderPunchTable() {
         const dropCell = Number.isFinite(p.drop)
           ? `<td style="color:${p.drop >= cfg.dropFail ? COLORS.fail : COLORS.pass};font-variant-numeric:tabular-nums">${p.drop.toFixed(2)}</td>`
           : `<td class="muted">—</td>`;
+        const scoreCell = p.score == null
+          ? `<td class="muted">—</td>`
+          : `<td style="font-variant-numeric:tabular-nums">`
+            + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+            + `<span style="display:inline-block;width:34px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
+            + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
         const retCell = Number.isFinite(p.return_sec)
           ? `<td class="muted" style="font-variant-numeric:tabular-nums">${p.return_sec.toFixed(2)}s${p.re_guarded ? "" : " ⃠"}</td>`
           : `<td class="muted">—</td>`;
@@ -1281,12 +1320,13 @@ function renderPunchTable() {
           <td style="text-align:center">${match}</td>
           <td class="muted small" title="${reasonText}" style="white-space:nowrap">${p.reason || "—"}</td>
           ${dropCell}
+          ${scoreCell}
           ${retCell}
           ${axialCell}
           ${covCell}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="9" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="10" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#hrp-table-host");
   if (!tableHost) return;
@@ -1311,6 +1351,7 @@ function renderPunchTable() {
         <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
         <th title="which gate decided this punch — hover for the numbers that fired it">why</th>
         <th title="U-dip prominence — the fist must dip below extension AND climb back, vs the same-side shoulder (torsos)">U-dip</th>
+        <th title="0–100 mistake score: 0 below the start dip, sigmoid ramp to 100 at saturation">score</th>
         <th title="peak → return end; ⃠ = never re-guarded inside the cap (closest approach used)">ret</th>
         <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — above the cut = arc not visible, skipped">axiality</th>
         <th title="valid wrist frames inside the return window">cov</th>
@@ -1335,7 +1376,15 @@ function renderAggregate() {
   const agree = labelled.filter(p => p.label === p.predicted).length;
   const agreePct = labelled.length
     ? `${Math.round(100 * agree / labelled.length)}%` : "—";
+  const judged = signals.punches.filter(p => p.score != null);
+  const roundScore = judged.length
+    ? judged.reduce((s, p) => s + p.score, 0) / judged.length : null;
   host_.innerHTML = `
+    <div class="metric">
+      <div class="metric-label">round score (mean)</div>
+      <div class="metric-val">${roundScore == null ? "—" : roundScore.toFixed(1)}</div>
+      <div class="metric-sub">mean mistake · ${judged.length} judged</div>
+    </div>
     <div class="metric">
       <div class="metric-label">scored</div>
       <div class="metric-val">${scored.length}</div>
