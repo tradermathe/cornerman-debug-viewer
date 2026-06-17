@@ -12,9 +12,10 @@
 //   r[f]     = |shoulder→wrist| / (|shoulder→elbow| + |elbow→wrist|)
 //   reach[f] = |shoulder→wrist| / |shoulder_mid → hip_mid|     (Euclidean torso)
 //
-// Domain of r:
+// Domain of r (r = cos(bend/2), so bend = 2·arccos(r)):
 //   1.00  arm dead straight (elbow on the shoulder→wrist line)
-//   0.95  ~25° bend at the elbow
+//   0.976 ~25° bend at the elbow
+//   0.95  ~36° bend at the elbow  ← current pass/fail threshold
 //   0.71  90° bend
 //   →0    arm fully folded
 //
@@ -50,7 +51,12 @@ import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
 
 const DEFAULTS = {
-  threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
+  threshold:        0.98,     // pass if peak ratio ≥ this (geometric straightness); 0.98 ≈ 23° bend = where it starts being a mistake
+  // 0–100 mistake score: 0 at the threshold bend, ramping to 100 at mistakeSat,
+  // raised to `convexity` so it's gentle near the (noisy) boundary and harsh
+  // when egregious. score = 100 · clamp((bend − startBend)/(sat − startBend))^p.
+  mistakeSat:       50,       // bend (deg) that scores a full 100
+  convexity:        2,        // p — 1 linear, 2 quadratic, higher = worse punished harder
   // Axiality gate — the only gate. Forearm axiality (0 = flat across the
   // image / sideways, 1 = pointing down the camera axis) measures how
   // foreshortened the punching forearm is. Bend is only trustworthy when the
@@ -161,13 +167,38 @@ export const ArmExtensionRule = {
     if (slider) {
       slider.addEventListener("input", () => {
         cfg.threshold = Number(slider.value);
-        out.textContent = cfg.threshold.toFixed(2);
+        out.textContent = `${cfg.threshold.toFixed(3)} · ${startBendDeg(cfg).toFixed(0)}°`;
         // Re-score punches against the new threshold — fast, no recompute of
         // r[f]. Routes through rescorePunch so the axiality gate still applies.
         for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
         window.__viewerRedraw?.();
+      });
+    }
+
+    // Score-curve sliders — saturation angle + convexity. Re-score only (the
+    // bend per punch is unchanged; only the bend→score mapping moves).
+    const satSlider = host.querySelector("#ae-sat");
+    const satOut    = host.querySelector("#ae-sat-out");
+    if (satSlider) {
+      satSlider.addEventListener("input", () => {
+        cfg.mistakeSat = Number(satSlider.value);
+        satOut.textContent = `${cfg.mistakeSat}°`;
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
+      });
+    }
+    const cxSlider = host.querySelector("#ae-convex");
+    const cxOut    = host.querySelector("#ae-convex-out");
+    if (cxSlider) {
+      cxSlider.addEventListener("input", () => {
+        cfg.convexity = Number(cxSlider.value);
+        cxOut.textContent = cfg.convexity.toFixed(1);
+        for (const p of signals.punches) rescorePunch(p, cfg);
+        renderPunchTable();
+        renderAggregate();
       });
     }
 
@@ -707,11 +738,21 @@ function renderTemplate(sig, cfg) {
       </div>
     </div>
 
-    <h3>Pass threshold (shape)</h3>
+    <h3>Mistake scoring</h3>
     <div class="slider-row">
-      <input type="range" id="ae-threshold" min="0.70" max="1.00" step="0.01" value="${cfg.threshold}" />
-      <output id="ae-threshold-out">${cfg.threshold.toFixed(2)}</output>
-      <span class="muted small">peak ratio r — geometric straightness</span>
+      <input type="range" id="ae-threshold" min="0.90" max="1.00" step="0.005" value="${cfg.threshold}" />
+      <output id="ae-threshold-out">${cfg.threshold.toFixed(3)} · ${startBendDeg(cfg).toFixed(0)}°</output>
+      <span class="muted small">starts being a mistake at this bend</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="ae-sat" min="30" max="90" step="1" value="${cfg.mistakeSat}" />
+      <output id="ae-sat-out">${cfg.mistakeSat}°</output>
+      <span class="muted small">full mistake (score 100) at this bend</span>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="ae-convex" min="1" max="4" step="0.1" value="${cfg.convexity}" />
+      <output id="ae-convex-out">${cfg.convexity.toFixed(1)}</output>
+      <span class="muted small">convexity — higher = worse punished harder</span>
     </div>
 
     <h3>Axiality gate (sideways only)</h3>
@@ -834,6 +875,13 @@ function renderPunchTable() {
         }
         const bendStr = Number.isFinite(p.peak_bend_deg)
           ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
+        // 0–100 mistake score + a magnitude bar. Null (—) for skipped punches.
+        const scoreCell = p.score == null
+          ? `<td class="muted">—</td>`
+          : `<td style="font-variant-numeric:tabular-nums">`
+            + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+            + `<span style="display:inline-block;width:38px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
+            + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
         // Axiality cell — the gate signal. Green = side-on enough to trust
         // bend (≤ cut), red = too head-on (skipped). Greyed when the gate is
         // off.
@@ -860,6 +908,7 @@ function renderPunchTable() {
           <td style="text-align:center">${match}</td>
           ${reasonCell}
           <td style="font-variant-numeric:tabular-nums" class="muted">${bendStr}</td>
+          ${scoreCell}
           ${axialCell}
           ${reachCell}
           ${confCell(p.peak_sh_conf)}
@@ -867,7 +916,7 @@ function renderPunchTable() {
           ${confCell(p.peak_wr_conf)}
         </tr>`;
       }).join("")
-    : `<tr><td colspan="11" class="muted">no labeled straights in this round</td></tr>`;
+    : `<tr><td colspan="12" class="muted">no labeled straights in this round</td></tr>`;
 
   const tableHost = host.querySelector("#ae-table-host");
   if (tableHost) {
@@ -892,6 +941,7 @@ function renderPunchTable() {
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
           <th title="which gate decided this punch — hover for the numbers that fired it (e.g. r=0.87 < 0.95)">why</th>
           <th>bend</th>
+          <th title="0–100 mistake magnitude from the bend: 0 at the start angle, convex ramp to 100 at saturation">score</th>
           <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — the gate. Above the cut → skipped as too head-on to judge bend">axiality</th>
           <th title="peak reach = |sh→wr| / euclidean torso at peak frame — context only, no longer a gate (units: torsos)">reach</th>
           <th title="shoulder confidence at peak frame">sh</th>
@@ -1010,6 +1060,23 @@ function drawArmGhost(ctx, pose, frame, side, cfg, scale) {
   ctx.restore();
 }
 
+// Bend (deg) at which the score lifts off 0 — derived from the same threshold
+// that drives pass/fail, so there's one "where it starts" control.
+function startBendDeg(cfg) {
+  return 2 * Math.acos(Math.max(0, Math.min(1, cfg.threshold))) * 180 / Math.PI;
+}
+
+// 0–100 mistake score from a bend angle: 0 up to the start bend, convex ramp
+// to 100 at mistakeSat. null when bend is unknown.
+function scoreOf(bendDeg, cfg) {
+  if (!Number.isFinite(bendDeg)) return null;
+  const start = startBendDeg(cfg);
+  if (bendDeg <= start) return 0;
+  if (cfg.mistakeSat <= start || bendDeg >= cfg.mistakeSat) return 100;
+  const x = (bendDeg - start) / (cfg.mistakeSat - start);
+  return Math.round(100 * Math.pow(x, cfg.convexity));
+}
+
 function rescorePunch(p, cfg) {
   // Single source of truth for the verdict — also called from computeAll
   // so reason + predicted always stay in sync. The verdict is BEND ALONE;
@@ -1017,6 +1084,8 @@ function rescorePunch(p, cfg) {
   //   p.predicted   "pass" | "fail" | "skip" | "unclear"
   //   p.reason      short code (one of the branches below)
   //   p.reason_text human-readable with the actual numbers that fired it
+  //   p.score       0–100 mistake magnitude (null when skipped/unscored)
+  p.score = null;
   if (!Number.isFinite(p.peak)) {
     p.predicted = "unclear";
     p.reason = "no_peak";
@@ -1049,6 +1118,7 @@ function rescorePunch(p, cfg) {
     p.reason = "bent";
     const bend = Number.isFinite(p.peak_bend_deg) ? `${p.peak_bend_deg.toFixed(0)}°` : "—";
     p.reason_text = `elbow bent: r=${p.peak.toFixed(2)} < ${cfg.threshold.toFixed(2)} (bend ${bend})`;
+    p.score = scoreOf(p.peak_bend_deg, cfg);
     return;
   }
   p.predicted = "pass";
@@ -1057,6 +1127,7 @@ function rescorePunch(p, cfg) {
     ? `, axiality ${p.peak_axiality.toFixed(2)} ≤ ${cfg.axialityMax.toFixed(2)}`
     : "";
   p.reason_text = `r=${p.peak.toFixed(2)} ≥ ${cfg.threshold.toFixed(2)}${axPart}`;
+  p.score = scoreOf(p.peak_bend_deg, cfg); // 0 — at/under the start bend
 }
 
 function activePunchAt(punches, frame) {
