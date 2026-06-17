@@ -52,11 +52,12 @@ import { activeDetections, isStraightType } from "./_detections.js";
 
 const DEFAULTS = {
   threshold:        0.98,     // pass if peak ratio ≥ this (geometric straightness); 0.98 ≈ 23° bend = where it starts being a mistake
-  // 0–100 mistake score: 0 at the threshold bend, ramping to 100 at mistakeSat,
-  // raised to `convexity` so it's gentle near the (noisy) boundary and harsh
-  // when egregious. score = 100 · clamp((bend − startBend)/(sat − startBend))^p.
-  mistakeSat:       60,       // bend (deg) that scores a full 100 (fully failed to extend)
-  convexity:        2,        // p — 1 linear, 2 quadratic, higher = worse punished harder
+  // 0–100 mistake score via an S-curve (logistic) across the bend band:
+  // ~0 and flat near the start bend (noise-tolerant), steep through the middle
+  // where every degree bites hard, then flat ~100 approaching mistakeSat — so
+  // e.g. 50° and 60° both read "horrible". Normalised so startBend→0, sat→100.
+  mistakeSat:       60,       // bend (deg) where the score plateaus at 100 (fully failed)
+  steepness:        10,       // logistic k — higher = sharper mid cliff, flatter tails
   // Axiality gate — the only gate. Forearm axiality (0 = flat across the
   // image / sideways, 1 = pointing down the camera axis) measures how
   // foreshortened the punching forearm is. Bend is only trustworthy when the
@@ -190,12 +191,12 @@ export const ArmExtensionRule = {
         renderAggregate();
       });
     }
-    const cxSlider = host.querySelector("#ae-convex");
-    const cxOut    = host.querySelector("#ae-convex-out");
-    if (cxSlider) {
-      cxSlider.addEventListener("input", () => {
-        cfg.convexity = Number(cxSlider.value);
-        cxOut.textContent = cfg.convexity.toFixed(1);
+    const steepSlider = host.querySelector("#ae-steep");
+    const steepOut    = host.querySelector("#ae-steep-out");
+    if (steepSlider) {
+      steepSlider.addEventListener("input", () => {
+        cfg.steepness = Number(steepSlider.value);
+        steepOut.textContent = cfg.steepness.toFixed(1);
         for (const p of signals.punches) rescorePunch(p, cfg);
         renderPunchTable();
         renderAggregate();
@@ -750,9 +751,9 @@ function renderTemplate(sig, cfg) {
       <span class="muted small">full mistake (score 100) at this bend</span>
     </div>
     <div class="slider-row">
-      <input type="range" id="ae-convex" min="1" max="4" step="0.1" value="${cfg.convexity}" />
-      <output id="ae-convex-out">${cfg.convexity.toFixed(1)}</output>
-      <span class="muted small">convexity — higher = worse punished harder</span>
+      <input type="range" id="ae-steep" min="2" max="20" step="0.5" value="${cfg.steepness}" />
+      <output id="ae-steep-out">${cfg.steepness.toFixed(1)}</output>
+      <span class="muted small">steepness — higher = sharper mid cliff (every degree bites harder)</span>
     </div>
 
     <h3>Axiality gate (sideways only)</h3>
@@ -941,7 +942,7 @@ function renderPunchTable() {
           <th>t</th><th>type</th><th>pred</th><th title="agrees with GT verdict">vs GT</th>
           <th title="which gate decided this punch — hover for the numbers that fired it (e.g. r=0.87 < 0.95)">why</th>
           <th>bend</th>
-          <th title="0–100 mistake magnitude from the bend: 0 at the start angle, convex ramp to 100 at saturation">score</th>
+          <th title="0–100 mistake magnitude from the bend: S-curve, flat near the start angle, steep through the middle, flat ~100 by saturation">score</th>
           <th title="axiality model's per-punch prediction (0 = side-on, 1 = down the camera axis) — the gate. Above the cut → skipped as too head-on to judge bend">axiality</th>
           <th title="peak reach = |sh→wr| / euclidean torso at peak frame — context only, no longer a gate (units: torsos)">reach</th>
           <th title="shoulder confidence at peak frame">sh</th>
@@ -1066,15 +1067,20 @@ function startBendDeg(cfg) {
   return 2 * Math.acos(Math.max(0, Math.min(1, cfg.threshold))) * 180 / Math.PI;
 }
 
-// 0–100 mistake score from a bend angle: 0 up to the start bend, convex ramp
-// to 100 at mistakeSat. null when bend is unknown.
+// 0–100 mistake score from a bend angle via an S-curve (logistic): flat near
+// the start bend, steep through the middle, flat approaching mistakeSat.
+// Normalised so start→0 and sat→100. null when bend is unknown.
 function scoreOf(bendDeg, cfg) {
   if (!Number.isFinite(bendDeg)) return null;
   const start = startBendDeg(cfg);
+  const sat = cfg.mistakeSat;
   if (bendDeg <= start) return 0;
-  if (cfg.mistakeSat <= start || bendDeg >= cfg.mistakeSat) return 100;
-  const x = (bendDeg - start) / (cfg.mistakeSat - start);
-  return Math.round(100 * Math.pow(x, cfg.convexity));
+  if (sat <= start || bendDeg >= sat) return 100;
+  const x = (bendDeg - start) / (sat - start);   // 0..1 across the mistake band
+  const k = cfg.steepness;
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  const s = (L(x) - L(0)) / (L(1) - L(0));        // normalise endpoints to 0 / 1
+  return Math.round(100 * s);
 }
 
 function rescorePunch(p, cfg) {
