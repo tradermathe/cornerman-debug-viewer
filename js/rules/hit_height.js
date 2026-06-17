@@ -36,6 +36,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 // foreshortens, so the 2D landing frame + fist height can't be trusted — skip it.
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections } from "./_detections.js";
+import { toQuality, qualityOf } from "./_score.js";
 
 const DEFAULTS = {
   // Head zone margins (× standing height) around the stance crown / chin.
@@ -621,7 +622,8 @@ function renderTable(state) {
     const k = Math.max(1, Math.round(sorted.length / 10));
     roundScore = sorted.slice(0, k).reduce((a, b) => a + b, 0) / k;
   }
-  const roundPart = roundScore == null ? "" : `<b>round score ${roundScore.toFixed(1)}</b> (worst 10% of ${judged.length}) · `;
+  const Q = qualityOf(roundScore);
+  const roundPart = Q.q == null ? "" : `round score <b style="color:${Q.color}">${Q.q.toFixed(1)} ${Q.label.toUpperCase()}</b> (worst 10% of ${judged.length}) · `;
   sumEl.innerHTML = scored.length
     ? roundPart + `<b>${flagged}</b> / ${scored.length} punches flagged off-target` +
       (axialN ? ` · ${axialN} axial (skipped)` : "") +
@@ -637,10 +639,11 @@ function renderTable(state) {
         <td colspan="3" class="muted">${why}</td></tr>`;
     }
     const col = p.zone.flag ? COLORS.flag : COLORS.ok;
+    const q = toQuality(p.score);   // quality: 100 = perfect
     const scoreCell = `<td style="font-variant-numeric:tabular-nums">`
-      + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+      + `<span style="display:inline-block;min-width:20px">${q}</span>`
       + `<span style="display:inline-block;width:34px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
-      + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.ok : COLORS.flag}"></span></span></td>`;
+      + `<span style="display:block;height:100%;width:${q}%;background:${p.score === 0 ? COLORS.ok : COLORS.flag}"></span></span></td>`;
     return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
       <td>${p.idx + 1}</td><td>${t}</td><td>${p.punch_type}</td>
       <td style="text-align:right">${p.frac.toFixed(2)}</td>

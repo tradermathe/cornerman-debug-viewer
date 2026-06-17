@@ -54,6 +54,7 @@ import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
+import { toQuality, qualityOf } from "./_score.js";
 
 const DEFAULTS = {
   dropFail:     0.20,   // U-dip prominence (torsos) where it starts being a mistake (score 0 below)
@@ -1298,12 +1299,13 @@ function renderPunchTable() {
         const dropCell = Number.isFinite(p.drop)
           ? `<td style="color:${p.drop >= cfg.dropFail ? COLORS.fail : COLORS.pass};font-variant-numeric:tabular-nums">${p.drop.toFixed(2)}</td>`
           : `<td class="muted">—</td>`;
+        const q = toQuality(p.score);   // quality: 100 = perfect
         const scoreCell = p.score == null
           ? `<td class="muted">—</td>`
           : `<td style="font-variant-numeric:tabular-nums">`
-            + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+            + `<span style="display:inline-block;min-width:20px">${q}</span>`
             + `<span style="display:inline-block;width:34px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
-            + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
+            + `<span style="display:block;height:100%;width:${q}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
         const retCell = Number.isFinite(p.return_sec)
           ? `<td class="muted" style="font-variant-numeric:tabular-nums">${p.return_sec.toFixed(2)}s${p.re_guarded ? "" : " ⃠"}</td>`
           : `<td class="muted">—</td>`;
@@ -1392,11 +1394,13 @@ function renderAggregate() {
     const k = Math.max(1, Math.round(sorted.length / 10));
     roundScore = sorted.slice(0, k).reduce((a, b) => a + b, 0) / k;
   }
+  const Q = qualityOf(roundScore);
   host_.innerHTML = `
     <div class="metric">
       <div class="metric-label">round score (worst 10%)</div>
-      <div class="metric-val">${roundScore == null ? "—" : roundScore.toFixed(1)}</div>
-      <div class="metric-sub">mean mistake · ${judged.length} judged</div>
+      <div class="metric-val" style="color:${Q.color}">${Q.q == null ? "—" : Q.q.toFixed(1)}</div>
+      <div class="metric-sub" style="color:${Q.color};text-transform:uppercase;font-weight:700">${Q.label}</div>
+      <div class="metric-sub">${judged.length} judged · 100 = perfect</div>
     </div>
     <div class="metric">
       <div class="metric-label">scored</div>

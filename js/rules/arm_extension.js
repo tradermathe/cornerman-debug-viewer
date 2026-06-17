@@ -49,6 +49,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 // camera axis (foreshortened) — same scale and meaning the gate always used.
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
+import { toQuality, qualityOf } from "./_score.js";
 
 const DEFAULTS = {
   threshold:        0.98,     // pass if peak ratio ≥ this (geometric straightness); 0.98 ≈ 23° bend = where it starts being a mistake
@@ -877,12 +878,13 @@ function renderPunchTable() {
         const bendStr = Number.isFinite(p.peak_bend_deg)
           ? `${p.peak_bend_deg.toFixed(1)}°` : "—";
         // 0–100 mistake score + a magnitude bar. Null (—) for skipped punches.
+        const q = toQuality(p.score);   // quality: 100 = perfect
         const scoreCell = p.score == null
           ? `<td class="muted">—</td>`
           : `<td style="font-variant-numeric:tabular-nums">`
-            + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+            + `<span style="display:inline-block;min-width:20px">${q}</span>`
             + `<span style="display:inline-block;width:38px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
-            + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
+            + `<span style="display:block;height:100%;width:${q}%;background:${p.score === 0 ? COLORS.pass : COLORS.fail}"></span></span></td>`;
         // Axiality cell — the gate signal. Green = side-on enough to trust
         // bend (≤ cut), red = too head-on (skipped). Greyed when the gate is
         // off.
@@ -978,14 +980,16 @@ function renderAggregate() {
   // nonlinearity (mean, not RMS), and rare bad punches are surfaced via the
   // worst-punch readout rather than distorting the average.
   const judged = signals.punches.filter(p => p.score != null);
-  const roundScore = judged.length
+  const roundMistake = judged.length
     ? judged.reduce((s, p) => s + p.score, 0) / judged.length
     : null;
+  const Q = qualityOf(roundMistake);
   host_.innerHTML = `
     <div class="metric">
       <div class="metric-label">round score (mean)</div>
-      <div class="metric-val">${roundScore == null ? "—" : roundScore.toFixed(1)}</div>
-      <div class="metric-sub">mean mistake · ${judged.length} judged</div>
+      <div class="metric-val" style="color:${Q.color}">${Q.q == null ? "—" : Q.q.toFixed(1)}</div>
+      <div class="metric-sub" style="color:${Q.color};text-transform:uppercase;font-weight:700">${Q.label}</div>
+      <div class="metric-sub">${judged.length} judged · 100 = perfect</div>
     </div>
     <div class="metric">
       <div class="metric-label">scored</div>

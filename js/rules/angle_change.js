@@ -37,6 +37,7 @@
 
 import { J } from "../skeleton.js";
 import { STANCE_FITS } from "./orientation_lens.js";
+import { qualityOf } from "./_score.js";
 
 const MIN_ANKLE_CONF = 0.30;
 
@@ -555,11 +556,9 @@ function renderHeader(state) {
     severe: COLORS.bad, moderate: "#f97316", mild: COLORS.warn, none: COLORS.fired,
   })[signals.severity] || "#aaa";
   const scEl = host.querySelector("#ac-score");
-  scEl.textContent = signals.score == null ? "—" : signals.score;
-  scEl.style.color = signals.score == null ? "#aaa"
-    : signals.score >= 70 ? COLORS.bad
-    : signals.score >= 40 ? "#f97316"
-    : signals.score >= 15 ? COLORS.warn : COLORS.fired;
+  const Q = qualityOf(signals.score);   // signals.score is the 0–100 mistake; flip to quality
+  scEl.textContent = Q.q == null ? "—" : `${Q.q} ${Q.label.toUpperCase()}`;
+  scEl.style.color = Q.color;
   host.querySelector("#ac-round").textContent = `${signals.roundSec.toFixed(1)} s`;
 }
 

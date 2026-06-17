@@ -16,6 +16,7 @@
 // out) so a node parity script can drive it against the Python rule.
 
 import { J } from "../skeleton.js";
+import { qualityOf } from "./_score.js";
 
 // Defaults match rules_config.json → rules.stance_width v4 and
 // StanceWidthConfig.default in the Swift port.
@@ -456,10 +457,12 @@ function renderStanceScore() {
          ${e.durSec.toFixed(1)}s · close ${Math.round(100 * e.meanClose)} ·
          dur ×${e.durFactor.toFixed(2)} → <b>${Math.round(100 * e.badness)}</b></li>`).join("")
     : `<li class="muted">no narrow episodes this round</li>`;
+  const Q = qualityOf(r.score);   // r.score is the 0–100 mistake; flip to quality
   el.innerHTML = `
     <h3 style="margin:10px 0 4px; font-size:14px">Round score
       <span class="muted" style="font-size:11px; text-transform:none">(saturating accumulate)</span></h3>
-    <div style="font-size:22px; font-weight:700; color:${severityColor(r.score >= 70 ? "severe" : r.score >= 40 ? "moderate" : r.score >= 15 ? "mild" : "none")}">${r.score}<span class="muted" style="font-size:12px"> / 100</span></div>
+    <div style="font-size:22px; font-weight:700; color:${Q.color}">${Q.q}<span class="muted" style="font-size:12px"> / 100</span>
+      <span style="font-size:13px; text-transform:uppercase">${Q.label}</span></div>
     <ul style="margin:4px 0 0 16px; padding:0; font-size:12px">${eps}</ul>`;
 }
 
