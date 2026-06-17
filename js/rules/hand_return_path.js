@@ -312,6 +312,9 @@ export const HandReturnPathRule = {
 
     setText("hrp-active", ap
       ? `${ap.punch_type} · U-dip ${Number.isFinite(ap.drop) ? ap.drop.toFixed(2) + "t" : "—"} · ${ap.predicted}`
+        + (Number.isFinite(ap.descent) || Number.isFinite(ap.recovery)
+            ? ` · descent ${Number.isFinite(ap.descent) ? ap.descent.toFixed(2) : "—"}t / recovery ${Number.isFinite(ap.recovery) ? ap.recovery.toFixed(2) : "—"}t = drop(smaller)`
+            : "")
       : "—");
 
     drawSparkline(ap, state);
@@ -546,6 +549,10 @@ function buildPunch(d, stance, side, idx, ctx) {
   p.drop = (Number.isFinite(tMed) && tMed > 0 && nValid > 0 && Number.isFinite(baseOff))
     ? uPx / tMed
     : NaN;
+  // The two halves (torsos), for debugging why drop=min(descent,recovery) is
+  // what it is — e.g. recovery≈0 = fist never climbed back inside the window.
+  p.descent  = (Number.isFinite(tMed) && tMed > 0 && Number.isFinite(offPeak)) ? Math.max(0, offLow - offPeak) / tMed : NaN;
+  p.recovery = (Number.isFinite(tMed) && tMed > 0 && Number.isFinite(recoHigh)) ? Math.max(0, offLow - recoHigh) / tMed : NaN;
 
   rescorePunch(p, cfg);
   return p;
