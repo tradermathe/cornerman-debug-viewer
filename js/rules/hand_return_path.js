@@ -14,7 +14,7 @@
 //   window= [peak, cap]. cap ends at the FIRST re-guard (wrist→nose ≤
 //           reGuardDist) + postGuardSec — once the fist is back the return
 //           is over, so later bobbing isn't scored. Outer fallback when the
-//           hand never re-guards: min(peak + maxReturnSec (1.0s), next
+//           hand never re-guards: min(peak + maxReturnSec (1.5s), next
 //           same-hand punch − 1 + cutGraceSec, cache end). Re-guard only
 //           BOUNDS the search; the verdict still reads recovery off the
 //           trajectory, so a few frames of re-guard error don't move it.
@@ -60,7 +60,7 @@ const DEFAULTS = {
   dropSat:      0.50,   // U-dip prominence that scores a full 100
   steepness:    10,     // score sigmoid k (shared shape with arm_extension)
   reGuardDist:  0.60,   // wrist→nose euclidean ≤ this (torsos) = back at guard (cosmetic)
-  maxReturnSec: 1.0,    // window cap after the peak frame
+  maxReturnSec: 1.5,    // window cap after the peak frame (restored from 1.0; slow/bag returns were cut)
   cutGraceSec:  0.12,   // grace past the next same-hand punch before cutting
   smoothSec:    0.08,   // moving-average window on the offset signal
   spikeVel:     0.50,   // raw wrist jump near the low ≥ this (torsos/frame) = tracking spike → excise
