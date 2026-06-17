@@ -6,12 +6,12 @@
 // match cornerman-backend/rules_config.json `scoring.bands` (the single source
 // of truth that the Python scorer + corpus run use).
 
-// QUALITY bands: 90–100 perfect · 75–90 good · 50–75 bad · 0–50 critical.
+// QUALITY bands: 95–100 perfect · 80–95 good · 55–80 bad · 0–55 critical.
 export const QUALITY_BANDS = [
-  [90, 101, "perfect"],
-  [75, 90, "good"],
-  [50, 75, "bad"],
-  [0, 50, "critical"],
+  [95, 101, "perfect"],
+  [80, 95, "good"],
+  [55, 80, "bad"],
+  [0, 55, "critical"],
 ];
 
 const BAND_COLOR = {
