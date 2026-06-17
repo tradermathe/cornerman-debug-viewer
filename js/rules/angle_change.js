@@ -46,6 +46,12 @@ const DEFAULTS = {
   sevMild: 12,        // seconds per pivot (>= mild)
   sevModerate: 20,
   sevSevere: 60,
+  // 0–100 score: sigmoid on sec-per-pivot. 0 below scoreStart (pivoting often
+  // enough), ramp to 100 at scoreSat (too stationary). Endpoints mirror the
+  // mild/severe ladder; one nonlinearity, one-sided.
+  scoreStart: 12,
+  scoreSat:   60,
+  scoreK:     10,
 };
 
 const COLORS = {
@@ -118,6 +124,21 @@ function punchSample(pose, det) {
   return { angle: meanAng, used: true, stance, firstFrame, lastFrame };
 }
 
+// Shared score shape: normalised logistic on x∈[0,1].
+function sigmoid01(x, k) {
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  return (L(x) - L(0)) / (L(1) - L(0));
+}
+// 0–100 from sec-per-pivot. 0 pivots → secPerPivot = roundSec, so it maps by
+// the rate (a long no-pivot round scores higher than a short one).
+function pivotScore(secPerPivot, cfg) {
+  if (!Number.isFinite(secPerPivot)) return null;
+  const a = cfg.scoreStart, b = cfg.scoreSat;
+  if (secPerPivot <= a) return 0;
+  if (b <= a || secPerPivot >= b) return 100;
+  return Math.round(100 * sigmoid01((secPerPivot - a) / (b - a), cfg.scoreK));
+}
+
 function compute(state, cfg) {
   const source = pickSource(state);
   const detections = (source?.detections || []).slice().sort(
@@ -135,6 +156,7 @@ function compute(state, cfg) {
       totalPivots: 0,
       secPerPivot: null,
       severity: "none",
+      score: null,
       skipReason: detections.length === 0
         ? "no_punches"
         : `too_few_punches (need ≥${cfg.minPunches}, got ${detections.length})`,
@@ -231,6 +253,7 @@ function compute(state, cfg) {
     totalPivots,
     secPerPivot,
     severity,
+    score: pivotScore(secPerPivot, cfg),
     skipReason: null,
     roundSec,
   };
@@ -417,6 +440,7 @@ function template() {
       <div class="metric"><div class="metric-label">pivots</div><div class="metric-val" id="ac-pivots">—</div></div>
       <div class="metric"><div class="metric-label">sec / pivot</div><div class="metric-val" id="ac-spp">—</div></div>
       <div class="metric"><div class="metric-label">severity</div><div class="metric-val" id="ac-sev">—</div></div>
+      <div class="metric"><div class="metric-label">score</div><div class="metric-val" id="ac-score">—</div></div>
       <div class="metric"><div class="metric-label">round</div><div class="metric-val" id="ac-round">—</div></div>
     </div>
 
@@ -438,6 +462,23 @@ function template() {
       <span>min_punches = <output id="ac-minpunches-out">${cfg.minPunches}</output></span>
       <input type="range" id="ac-minpunches" min="1" max="20" step="1" value="${cfg.minPunches}">
       <span class="muted small">Below this many punches we skip the rule (defensive round).</span>
+    </label>
+
+    <h3>Mistake scoring</h3>
+    <label class="slider">
+      <span>starts being a mistake = <output id="ac-sstart-out">${cfg.scoreStart}s</output> / pivot</span>
+      <input type="range" id="ac-sstart" min="4" max="40" step="1" value="${cfg.scoreStart}">
+      <span class="muted small">sec/pivot at or below this = fine (score 0).</span>
+    </label>
+    <label class="slider">
+      <span>full mistake = <output id="ac-ssat-out">${cfg.scoreSat}s</output> / pivot</span>
+      <input type="range" id="ac-ssat" min="20" max="120" step="5" value="${cfg.scoreSat}">
+      <span class="muted small">sec/pivot at or above this = 100 (too stationary).</span>
+    </label>
+    <label class="slider">
+      <span>steepness = <output id="ac-sk-out">${cfg.scoreK.toFixed(1)}</output></span>
+      <input type="range" id="ac-sk" min="2" max="20" step="0.5" value="${cfg.scoreK}">
+      <span class="muted small">sharper mid cliff on the rate.</span>
     </label>
   `;
 }
@@ -463,6 +504,20 @@ function wireSliders(state) {
     renderTable(state);
     renderLive(state);
   });
+  // Score-curve sliders — only the sec/pivot → 0–100 mapping moves, so just
+  // recompute (cheap) + re-render the header.
+  const wireScore = (id, out, key, fmt) => {
+    const s = host.querySelector(id), o = host.querySelector(out);
+    s.addEventListener("input", () => {
+      cfg[key] = parseFloat(s.value);
+      o.textContent = fmt(cfg[key]);
+      signals = compute(state, cfg);
+      renderHeader(state);
+    });
+  };
+  wireScore("#ac-sstart", "#ac-sstart-out", "scoreStart", v => `${v}s`);
+  wireScore("#ac-ssat", "#ac-ssat-out", "scoreSat", v => `${v}s`);
+  wireScore("#ac-sk", "#ac-sk-out", "scoreK", v => v.toFixed(1));
 }
 
 function renderHeader(state) {
@@ -482,6 +537,12 @@ function renderHeader(state) {
   sevEl.style.color = ({
     severe: COLORS.bad, moderate: "#f97316", mild: COLORS.warn, none: COLORS.fired,
   })[signals.severity] || "#aaa";
+  const scEl = host.querySelector("#ac-score");
+  scEl.textContent = signals.score == null ? "—" : signals.score;
+  scEl.style.color = signals.score == null ? "#aaa"
+    : signals.score >= 70 ? COLORS.bad
+    : signals.score >= 40 ? "#f97316"
+    : signals.score >= 15 ? COLORS.warn : COLORS.fired;
   host.querySelector("#ac-round").textContent = `${signals.roundSec.toFixed(1)} s`;
 }
 
