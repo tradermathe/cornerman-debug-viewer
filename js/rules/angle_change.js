@@ -46,10 +46,12 @@ const DEFAULTS = {
   sevMild: 12,        // seconds per pivot (>= mild)
   sevModerate: 20,
   sevSevere: 60,
-  // 0–100 score: sigmoid on sec-per-pivot. 0 below scoreStart (pivoting often
-  // enough), ramp to 100 at scoreSat (too stationary). Endpoints mirror the
-  // mild/severe ladder; one nonlinearity, one-sided.
+  // 0–100 score: S-curve on sec-per-pivot with an explicit midpoint, so the
+  // steep part sits where the coach wants it (not the geometric centre).
+  // 0 at scoreStart (pivoting often enough), steepest (50) at scoreMid,
+  // 100 at scoreSat (too stationary). One-sided.
   scoreStart: 12,
+  scoreMid:   25,
   scoreSat:   60,
   scoreK:     10,
 };
@@ -129,14 +131,23 @@ function sigmoid01(x, k) {
   const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
   return (L(x) - L(0)) / (L(1) - L(0));
 }
+// Map v through start/mid/sat so v=mid lands at the sigmoid's steep centre
+// (x=0.5) — an asymmetric S that puts the cliff at `mid`, not the midpoint of
+// [start, sat]. start→0, mid→0.5, sat→1.
+function sigmoidAnchored(v, start, mid, sat, k) {
+  if (!(v > start)) return 0;
+  if (v >= sat) return 1;
+  if (!(mid > start && mid < sat)) return sigmoid01((v - start) / (sat - start), k);
+  const x = v <= mid
+    ? 0.5 * (v - start) / (mid - start)
+    : 0.5 + 0.5 * (v - mid) / (sat - mid);
+  return sigmoid01(x, k);
+}
 // 0–100 from sec-per-pivot. 0 pivots → secPerPivot = roundSec, so it maps by
 // the rate (a long no-pivot round scores higher than a short one).
 function pivotScore(secPerPivot, cfg) {
   if (!Number.isFinite(secPerPivot)) return null;
-  const a = cfg.scoreStart, b = cfg.scoreSat;
-  if (secPerPivot <= a) return 0;
-  if (b <= a || secPerPivot >= b) return 100;
-  return Math.round(100 * sigmoid01((secPerPivot - a) / (b - a), cfg.scoreK));
+  return Math.round(100 * sigmoidAnchored(secPerPivot, cfg.scoreStart, cfg.scoreMid, cfg.scoreSat, cfg.scoreK));
 }
 
 function compute(state, cfg) {
@@ -471,6 +482,11 @@ function template() {
       <span class="muted small">sec/pivot at or below this = fine (score 0).</span>
     </label>
     <label class="slider">
+      <span>steepest at = <output id="ac-smid-out">${cfg.scoreMid}s</output> / pivot</span>
+      <input type="range" id="ac-smid" min="8" max="90" step="1" value="${cfg.scoreMid}">
+      <span class="muted small">where the curve is steepest (score 50).</span>
+    </label>
+    <label class="slider">
       <span>full mistake = <output id="ac-ssat-out">${cfg.scoreSat}s</output> / pivot</span>
       <input type="range" id="ac-ssat" min="20" max="120" step="5" value="${cfg.scoreSat}">
       <span class="muted small">sec/pivot at or above this = 100 (too stationary).</span>
@@ -516,6 +532,7 @@ function wireSliders(state) {
     });
   };
   wireScore("#ac-sstart", "#ac-sstart-out", "scoreStart", v => `${v}s`);
+  wireScore("#ac-smid", "#ac-smid-out", "scoreMid", v => `${v}s`);
   wireScore("#ac-ssat", "#ac-ssat-out", "scoreSat", v => `${v}s`);
   wireScore("#ac-sk", "#ac-sk-out", "scoreK", v => v.toFixed(1));
 }
