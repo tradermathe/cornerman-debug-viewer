@@ -44,6 +44,7 @@ const DEFAULTS = {
   axialityMax:   Math.SQRT1_2,   // ≈0.7071 = cos 45°; skip straights more axial
   minWristConfidence:  0.20,
   minAnchorConfidence: 0.20,
+  steepness:     10,     // 0–100 score sigmoid k (shared shape with arm_extension)
 };
 
 // Stance shaping (applied to the boxer's REAL measured dimensions — these are
@@ -142,6 +143,10 @@ export const HitHeightRule = {
         <span>min wrist confidence = <output id="hh-o3">${cfg.minWristConfidence.toFixed(2)}</output></span>
         <input type="range" id="hh-s3" min="0" max="1" step="0.01" value="${cfg.minWristConfidence}">
       </label>
+      <label class="slider">
+        <span>score steepness = <output id="hh-o4">${cfg.steepness.toFixed(1)}</output></span>
+        <input type="range" id="hh-s4" min="2" max="20" step="0.5" value="${cfg.steepness}">
+      </label>
     `;
 
     const wire = (slider, out, key) => {
@@ -157,6 +162,7 @@ export const HitHeightRule = {
     wire("#hh-s1", "#hh-o1", "headTopMargin");
     wire("#hh-s2", "#hh-o2", "chinMargin");
     wire("#hh-s3", "#hh-o3", "minWristConfidence");
+    wire("#hh-s4", "#hh-o4", "steepness");
 
     host.addEventListener("click", (ev) => {
       const tr = ev.target.closest("tr[data-frame]");
@@ -478,6 +484,29 @@ function zoneFor(y, B) {
 
 // ─── per-punch ───────────────────────────────────────────────────────────────
 
+// Normalised logistic on x∈[0,1]: 0→0, 1→1, steep in the middle. Shared score
+// shape with the arm_extension lens.
+function sigmoid01(x, k) {
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  return (L(x) - L(0)) / (L(1) - L(0));
+}
+
+// 0–100 mistake score from where the fist landed: distance to the nearest valid
+// zone (head / body), normalised by half the chin→solar-plexus gap, then the
+// sigmoid. 0 on target; 100 dead-centre of the shoulder/neck gap, and that same
+// distance past the crown / belt also reads 100.
+function hitScore(y, B, cfg) {
+  let d;
+  if (y >= B.overHead && y < B.head) d = 0;        // head zone (on target)
+  else if (y >= B.bodyTop && y <= B.belt) d = 0;   // body zone (on target)
+  else if (y < B.overHead) d = B.overHead - y;     // over the head
+  else if (y > B.belt) d = y - B.belt;             // below the belt
+  else d = Math.min(y - B.head, B.bodyTop - y);    // dead zone → peaks at centre
+  const half = (B.bodyTop - B.head) / 2;           // half the chin→solar gap
+  if (!(half > 0)) return d > 0 ? 100 : 0;
+  return Math.round(100 * sigmoid01(Math.min(1, d / half), cfg.steepness));
+}
+
 function computePunches(state) {
   const p = pickPose(state);
   const r = getReference(p);
@@ -503,14 +532,16 @@ function computePunches(state) {
     // Axiality gate (joined by punch_uuid from the trained model). Skip too-axial
     // straights — missing score fails closed, same as arm_extension.
     const ax = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality;
-    let frac = NaN, zone = null, skip = "";
+    let frac = NaN, zone = null, skip = "", score = null;
     if (ax == null || !Number.isFinite(ax)) {
       skip = "axial?";
     } else if (ax > cfg.axialityMax) {
       skip = "axial";
     } else if (S && w) {
-      zone = zoneFor(w.y, boundaries(S));
+      const B = boundaries(S);
+      zone = zoneFor(w.y, B);
       frac = (S.floorY - w.y) / S.H;
+      score = hitScore(w.y, B, cfg);
     }
     return {
       idx,
@@ -521,6 +552,7 @@ function computePunches(state) {
       frac,
       zone,
       skip,
+      score,
     };
   });
 }
@@ -579,8 +611,15 @@ function renderTable(state) {
   const scored = punches.filter(p => p.zone);
   const flagged = scored.filter(p => p.zone.flag).length;
   const axialN = punches.filter(p => p.skip === "axial" || p.skip === "axial?").length;
+  // Round score = plain mean of the per-punch scores over judged punches (the
+  // per-punch sigmoid already carries severity, so the rollup stays linear).
+  const judged = punches.filter(p => p.score != null);
+  const roundScore = judged.length
+    ? judged.reduce((s, p) => s + p.score, 0) / judged.length
+    : null;
+  const roundPart = roundScore == null ? "" : `<b>round score ${roundScore.toFixed(1)}</b> (mean of ${judged.length}) · `;
   sumEl.innerHTML = scored.length
-    ? `<b>${flagged}</b> / ${scored.length} punches flagged off-target` +
+    ? roundPart + `<b>${flagged}</b> / ${scored.length} punches flagged off-target` +
       (axialN ? ` · ${axialN} axial (skipped)` : "") +
       (scored.length + axialN < punches.length ? ` · ${punches.length - scored.length - axialN} unscored` : "")
     : `No punches could be scored${axialN ? ` (${axialN} skipped as axial)` : " (no standing reference)"}.`;
@@ -591,18 +630,23 @@ function renderTable(state) {
       const why = p.skip ? p.skip : "unscored";
       return `<tr data-frame="${p.land_frame}">
         <td>${p.idx + 1}</td><td>${t}</td><td>${p.punch_type}</td>
-        <td colspan="2" class="muted">${why}</td></tr>`;
+        <td colspan="3" class="muted">${why}</td></tr>`;
     }
     const col = p.zone.flag ? COLORS.flag : COLORS.ok;
+    const scoreCell = `<td style="font-variant-numeric:tabular-nums">`
+      + `<span style="display:inline-block;min-width:20px">${p.score}</span>`
+      + `<span style="display:inline-block;width:34px;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px;background:var(--color-border-tertiary,rgba(128,128,128,.25));overflow:hidden">`
+      + `<span style="display:block;height:100%;width:${p.score}%;background:${p.score === 0 ? COLORS.ok : COLORS.flag}"></span></span></td>`;
     return `<tr data-frame="${p.land_frame}" style="cursor:pointer">
       <td>${p.idx + 1}</td><td>${t}</td><td>${p.punch_type}</td>
       <td style="text-align:right">${p.frac.toFixed(2)}</td>
-      <td style="color:${col};font-weight:600">${p.zone.label}</td></tr>`;
+      <td style="color:${col};font-weight:600">${p.zone.label}</td>
+      ${scoreCell}</tr>`;
   }).join("");
 
   tableEl.innerHTML = `
     <table class="joint-table">
-      <thead><tr><th>#</th><th>t</th><th>type</th><th>ht</th><th>zone</th></tr></thead>
+      <thead><tr><th>#</th><th>t</th><th>type</th><th>ht</th><th>zone</th><th>score</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 }
