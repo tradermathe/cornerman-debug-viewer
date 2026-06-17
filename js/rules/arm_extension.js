@@ -972,7 +972,21 @@ function renderAggregate() {
   const agreePct = labelled.length
     ? `${Math.round(100 * agree / labelled.length)}%`
     : "—";
+  // Round magnitude = plain MEAN of the per-punch 0–100 scores over the punches
+  // we actually judged (skips have no score). The per-punch sigmoid already
+  // carries the severity weighting, so the rollup stays linear — no second
+  // nonlinearity (mean, not RMS), and rare bad punches are surfaced via the
+  // worst-punch readout rather than distorting the average.
+  const judged = signals.punches.filter(p => p.score != null);
+  const roundScore = judged.length
+    ? judged.reduce((s, p) => s + p.score, 0) / judged.length
+    : null;
   host_.innerHTML = `
+    <div class="metric">
+      <div class="metric-label">round score (mean)</div>
+      <div class="metric-val">${roundScore == null ? "—" : roundScore.toFixed(1)}</div>
+      <div class="metric-sub">mean mistake · ${judged.length} judged</div>
+    </div>
     <div class="metric">
       <div class="metric-label">scored</div>
       <div class="metric-val">${ps.length}</div>
