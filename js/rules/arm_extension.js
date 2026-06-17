@@ -47,6 +47,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 // and joined by punch_uuid). 0 = flat across the image (side-on), 1 = down the
 // camera axis (foreshortened) — same scale and meaning the gate always used.
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
+import { activeDetections, isStraightType } from "./_detections.js";
 
 const DEFAULTS = {
   threshold:        0.95,     // pass if peak ratio ≥ this (geometric straightness)
@@ -359,10 +360,10 @@ function computeAll(state, cfg) {
   const { ratio: ratioL, reach: reachL, bendDeg: bendL, source: sourceL } = perFrameRatio(pose, "L", cfg, bodyAxis, torsoEuclid);
   const { ratio: ratioR, reach: reachR, bendDeg: bendR, source: sourceR } = perFrameRatio(pose, "R", cfg, bodyAxis, torsoEuclid);
 
-  // Labelled punches — filtered to straights, with optional rule_extension
-  // verdict for agreement scoring.
-  const detections = (state.labels?.detections || []).filter(d =>
-    cfg.appliesTo.has(d.punch_type)
+  // Punches filtered to straights (labelled GT, or on-device predictions when
+  // unlabelled), with optional rule_extension verdict for agreement scoring.
+  const detections = (activeDetections(state) || []).filter(d =>
+    isStraightType(d.punch_type)
   );
   const punches = detections.map((d, idx) => {
     const sf = Math.max(0, d.start_frame);
@@ -403,7 +404,7 @@ function computeAll(state, cfg) {
     // trustworthy), 1 = down the camera axis (foreshortened). null when the
     // model has no entry for this punch (no pose cache) → NaN → gated as
     // axial_unknown. This is the only gate — see rescorePunch.
-    const peak_axiality = axialityForPunch(d.punch_uuid)?.predAxiality ?? NaN;
+    const peak_axiality = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality ?? NaN;
 
     const label = d.rule_extension === "pass" || d.rule_extension === "fail"
       ? d.rule_extension : null;

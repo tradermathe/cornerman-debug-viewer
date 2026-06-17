@@ -35,6 +35,7 @@ import { gloveXY, gloveConf } from "../pose-loader.js";
 // Axiality gate (same as arm_extension): a straight down the camera axis
 // foreshortens, so the 2D landing frame + fist height can't be trusted — skip it.
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
+import { activeDetections } from "./_detections.js";
 
 const DEFAULTS = {
   // Head zone margins (× standing height) around the stance crown / chin.
@@ -481,7 +482,7 @@ function computePunches(state) {
   const p = pickPose(state);
   const r = getReference(p);
   const N = p.n_frames;
-  const dets = (state.labels?.detections || []).filter(d => isStraight(d));
+  const dets = (activeDetections(state) || []).filter(d => isStraight(d));
   return dets.map((d, idx) => {
     const sf = Math.max(0, d.start_frame);
     const ef = Math.min(N - 1, d.end_frame);
@@ -501,7 +502,7 @@ function computePunches(state) {
     const S = r ? stanceAt(p, landFrame, r) : null;
     // Axiality gate (joined by punch_uuid from the trained model). Skip too-axial
     // straights — missing score fails closed, same as arm_extension.
-    const ax = axialityForPunch(d.punch_uuid)?.predAxiality;
+    const ax = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality;
     let frac = NaN, zone = null, skip = "";
     if (ax == null || !Number.isFinite(ax)) {
       skip = "axial?";
@@ -558,7 +559,7 @@ function isStraight(d) {
 
 function activePunch(state) {
   const f = state.frame;
-  const dets = state.labels?.detections || [];
+  const dets = activeDetections(state) || [];
   return dets.find(d => f >= d.start_frame && f <= d.end_frame && isStraight(d)) || null;
 }
 

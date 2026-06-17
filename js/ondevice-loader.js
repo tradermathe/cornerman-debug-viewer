@@ -181,6 +181,11 @@ export async function loadOnDeviceAnalysis(jsonBlob) {
         punch_type: d.punch_type || "?",
         category: d.category || null,         // "jab" | "cross" | "power"
         n_frames: Number(d.n_frames) || 0,
+        // Inline axiality from the on-device AxialityScorer (same metric as the
+        // trained model's predAxiality: 0 = side-on, 1 = down the camera axis).
+        // The geometric lenses' axiality gate falls back to this when there's
+        // no punch_uuid to join the model by (on-device rounds have none).
+        axiality: d.axiality != null ? Number(d.axiality) : undefined,
       };
     }),
     total_punches: Number(punchesIn.total_punches ?? 0),

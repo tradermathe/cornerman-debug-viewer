@@ -53,6 +53,7 @@
 import { J } from "../skeleton.js";
 import { gloveXY, gloveConf } from "../pose-loader.js";
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
+import { activeDetections, isStraightType } from "./_detections.js";
 
 const DEFAULTS = {
   dropFail:     0.20,   // fail if U-dip prominence ≥ this (torsos)
@@ -154,7 +155,7 @@ export const HandReturnPathRule = {
     ensureAxialityModel(state, onModelReady);
     signals = computeAll(state, cfg);
     lastPose = pickPose(state);
-    lastDetections = state.labels?.detections || null;
+    lastDetections = activeDetections(state);
 
     host.innerHTML = renderTemplate(signals, cfg);
     renderPunchTable();
@@ -324,7 +325,7 @@ export const HandReturnPathRule = {
 
 function maybeRecompute(state) {
   const pose = pickPose(state);
-  const dets = state.labels?.detections || null;
+  const dets = activeDetections(state);
   if (pose !== lastPose || dets !== lastDetections) {
     signals = computeAll(state, cfg);
     lastPose = pose;
@@ -354,14 +355,14 @@ function computeAll(state, cfg) {
 
   // Every detection gets a side — the return-window cap needs the next
   // punch on the same hand even when that next punch isn't a straight.
-  const all = (state.labels?.detections || []).map(d => {
+  const all = (activeDetections(state) || []).map(d => {
     const stance = (d.stance === "southpaw" || d.stance === "orthodox")
       ? d.stance : "orthodox";
     return { d, stance, side: SIDE_FOR[d.hand]?.[stance] || "L" };
   });
 
   const punches = all
-    .filter(({ d }) => cfg.appliesTo.has(d.punch_type))
+    .filter(({ d }) => isStraightType(d.punch_type))
     .map(({ d, stance, side }, idx) =>
       buildPunch(d, stance, side, idx, { arms, torso, all, N, fps, startSec, cfg }));
 
@@ -390,7 +391,7 @@ function buildPunch(d, stance, side, idx, ctx) {
     }
   }
 
-  const peak_axiality = axialityForPunch(d.punch_uuid)?.predAxiality ?? NaN;
+  const peak_axiality = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality ?? NaN;
   const label = d.rule_hand_ushape === "pass" || d.rule_hand_ushape === "fail"
     ? d.rule_hand_ushape : null;
 
