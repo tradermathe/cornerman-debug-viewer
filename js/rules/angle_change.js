@@ -59,7 +59,8 @@ const DEFAULTS = {
 
 const COLORS = {
   anchor:  "#9ca3af",  // grey — anchor facing direction
-  current: "#3ad9e0",  // cyan — current punch facing direction
+  current: "#3ad9e0",  // cyan — current (corrected) facing direction
+  feet:    "#ff7ab6",  // pink — the raw ankle→ankle line the angle comes from
   range:   "rgba(245,185,69,0.30)", // amber — open swing range
   fired:   "#5fd97a",  // green — a pivot fired on this punch
   warn:    "#f5b945",
@@ -417,14 +418,37 @@ export const AngleChangeRule = {
     // Anchor direction (grey, dashed).
     drawArrow(ctx, hx, hy, toImg(ann.anchor), len, COLORS.anchor, 2.5 * s, [5 * s, 4 * s]);
 
-    // Current facing (cyan or green if this punch fired).
+    // Current facing (cyan or green if this punch fired) — the CORRECTED line
+    // (raw foot angle + stance fit) that the rule actually counts.
     const currentColor = ann.fired ? COLORS.fired : COLORS.current;
     drawArrow(ctx, hx, hy, toImg(ann.angle), len, currentColor, 3.5 * s, []);
 
-    // Banner.
+    // Raw feet line (pink) drawn straight across the actual ankles, so you can
+    // watch whether the foot line itself rotates as you pivot. Its raw
+    // image-space angle is shown next to the counted facing.
+    const lax = state.pose.skeleton[(f * 17 + J.L_ANKLE) * 2];
+    const lay = state.pose.skeleton[(f * 17 + J.L_ANKLE) * 2 + 1];
+    const rax = state.pose.skeleton[(f * 17 + J.R_ANKLE) * 2];
+    const ray = state.pose.skeleton[(f * 17 + J.R_ANKLE) * 2 + 1];
+    let feetImgAng = null;
+    if ([lax, lay, rax, ray].every(Number.isFinite)) {
+      ctx.save();
+      ctx.strokeStyle = COLORS.feet;
+      ctx.lineWidth = 4 * s;
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(lax, lay); ctx.lineTo(rax, ray); ctx.stroke();
+      ctx.fillStyle = COLORS.feet;
+      ctx.beginPath(); ctx.arc(lax, lay, 5 * s, 0, 2 * Math.PI); ctx.fill();
+      ctx.restore();
+      feetImgAng = Math.atan2(lay - ray, lax - rax) * 180 / Math.PI;
+    }
+
+    // Banner. Compact so it fits a portrait frame. Shows what's counted
+    // (corrected facing) vs the raw feet-line angle the pink line is at.
     const bannerLines = [
-      `${ann.fired ? "★ FIRED" : "open"} · ${ann.swing.toFixed(0)}° / ${cfg.swingDeg}°`,
-      `to fire: +${(ann.degToPos ?? 0).toFixed(0)}° R · −${(ann.degToNeg ?? 0).toFixed(0)}° L`,
+      `${ann.fired ? "★FIRED" : "open"} swing ${ann.swing.toFixed(0)}°/${cfg.swingDeg}°`,
+      `facing ${ann.angle.toFixed(0)}° · feet ${feetImgAng == null ? "—" : feetImgAng.toFixed(0)}°`,
+      `fire +${(ann.degToPos ?? 0).toFixed(0)}°R / −${(ann.degToNeg ?? 0).toFixed(0)}°L`,
     ];
     drawBanner(ctx, bannerLines, ann.fired ? COLORS.fired : COLORS.warn, s);
 
