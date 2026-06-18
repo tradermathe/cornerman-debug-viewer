@@ -151,27 +151,73 @@ function pivotScore(secPerPivot, cfg) {
   return Math.round(100 * sigmoidAnchored(secPerPivot, cfg.scoreStart, cfg.scoreMid, cfg.scoreSat, cfg.scoreK));
 }
 
-function compute(state, cfg) {
+// Per-punch facing samples for the ratchet. Two sources:
+//  - on-device round: reuse the angles the device already computed
+//    (rules.pivot_rate.perPunch[].angle_deg). The skeleton recompute below
+//    needs a per-punch `stance` that on-device detections don't carry, so it
+//    would otherwise blank out — this makes the lens work on Firebase rounds.
+//  - corpus / labeled round: recompute orientation from the skeleton.
+function gatherSamples(state, fps) {
+  const od = state.analysis?.rules?.pivot_rate;
+  if (od && Array.isArray(od.perPunch) && od.perPunch.length) {
+    const stance = state.analysis?.ankleOrientation?.stance ?? null;
+    const samples = od.perPunch.map((p) => {
+      const sf = p.start_frame ?? 0;
+      return {
+        det: {
+          start_frame: sf,
+          end_frame: p.end_frame ?? sf,
+          timestamp: p.timestamp,
+          hand: p.hand,
+          punch_type: p.punch_type,
+          stance,
+        },
+        timestamp: p.timestamp != null ? p.timestamp : sf / fps,
+        angle: p.angle_deg != null ? Number(p.angle_deg) : null,
+        // Device decided usability; mirror it (and require a finite angle).
+        used: !!p.used && p.angle_deg != null,
+        stance,
+      };
+    });
+    samples.sort((a, b) => (a.det.start_frame ?? 0) - (b.det.start_frame ?? 0));
+    return { sourceKind: "ondevice", samples };
+  }
   const source = pickSource(state);
   const detections = (source?.detections || []).slice().sort(
     (a, b) => (a.start_frame ?? 0) - (b.start_frame ?? 0)
   );
+  const samples = detections.map((d) => {
+    const s = punchSample(state.pose, d);
+    return {
+      det: d,
+      timestamp: d.timestamp != null ? d.timestamp : (d.start_frame ?? 0) / fps,
+      angle: s.angle,
+      used: s.used,
+      stance: s.stance,
+    };
+  });
+  return { sourceKind: source?.kind || "none", samples };
+}
+
+function compute(state, cfg) {
   const fps = state.pose.fps || 30;
   const N = state.pose.n_frames;
   const roundSec = N / fps;
+  const { sourceKind, samples } = gatherSamples(state, fps);
+  const detections = samples.map((s) => s.det);
 
-  if (detections.length < cfg.minPunches) {
+  if (samples.length < cfg.minPunches) {
     return {
-      sourceKind: source?.kind || "none",
+      sourceKind,
       detections,
       annotated: [],
       totalPivots: 0,
       secPerPivot: null,
       severity: "none",
       score: null,
-      skipReason: detections.length === 0
+      skipReason: samples.length === 0
         ? "no_punches"
-        : `too_few_punches (need ≥${cfg.minPunches}, got ${detections.length})`,
+        : `too_few_punches (need ≥${cfg.minPunches}, got ${samples.length})`,
       roundSec,
     };
   }
@@ -183,20 +229,18 @@ function compute(state, cfg) {
   let lastPivotTime = null;
   let punchesSince = 0;
 
-  for (let i = 0; i < detections.length; i++) {
-    const d = detections[i];
-    const samp = punchSample(state.pose, d);
-    const t = (d.timestamp != null)
-      ? d.timestamp
-      : (d.start_frame ?? 0) / fps;
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    const d = s.det;
+    const t = s.timestamp;
     const ann = {
       idx: i,
       det: d,
       timestamp: t,
-      angle: samp.angle,
-      stance: samp.stance,
-      used: samp.used,
-      skip: !samp.used,
+      angle: s.angle,
+      stance: s.stance,
+      used: s.used,
+      skip: !s.used,
       anchor,
       dAngle: null,
       maxPos: maxPos,
@@ -210,13 +254,13 @@ function compute(state, cfg) {
       degToPos: null,
       degToNeg: null,
     };
-    if (samp.used) {
+    if (s.used) {
       if (anchor == null) {
-        anchor = samp.angle;
+        anchor = s.angle;
         ann.anchor = anchor;
         ann.dAngle = 0;
       } else {
-        const dd = signedDiff(samp.angle, anchor);
+        const dd = signedDiff(s.angle, anchor);
         if (dd > maxPos) maxPos = dd;
         if (dd < minNeg) minNeg = dd;
         ann.anchor = anchor;
@@ -228,7 +272,7 @@ function compute(state, cfg) {
           ann.fired = true;
           pivotsSoFar += 1;
           lastPivotTime = t;
-          anchor = samp.angle;
+          anchor = s.angle;
           maxPos = 0; minNeg = 0;
         }
       }
@@ -259,7 +303,7 @@ function compute(state, cfg) {
   else if (secPerPivot >= cfg.sevMild) severity = "mild";
 
   return {
-    sourceKind: source?.kind || "none",
+    sourceKind,
     detections,
     annotated,
     totalPivots,
