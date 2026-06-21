@@ -29,6 +29,7 @@ import { RoundV6Rule } from "./round_v6.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
 import { OnDeviceLensRule } from "./ondevice_lens.js";
 import { PoseCoverageLensRule } from "./pose_coverage_lens.js";
+import { SkeletonCompareRule } from "./skeleton_compare_lens.js";
 import { StanceWidthLensRule } from "./stance_width_lens.js";
 import { AudioImpactLensRule } from "./audio_impact_lens.js";
 import { PunchPredictionsRule } from "./punch_predictions.js";
@@ -52,6 +53,7 @@ export const RULES = [
   PunchClassifierRule,
   PunchPredictionsRule,
   RoundV6Rule,
+  SkeletonCompareRule,
   StanceWidthLensRule,
   StepPunchSyncRule,
   StepDetectorRule,
