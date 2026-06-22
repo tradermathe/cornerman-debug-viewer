@@ -112,13 +112,13 @@ export const EngineCompareRule = {
     active.forEach((key, i) => {
       const e = avail.find(x => x.key === key);
       if (!e) return;
-      const fr = engineFrame(e.pose, state);
+      const { fr, dframes } = engineFrameInfo(e.pose, state);
       const c = PALETTE[i % PALETTE.length];
-      // Flag engines NOT frame-aligned with the video (≠ state.frame ⇒ a
-      // different-timeline cache mixed in — usually a production cache that
-      // collided with the bake-off ones under the same base/round).
-      const off = fr != null && fr !== state.frame;
-      labels.push([c.ink, `${e.label}  f${fr == null ? "—" : fr}${off ? "  ⚠" : ""}`]);
+      // Flag only a REAL temporal offset (≥ ½ frame from the displayed instant).
+      // Different cache start offsets give different frame NUMBERS but dframes≈0.
+      const off = dframes != null && Math.abs(dframes) >= 0.5;
+      labels.push([c.ink, `${e.label}  f${fr == null ? "—" : fr}`
+        + (off ? `  ⚠${dframes > 0 ? "+" : ""}${dframes.toFixed(1)}f` : "")]);
       if (fr == null) return;
       drawEngineSkeleton(ctx, e.pose, fr, {
         boneColor: c.bone, jointColor: c.ink, wristColor: c.ink,
@@ -156,25 +156,25 @@ export const EngineCompareRule = {
     // (mismatch ⇒ temporal offset) and the cache's EXTRACTION dims from its
     // meta (≠ video dims, in red ⇒ this clip isn't the cache's source video —
     // e.g. an original loaded instead of the prepared clip → spatial mismatch).
-    const mixed = active.some(key => {
-      const e = avail.find(x => x.key === key); if (!e) return false;
-      const fr = engineFrame(e.pose, state);
-      return fr != null && fr !== state.frame;
-    });
-    const warn = mixed
-      ? `<div style="color:#e85a5a">⚠ mixed timelines — an engine isn't frame-aligned with the video. You're likely viewing a folder that mixes production caches with the bake-off ones; point the picker at <code>bakeoff_cache/</code> only.</div>`
-      : "";
-    const head = `<div class="muted">video ${vw}×${vh} · frame ${state.frame} · t=${t.toFixed(2)}s</div>${warn}`;
-    const rows = active.map((key, i) => {
+    const infos = active.map(key => {
       const e = avail.find(x => x.key === key);
-      if (!e) return "";
+      return e ? { e, ...engineFrameInfo(e.pose, state) } : null;
+    }).filter(Boolean);
+    const anyOff = infos.some(x => x.dframes != null && Math.abs(x.dframes) >= 0.5);
+    const warn = anyOff
+      ? `<div style="color:#e85a5a">⚠ an engine is &gt;½ frame off the video. Different frame NUMBERS are fine (different cache start offsets); this means a real time offset — usually a cache with no/imprecise PTS sidecar, or a mixed-folder collision.</div>`
+      : `<div style="color:#5fd97a">✓ all selected engines aligned to within ½ frame (frame numbers differ by cache start offset — that's expected)</div>`;
+    const head = `<div class="muted">video ${vw}×${vh} · frame ${state.frame} · t=${t.toFixed(2)}s</div>${warn}`;
+    const rows = infos.map(({ e, fr, dframes }, i) => {
       const p = e.pose, ink = PALETTE[i % PALETTE.length].ink;
-      const fr = engineFrame(p, state);
       const mw = p.meta?.width ?? p.width, mh = p.meta?.height ?? p.height;
       const dimBad = mw && vw && (mw !== vw || mh !== vh);
+      const off = dframes != null && Math.abs(dframes) >= 0.5;
       const conf = j => (fr == null ? "—" : (p.conf[fr * 17 + j] ?? 0).toFixed(2));
+      const dTxt = dframes == null ? "—" : `${dframes > 0 ? "+" : ""}${dframes.toFixed(1)}f`;
       return `<div><span style="color:${ink}">${e.label}</span> · f${fr == null ? "—" : fr}`
-        + ` · <span style="color:${dimBad ? "#e85a5a" : "#888"}">cache ${mw}×${mh}</span>`
+        + ` · <span style="color:${off ? "#e85a5a" : "#5fd97a"}">Δ${dTxt}</span>`
+        + ` · <span style="color:${dimBad ? "#e85a5a" : "#888"}">${mw}×${mh}</span>`
         + ` · Lw ${conf(J.L_WRIST)} Rw ${conf(J.R_WRIST)}</div>`;
     }).join("");
     el.innerHTML = head + rows;
@@ -199,6 +199,21 @@ function engineFrame(pose, state) {
     && Math.abs((pose.start_sec || 0) - (state.start_sec || 0)) < 1e-3;
   if (aligned) return Math.min(Math.max(state.frame, 0), pose.n_frames - 1);
   return frameAt(pose, videoTime(state), state, pose === state.pose);
+}
+
+// Resolved frame + how far (in video frames) that frame's timestamp sits from
+// the displayed instant. |dframes| < 0.5 ⇒ aligned. This is the HONEST
+// alignment test: caches with different start offsets have different frame
+// NUMBERS yet still land on the same instant (dframes ≈ 0) — only a real
+// temporal offset (or a cache with no/!imprecise PTS) shows |dframes| ≥ 0.5.
+function engineFrameInfo(pose, state) {
+  const fr = engineFrame(pose, state);
+  if (fr == null) return { fr: null, dframes: null };
+  const et = (pose.pts && pose.pts.length > fr)
+    ? pose.pts[fr]
+    : (pose.start_sec || 0) + fr / (pose.fps || 30);
+  const dframes = (et - videoTime(state)) * (state.fps || pose.fps || 30);
+  return { fr, dframes };
 }
 
 // ── time alignment (per-engine PTS, falling back to fps model) ──────────────
