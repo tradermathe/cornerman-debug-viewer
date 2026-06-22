@@ -10,33 +10,83 @@ import { JOINT_NAMES, confColor } from "../skeleton.js";
 
 let host;
 
+// ── Skeleton/engine picker so the per-joint table can show any loaded engine
+//    (Vision / YOLO / RTMPose / v6), not just the primary. ──
+const ENGINE_LABEL = {
+  apple_vision_2d: "Vision", yolo_pose: "YOLO", rtmpose_body17: "RTMPose",
+  apple_vision_2d_combined: "v6 (combined)",
+};
+function engLabel(p) {
+  const e = (p && p.engine) || "";
+  return ENGINE_LABEL[e] || (e.startsWith("apple_vision_2d+glove") ? "v6" : (e || "pose"));
+}
+function ovSources(state) {
+  const seen = new Set(), out = [];
+  const add = (p, suffix) => {
+    if (!p || seen.has(p)) return;
+    seen.add(p); out.push({ pose: p, label: engLabel(p) + (suffix || "") });
+  };
+  add(state.pose); add(state.poseSecondary); add(state.poseRtm);
+  add(state.poseV6, " v6"); add(state.poseCombined, " comb");
+  return out;
+}
+let ovSel = null;   // selected source label (persists across rounds)
+// Map the viewer's current frame to the selected pose's frame by ABSOLUTE pts
+// (same alignment engine_compare uses); falls back to the start_sec+fps model.
+function ovFrame(p, state) {
+  if (p === state.pose) return state.frame;
+  const ap = state.pose.pts, bp = p.pts, f = state.frame;
+  if (ap && bp && bp.length && f < ap.length && ap[f] === ap[f]) {
+    const t = ap[f]; let lo = 0, hi = bp.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (bp[m] < t) lo = m + 1; else hi = m; }
+    let best = lo;
+    if (lo > 0 && Math.abs(bp[lo - 1] - t) <= Math.abs(bp[lo] - t)) best = lo - 1;
+    return best;
+  }
+  const t = (state.pose.start_sec || 0) + f / state.pose.fps;
+  const sf = Math.round((t - (p.start_sec || 0)) * p.fps);
+  return (sf >= 0 && sf < p.n_frames) ? sf : 0;
+}
+
 export const OverviewRule = {
   id: "overview",
   label: "Overview (no lens)",
 
   mount(_host, state) {
     host = _host;
+    const srcs = ovSources(state);
+    if (!srcs.find(s => s.label === ovSel)) ovSel = srcs[0]?.label || null;
+    const opts = srcs.map(s =>
+      `<option value="${s.label}"${s.label === ovSel ? " selected" : ""}>${s.label}</option>`).join("");
     host.innerHTML = `
       <h2>Per-joint state</h2>
+      <label class="hint" style="display:block;margin-bottom:6px">Skeleton:
+        <select id="ov-engine" style="background:#1c1c1c;color:#eee;border:1px solid #444;border-radius:4px;padding:1px 5px">${opts || "<option>—</option>"}</select></label>
       <div id="ov-source" class="hint" style="margin-bottom:8px"></div>
       <p class="hint">Confidence is colour-coded: green ≥ 0.5, amber ≥ 0.2, red below.
-      A zero means Apple Vision didn't detect that joint at all (different from
-      YOLO, which usually returns a low-conf guess).</p>
+      A zero means the engine didn't detect that joint (Vision emits 0; YOLO/RTMPose
+      usually return a low-conf guess). Non-primary engines are mapped to this frame by PTS.</p>
       <table class="joint-table">
         <thead><tr><th>#</th><th>Joint</th><th>x</th><th>y</th><th>conf</th></tr></thead>
         <tbody id="joint-tbody"></tbody>
       </table>
     `;
+    const sel = host.querySelector("#ov-engine");
+    if (sel) sel.addEventListener("change", () => { ovSel = sel.value; this.update(state); });
     renderSourceLine(state);
   },
 
   update(state) {
+    const srcs = ovSources(state);
+    const src = srcs.find(s => s.label === ovSel) || srcs[0];
     const tbody = host.querySelector("#joint-tbody");
+    if (!src) { if (tbody) tbody.innerHTML = ""; renderSourceLine(state); return; }
+    const pose = src.pose, fr = ovFrame(pose, state);
     const rows = [];
     for (let j = 0; j < 17; j++) {
-      const x = state.pose.skeleton[(state.frame * 17 + j) * 2];
-      const y = state.pose.skeleton[(state.frame * 17 + j) * 2 + 1];
-      const c = state.pose.conf[state.frame * 17 + j];
+      const x = pose.skeleton[(fr * 17 + j) * 2];
+      const y = pose.skeleton[(fr * 17 + j) * 2 + 1];
+      const c = pose.conf[fr * 17 + j];
       rows.push(
         `<tr>
           <td class="muted">${j}</td>
