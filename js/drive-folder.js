@@ -47,8 +47,12 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // Engine alternation MUST list longer tokens first — `vision_glove` would
 // otherwise be eaten as `(vision)` with base ending in `_vision`, then
 // `_glove_r…` would fail to match.
+// Bake-off engines (movenet/yolo11/blazepose) are COCO-17 like yolo/rtmpose.
+// `yolo11` MUST precede `yolo` (longer-first) so `_yolo11_` isn't eaten as
+// `_yolo`. `blazepose33` is intentionally absent — that 33-joint cache is for
+// the schema-aware skeleton_compare lens, not the COCO-17 loaders.
 const CACHE_FILE_RE =
-  /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/;
+  /^(.+?)_(vision_glove|vision3d|vision|yolo11|yolo|rtmpose|movenet|blazepose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/;
 // Punch-classifier predictions dump (one file per training run, schema in
 // js/rules/punch_classifier.js). Walker captures these and exposes them as
 // `state.predictionFiles` so the lens auto-loads without a file picker.
@@ -244,11 +248,12 @@ export async function walk(rootHandle) {
   // = pose_cache_v6/).
   for (const [base, rounds] of cacheIndex) {
     for (const [round, slot] of rounds) {
-      for (const eng of ["yolo", "vision", "vision3d", "rtmpose", "glove", "vision_combined", "vision_glove"]) {
+      for (const eng of ["yolo", "vision", "vision3d", "rtmpose", "movenet", "yolo11", "blazepose", "glove", "vision_combined", "vision_glove"]) {
         if (slot[eng] && (!slot[eng].npy || !slot[eng].meta)) delete slot[eng];
       }
       // glove alone is useless — needs a skeleton engine to overlay on
-      if (!slot.yolo && !slot.vision && !slot.vision3d && !slot.rtmpose && !slot.vision_combined && !slot.vision_glove) {
+      if (!slot.yolo && !slot.vision && !slot.vision3d && !slot.rtmpose && !slot.movenet
+          && !slot.yolo11 && !slot.blazepose && !slot.vision_combined && !slot.vision_glove) {
         rounds.delete(round);
       }
     }

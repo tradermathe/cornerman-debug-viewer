@@ -93,8 +93,8 @@ const els = {
 // (pose_cache_v6/, files named `<stem>_vision_glove_r<N>`) — same shape but
 // the filename advertises the combination, and the meta carries per-round
 // glove-presence info consumed by the round_v6 lens.
-const ENGINE_TAGS = ["yolo", "vision", "vision3d", "rtmpose", "glove", "vision_combined", "vision_glove"];
-const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "rtmpose", "vision_combined", "vision_glove"];
+const ENGINE_TAGS = ["yolo", "vision", "vision3d", "rtmpose", "movenet", "yolo11", "blazepose", "glove", "vision_combined", "vision_glove"];
+const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "rtmpose", "movenet", "yolo11", "blazepose", "vision_combined", "vision_glove"];
 const COMBINED_DIR_RE = /^pose_cache_v/i;
 function classifyEngine(engine, parentDir) {
   if (engine === "vision" && parentDir && COMBINED_DIR_RE.test(parentDir)) {
@@ -365,7 +365,8 @@ function populateDriveVideoSelect() {
 // per-rule code change.
 function slotMatchesActiveLens(slot) {
   const req = state.rule?.requires;
-  if (!req) return !!(slot?.yolo || slot?.vision || slot?.vision_glove || slot?.rtmpose);
+  if (!req) return !!(slot?.yolo || slot?.vision || slot?.vision_glove || slot?.rtmpose
+                      || slot?.movenet || slot?.yolo11 || slot?.blazepose);
   try { return !!req(slot); }
   catch { return false; }
 }
@@ -439,7 +440,7 @@ function onCacheFolder(e) {
     // Longer tokens first — `vision_glove` would otherwise be eaten as
     // `vision` with a base ending in `_vision`.
     const m = f.name.match(
-      /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/
+      /^(.+?)_(vision_glove|vision3d|vision|yolo11|yolo|rtmpose|movenet|blazepose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, rawEngine, roundStr, suffix, ext] = m;
@@ -585,6 +586,7 @@ function loadVideoOnly(videoFile, errMessage) {
       state.poseCombined = null;
       state.poseV6 = null;
       state.pose3d = null;
+      state.engines = [];
       state.n_frames = 0;
       state.frame = 0;
       els.scrubber.max = 0;
@@ -791,7 +793,8 @@ function loadFromIndex(videoFile, slot) {
   // (someone synced only pose_cache_v6/), fall back to it so the viewer
   // still has a skeleton to render — the v6 cache is shape-compatible with
   // raw vision.
-  const primary = slot.vision || slot.yolo || slot.vision_glove || slot.rtmpose;
+  const primary = slot.vision || slot.yolo || slot.vision_glove || slot.rtmpose
+                || slot.movenet || slot.yolo11 || slot.blazepose;
   const secondary = (slot.vision && slot.yolo) ? slot.yolo : null;
   const status =
     `Loading ${videoFile.name}${secondary ? " (vision + yolo)" : ""}…`;
@@ -821,6 +824,9 @@ function loadFromIndex(videoFile, slot) {
       else if (slot.vision_glove && primary === slot.vision_glove)
         primaryEngine = posePrimary.meta?.engine || "apple_vision_2d+glove_v6";
       else if (slot.rtmpose && primary === slot.rtmpose)     primaryEngine = "rtmpose_body17";
+      else if (slot.movenet && primary === slot.movenet)     primaryEngine = "movenet";
+      else if (slot.yolo11 && primary === slot.yolo11)       primaryEngine = "yolo11_pose";
+      else if (slot.blazepose && primary === slot.blazepose) primaryEngine = "blazepose";
       else                                                    primaryEngine = "unknown";
       posePrimary.engine = primaryEngine;
       // Per-frame PTS sidecar → exact cross-engine time alignment (engine_compare).
@@ -928,8 +934,25 @@ function loadFromIndex(videoFile, slot) {
           console.warn("rtmpose pose load failed:", err.message);
         }
       }
+      // Bake-off engines (COCO-17): MoveNet / YOLO11 / BlazePose (coco17 remap).
+      // Loaded as independent engines so the multi-skeleton compare lens can
+      // overlay any of them. blazepose33 (feet) is NOT loaded here — non-coco17.
+      const loadEngine = async (s, tag) => {
+        if (!s) return null;
+        try {
+          const p = await loadPose([await drive.toFile(s.npy), await drive.toFile(s.meta)], size);
+          p.engine = tag;
+          if (s.pts) p.pts = await loadPtsArray(await drive.toFile(s.pts));
+          return p;
+        } catch (err) { console.warn(`${tag} load failed:`, err.message); return null; }
+      };
+      const poseMovenet = await loadEngine(slot.movenet, "movenet");
+      const poseYolo11  = await loadEngine(slot.yolo11, "yolo11_pose");
+      const poseBlaze   = await loadEngine(slot.blazepose, "blazepose");
+
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm);
+      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm,
+            [poseMovenet, poseYolo11, poseBlaze].filter(Boolean));
 
       // Expose cache identity on state so lenses that key by (stem, round, frame)
       // — e.g. orientation_lens looking up orientation GT labels — can find it
@@ -939,7 +962,7 @@ function loadFromIndex(videoFile, slot) {
       // at `_vision_`.
       const npyName = primary.npy.name;
       state.cacheBasename = stripCacheSuffix(npyName);
-      const rndMatch = /_(?:vision_glove|vision|yolo|rtmpose)_r(\d+)\.npy$/i.exec(npyName);
+      const rndMatch = /_(?:vision_glove|vision|yolo11|yolo|rtmpose|movenet|blazepose)_r(\d+)\.npy$/i.exec(npyName);
       state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
 
       // Live GT labels: derive a basename from the cache filename, then hit
@@ -993,7 +1016,7 @@ function loadFromFiles(videoFile, poseFiles) {
       // need (stem, round, frame) work in the manual-picker path too.
       if (npyFile) {
         state.cacheBasename = stripCacheSuffix(npyFile.name);
-        const rndMatch = /_(?:vision_glove|vision|yolo|rtmpose)_r(\d+)\.npy$/i.exec(npyFile.name);
+        const rndMatch = /_(?:vision_glove|vision|yolo11|yolo|rtmpose|movenet|blazepose)_r(\d+)\.npy$/i.exec(npyFile.name);
         state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
       }
       // Live GT labels.
@@ -1063,7 +1086,7 @@ function stripCacheSuffix(fileName) {
     // auto-matcher's fuzzy logic. Longer tokens listed first so
     // `_vision_glove_` matches as a unit instead of being truncated to
     // `_vision_`.
-    .replace(/_(vision_glove|vision_combined|vision3d|vision|yolo|rtmpose|glove)_r\d+$/i, "");
+    .replace(/_(vision_glove|vision_combined|vision3d|vision|yolo11|yolo|rtmpose|movenet|blazepose|glove)_r\d+$/i, "");
 }
 
 // Fire a best-effort live-label fetch. Doesn't block UI. On success, sets
@@ -1120,12 +1143,37 @@ function updateVideoInfo() {
   els.videoInfo.hidden = false;
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null, poseRtm = null) {
+// Short human label for an engine tag — used by the multi-skeleton compare lens.
+function engineDisplayLabel(tag) {
+  const t = tag || "";
+  if (t === "apple_vision_2d") return "Vision";
+  if (t === "apple_vision_2d_combined") return "Vision-comb";
+  if (t.startsWith("apple_vision_2d+glove")) return "v6";
+  if (t === "yolo_pose") return "YOLO";
+  if (t === "yolo11_pose") return "YOLO11";
+  if (t === "rtmpose_body17") return "RTMPose";
+  if (t === "movenet") return "MoveNet";
+  if (t === "blazepose") return "BlazePose";
+  return t || "pose";
+}
+
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null, poseRtm = null, extraEngines = []) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.poseCombined = poseCombined;     // optional vision+glove combined cache
   state.poseV6 = poseV6;                 // optional pose_cache_v6 (vision+glove_v6)
   state.poseRtm = poseRtm;               // optional RTMPose Body-17 (rtmpose_pose_cache)
+  // Every COCO-17 skeleton engine loaded for this round, deduped by engine tag —
+  // what the multi-skeleton compare lens overlays. Primary first, then the rest.
+  state.engines = [];
+  {
+    const seenEng = new Set();
+    for (const p of [pose, poseSecondary, poseCombined, poseV6, poseRtm, ...extraEngines]) {
+      if (!p || !p.skeleton || seenEng.has(p.engine)) continue;
+      seenEng.add(p.engine);
+      state.engines.push({ key: p.engine, label: engineDisplayLabel(p.engine), pose: p });
+    }
+  }
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.analysis = analysis;             // optional on-device analysis sidecar (Firebase load path)
