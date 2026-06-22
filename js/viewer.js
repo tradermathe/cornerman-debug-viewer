@@ -93,8 +93,8 @@ const els = {
 // (pose_cache_v6/, files named `<stem>_vision_glove_r<N>`) — same shape but
 // the filename advertises the combination, and the meta carries per-round
 // glove-presence info consumed by the round_v6 lens.
-const ENGINE_TAGS = ["yolo", "vision", "vision3d", "glove", "vision_combined", "vision_glove"];
-const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "vision_combined", "vision_glove"];
+const ENGINE_TAGS = ["yolo", "vision", "vision3d", "rtmpose", "glove", "vision_combined", "vision_glove"];
+const SKELETON_ENGINES = ["yolo", "vision", "vision3d", "rtmpose", "vision_combined", "vision_glove"];
 const COMBINED_DIR_RE = /^pose_cache_v/i;
 function classifyEngine(engine, parentDir) {
   if (engine === "vision" && parentDir && COMBINED_DIR_RE.test(parentDir)) {
@@ -365,7 +365,7 @@ function populateDriveVideoSelect() {
 // per-rule code change.
 function slotMatchesActiveLens(slot) {
   const req = state.rule?.requires;
-  if (!req) return !!(slot?.yolo || slot?.vision || slot?.vision_glove);
+  if (!req) return !!(slot?.yolo || slot?.vision || slot?.vision_glove || slot?.rtmpose);
   try { return !!req(slot); }
   catch { return false; }
 }
@@ -439,7 +439,7 @@ function onCacheFolder(e) {
     // Longer tokens first — `vision_glove` would otherwise be eaten as
     // `vision` with a base ending in `_vision`.
     const m = f.name.match(
-      /^(.+?)_(vision_glove|vision3d|vision|yolo|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
+      /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, rawEngine, roundStr, suffix, ext] = m;
@@ -790,7 +790,7 @@ function loadFromIndex(videoFile, slot) {
   // (someone synced only pose_cache_v6/), fall back to it so the viewer
   // still has a skeleton to render — the v6 cache is shape-compatible with
   // raw vision.
-  const primary = slot.vision || slot.yolo || slot.vision_glove;
+  const primary = slot.vision || slot.yolo || slot.vision_glove || slot.rtmpose;
   const secondary = (slot.vision && slot.yolo) ? slot.yolo : null;
   const status =
     `Loading ${videoFile.name}${secondary ? " (vision + yolo)" : ""}…`;
@@ -819,6 +819,7 @@ function loadFromIndex(videoFile, slot) {
       else if (slot.yolo && primary === slot.yolo)           primaryEngine = "yolo_pose";
       else if (slot.vision_glove && primary === slot.vision_glove)
         primaryEngine = posePrimary.meta?.engine || "apple_vision_2d+glove_v6";
+      else if (slot.rtmpose && primary === slot.rtmpose)     primaryEngine = "rtmpose_body17";
       else                                                    primaryEngine = "unknown";
       posePrimary.engine = primaryEngine;
       let poseSecondary = null;
@@ -908,8 +909,22 @@ function loadFromIndex(videoFile, slot) {
           console.warn("v6 pose load failed:", err.message);
         }
       }
+      // Optional: RTMPose Body-17 cache (rtmpose_pose_cache/). Same COCO-17
+      // (N,17,3) normalized layout as YOLO/Vision, aligned to the same rounds —
+      // loaded as a separate engine so engine_compare can pick it vs Vision.
+      let poseRtm = null;
+      if (slot.rtmpose) {
+        try {
+          const rNpy  = await drive.toFile(slot.rtmpose.npy);
+          const rMeta = await drive.toFile(slot.rtmpose.meta);
+          poseRtm = await loadPose([rNpy, rMeta], size);
+          poseRtm.engine = "rtmpose_body17";
+        } catch (err) {
+          console.warn("rtmpose pose load failed:", err.message);
+        }
+      }
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6);
+      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm);
 
       // Expose cache identity on state so lenses that key by (stem, round, frame)
       // — e.g. orientation_lens looking up orientation GT labels — can find it
@@ -919,7 +934,7 @@ function loadFromIndex(videoFile, slot) {
       // at `_vision_`.
       const npyName = primary.npy.name;
       state.cacheBasename = stripCacheSuffix(npyName);
-      const rndMatch = /_(?:vision_glove|vision|yolo)_r(\d+)\.npy$/i.exec(npyName);
+      const rndMatch = /_(?:vision_glove|vision|yolo|rtmpose)_r(\d+)\.npy$/i.exec(npyName);
       state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
 
       // Live GT labels: derive a basename from the cache filename, then hit
@@ -973,7 +988,7 @@ function loadFromFiles(videoFile, poseFiles) {
       // need (stem, round, frame) work in the manual-picker path too.
       if (npyFile) {
         state.cacheBasename = stripCacheSuffix(npyFile.name);
-        const rndMatch = /_(?:vision_glove|vision|yolo)_r(\d+)\.npy$/i.exec(npyFile.name);
+        const rndMatch = /_(?:vision_glove|vision|yolo|rtmpose)_r(\d+)\.npy$/i.exec(npyFile.name);
         state.cacheRound = rndMatch ? parseInt(rndMatch[1], 10) : null;
       }
       // Live GT labels.
@@ -1043,7 +1058,7 @@ function stripCacheSuffix(fileName) {
     // auto-matcher's fuzzy logic. Longer tokens listed first so
     // `_vision_glove_` matches as a unit instead of being truncated to
     // `_vision_`.
-    .replace(/_(vision_glove|vision_combined|vision3d|vision|yolo|glove)_r\d+$/i, "");
+    .replace(/_(vision_glove|vision_combined|vision3d|vision|yolo|rtmpose|glove)_r\d+$/i, "");
 }
 
 // Fire a best-effort live-label fetch. Doesn't block UI. On success, sets
@@ -1100,11 +1115,12 @@ function updateVideoInfo() {
   els.videoInfo.hidden = false;
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null, poseRtm = null) {
   state.pose = pose;
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.poseCombined = poseCombined;     // optional vision+glove combined cache
   state.poseV6 = poseV6;                 // optional pose_cache_v6 (vision+glove_v6)
+  state.poseRtm = poseRtm;               // optional RTMPose Body-17 (rtmpose_pose_cache)
   state.punches = punches;               // optional ST-GCN detections
   state.pose3d = pose3d;                 // optional Apple Vision 3D (separate layout)
   state.analysis = analysis;             // optional on-device analysis sidecar (Firebase load path)

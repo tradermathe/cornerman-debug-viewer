@@ -19,6 +19,43 @@ const V_BONE = "rgba(110,200,255,0.55)";  // Vision bones
 const Y_WRIST = "#ff8a3c";
 const V_WRIST = "#5fd1ff";
 const HIGHLIGHT = new Set([J.NOSE, J.L_WRIST, J.R_WRIST, J.L_ELBOW, J.R_ELBOW]);
+const R_BONE = "rgba(255,92,200,0.55)",  R_WRIST = "#ff5cc8";   // RTMPose = magenta
+const V6_BONE = "rgba(230,210,90,0.55)", V6_WRIST = "#ffe05a";  // v6 / combined = yellow
+
+// Vision is always the cyan reference (A). Everything else is a selectable B,
+// coloured + labelled by its engine tag.
+function engStyle(pose) {
+  const e = (pose && pose.engine) || "";
+  if (e === "yolo_pose")      return { boneColor: Y_BONE,  jointColor: Y_WRIST,  wristColor: Y_WRIST };
+  if (e === "rtmpose_body17") return { boneColor: R_BONE,  jointColor: R_WRIST,  wristColor: R_WRIST };
+  if (e.startsWith("apple_vision_2d+glove") || e === "apple_vision_2d_combined")
+                              return { boneColor: V6_BONE, jointColor: V6_WRIST, wristColor: V6_WRIST };
+  return { boneColor: V_BONE, jointColor: V_WRIST, wristColor: V_WRIST };
+}
+function engLabel(pose) {
+  const e = (pose && pose.engine) || "";
+  return e === "yolo_pose" ? "YOLO"
+    : e === "rtmpose_body17" ? "RTMPose"
+    : (e.startsWith("apple_vision_2d+glove") || e === "apple_vision_2d_combined") ? "v6"
+    : "Vision";
+}
+function engLetter(pose) { return engLabel(pose)[0]; }
+
+// Engines available this round to compare against the Vision primary.
+function bCandidates(state) {
+  // YOLO + RTMPose only. v6's engine tag is bare "apple_vision_2d" on ungloved
+  // rounds (indistinguishable from the Vision reference) — and v6-vs-Vision
+  // already has the combined_compare / round_v6 lenses.
+  const o = [];
+  if (state.poseSecondary) o.push({ key: "secondary", pose: state.poseSecondary });
+  if (state.poseRtm)       o.push({ key: "rtm",       pose: state.poseRtm });
+  return o;
+}
+let bSel = "rtm";   // default: compare against RTMPose when present
+function getBPose(state) {
+  const c = bCandidates(state);
+  return (c.find(x => x.key === bSel) || c[0])?.pose || null;
+}
 
 let host;
 
@@ -28,7 +65,8 @@ export const EngineCompareRule = {
 
   // Needs both 2D engines to be useful — used by the viewer's lens-aware
   // filter to hide videos/rounds that only have one of them.
-  requires(slot) { return !!slot?.yolo && !!slot?.vision; },
+  // Vision plus at least one comparison engine (YOLO / RTMPose / v6).
+  requires(slot) { return !!slot?.vision && (!!slot?.yolo || !!slot?.rtmpose || !!slot?.vision_glove); },
 
   // Suppress the base skeleton renderer — we draw both ourselves.
   skeletonStyle() {
@@ -37,24 +75,28 @@ export const EngineCompareRule = {
 
   mount(_host, state) {
     host = _host;
-    const hasBoth = !!state.poseSecondary;
+    const cands = bCandidates(state);
+    if (!cands.find(c => c.key === bSel)) bSel = cands[0]?.key || "rtm";
+    const b = getBPose(state);
+    const opts = cands.map(c =>
+      `<option value="${c.key}"${c.key === bSel ? " selected" : ""}>${engLabel(c.pose)}</option>`).join("");
     host.innerHTML = `
-      <h2>Engine compare (YOLO vs Vision)</h2>
-      ${hasBoth ? "" : `
-        <p class="hint" style="color:var(--bad)">
-          No second engine for this round. Make sure the cache folder
-          contains both <code>&lt;base&gt;_yolo_r{N}.*</code> and
-          <code>&lt;base&gt;_vision_r{N}.*</code> files.
-        </p>
-      `}
+      <h2>Engine compare</h2>
       <p class="hint">
-        <span style="color:${Y_WRIST}">orange/yellow</span> = YOLO,
-        <span style="color:${V_WRIST}">cyan/green</span> = Apple Vision.
+        <span style="color:${engStyle(state.pose).wristColor}">${engLabel(state.pose)}</span> (reference) &nbsp;vs&nbsp;
+        <select id="ec-b" style="background:#1c1c1c;color:#eee;border:1px solid #444;border-radius:4px;padding:1px 5px">${opts || "<option>— none —</option>"}</select>
+        ${b ? `<span style="color:${engStyle(b).wristColor};font-weight:600"> ${engLabel(b)}</span>` : ""}.
         Wrists drawn extra-large so disagreement reads at a glance.
       </p>
+      ${b ? "" : `
+        <p class="hint" style="color:var(--bad)">
+          No comparison engine for this round — need Vision plus one of
+          <code>_yolo_r{N}</code> / <code>_rtmpose_r{N}</code> / v6.
+        </p>
+      `}
 
       <h3>Per-frame Δ (raw px)</h3>
-      <p class="hint">Distance between YOLO and Vision detection of each joint at this frame, and each engine's confidence (Y / V).</p>
+      <p class="hint">Distance between Vision and the selected engine at this frame, and each one's confidence.</p>
       <div class="metric-grid">
         <div class="metric"><div class="metric-label">L wrist</div><div class="metric-val" id="ec-l-wrist">—</div><div class="metric-sub" id="ec-l-wrist-conf">—</div></div>
         <div class="metric"><div class="metric-label">R wrist</div><div class="metric-val" id="ec-r-wrist">—</div><div class="metric-sub" id="ec-r-wrist-conf">—</div></div>
@@ -64,36 +106,35 @@ export const EngineCompareRule = {
       </div>
 
       <h3>Wrist y over time</h3>
-      <p class="hint">Both engines plotted side-by-side. Spikes that appear in
-      one but not the other are the model disagreeing — usually means a glove
-      anchor jump for YOLO.</p>
+      <p class="hint">Vision vs the selected engine, side-by-side. Spikes in one but
+      not the other = the models disagreeing.</p>
       <canvas id="ec-trace-l" width="320" height="100"></canvas>
       <div class="metric-sub" style="text-align:center">L wrist y</div>
       <canvas id="ec-trace-r" width="320" height="100"></canvas>
       <div class="metric-sub" style="text-align:center">R wrist y</div>
     `;
+    const sel = host.querySelector("#ec-b");
+    if (sel) sel.addEventListener("change", () => {
+      bSel = sel.value;
+      this.mount(host, state);     // rebuild legend/colours for the new B
+      window.__viewerRedraw?.();
+      this.update(state);
+    });
   },
 
   draw(ctx, state) {
     const s = state.renderScale || 1;
-    // Color-code by actual engine name rather than primary/secondary
-    // order — primary used to always be YOLO, but the viewer now prefers
-    // Vision when both exist, so we'd otherwise paint Vision in YOLO's
-    // colors. YOLO always = orange/yellow; Vision always = cyan/green,
-    // regardless of which one happens to be primary this load.
-    const stylesFor = pose => (pose.engine === "yolo_pose")
-      ? { boneColor: Y_BONE, jointColor: Y_WRIST, wristColor: Y_WRIST }
-      : { boneColor: V_BONE, jointColor: V_WRIST, wristColor: V_WRIST };
-
+    // A = Vision primary (cyan); B = the selected engine, coloured by its tag.
     drawEngineSkeleton(ctx, state.pose, state.frame, {
-      ...stylesFor(state.pose),
+      ...engStyle(state.pose),
       boneWidth: 2 * s, jointRadius: 4 * s, wristRadius: 9 * s, strokeWidth: 2 * s,
     });
-    if (state.poseSecondary) {
-      const sf = secondaryFrame(state);
+    const b = getBPose(state);
+    if (b) {
+      const sf = frameOf(b, state);
       if (sf != null) {
-        drawEngineSkeleton(ctx, state.poseSecondary, sf, {
-          ...stylesFor(state.poseSecondary),
+        drawEngineSkeleton(ctx, b, sf, {
+          ...engStyle(b),
           boneWidth: 2 * s, jointRadius: 4 * s, wristRadius: 9 * s, strokeWidth: 2 * s,
         });
       }
@@ -103,14 +144,9 @@ export const EngineCompareRule = {
   update(state) {
     const f = state.frame;
     const a = state.pose;
-    const b = state.poseSecondary;
-    const sf = b ? secondaryFrame(state) : null;
-    // Engine-aware labels. Primary used to always be YOLO; now Primary is
-    // Vision when both engines are present, so we resolve the conf
-    // letters/colors from each pose's engine tag.
-    const tagFor = pose => pose.engine === "yolo_pose"
-      ? { letter: "Y", color: Y_WRIST }
-      : { letter: "V", color: V_WRIST };
+    const b = getBPose(state);
+    const sf = b ? frameOf(b, state) : null;
+    const tagFor = pose => ({ letter: engLetter(pose), color: engStyle(pose).wristColor });
     const setJointDiff = (id, j) => {
       const confId = `${id}-conf`;
       if (!b) { setText(id, "—"); setText(confId, "—"); return; }
@@ -152,11 +188,11 @@ export const EngineCompareRule = {
 // secondary's frame N no longer necessarily covers the same instant as
 // primary's frame N. Returns null when video time falls outside the
 // secondary cache's range.
-function secondaryFrame(state) {
-  const a = state.pose, b = state.poseSecondary;
+function frameOf(bPose, state) {
+  const a = state.pose;
   const t = (a.start_sec || 0) + state.frame / a.fps;
-  const sf = Math.round((t - (b.start_sec || 0)) * b.fps);
-  return (sf >= 0 && sf < b.n_frames) ? sf : null;
+  const sf = Math.round((t - (bPose.start_sec || 0)) * bPose.fps);
+  return (sf >= 0 && sf < bPose.n_frames) ? sf : null;
 }
 
 // Draw a single engine's skeleton with custom colours. Largely a stripped-down
@@ -251,8 +287,8 @@ function drawWristTrace(canvas, a, b, jointIdx, frame) {
     }
     ctx.stroke();
   };
-  // Engine-aware colors — primary may be Vision now, so pick by engine tag.
-  const colorFor = pose => pose.engine === "yolo_pose" ? Y_WRIST : V_WRIST;
+  // Engine-aware colors — pick by engine tag (Vision/YOLO/RTMPose/v6).
+  const colorFor = pose => engStyle(pose).wristColor;
   drawSeries(a, colorFor(a));
   drawSeries(b, colorFor(b));
 
