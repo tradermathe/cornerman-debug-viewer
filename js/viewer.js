@@ -12,7 +12,7 @@ const BUILD = "2026-06-16.24";
   if (el) el.textContent = `build ${BUILD}`;
 }
 
-import { loadPose, loadGloveWrists } from "./pose-loader.js";
+import { loadPose, loadGloveWrists, loadPtsArray } from "./pose-loader.js";
 import { loadPose3D } from "./pose-3d-loader.js";
 import { loadPunches } from "./punches-loader.js";
 import { fetchLiveLabels } from "./sheet-labels.js";
@@ -439,7 +439,7 @@ function onCacheFolder(e) {
     // Longer tokens first — `vision_glove` would otherwise be eaten as
     // `vision` with a base ending in `_vision`.
     const m = f.name.match(
-      /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/
+      /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/
     );
     if (!m) continue;
     const [, base, rawEngine, roundStr, suffix, ext] = m;
@@ -461,6 +461,7 @@ function onCacheFolder(e) {
     const engineSlot = roundSlot[engine];
     if (ext === "npy" && suffix === "_cam")        engineSlot.cam = f;
     else if (ext === "npy" && suffix === "_proj")  engineSlot.proj = f;
+    else if (ext === "npy" && suffix === "_pts")   engineSlot.pts = f;
     else if (ext === "npy")                        engineSlot.npy = f;
     else if (suffix === "_meta")                   engineSlot.meta = f;
     else if (suffix === "_punches")                engineSlot.punches = f;
@@ -822,6 +823,8 @@ function loadFromIndex(videoFile, slot) {
       else if (slot.rtmpose && primary === slot.rtmpose)     primaryEngine = "rtmpose_body17";
       else                                                    primaryEngine = "unknown";
       posePrimary.engine = primaryEngine;
+      // Per-frame PTS sidecar → exact cross-engine time alignment (engine_compare).
+      if (primary.pts) posePrimary.pts = await loadPtsArray(await drive.toFile(primary.pts));
       let poseSecondary = null;
       if (secondary) {
         const secNpy  = await drive.toFile(secondary.npy);
@@ -830,6 +833,7 @@ function loadFromIndex(videoFile, slot) {
         if (token !== currentLoadToken) return;
         poseSecondary.engine =
           primaryEngine === "apple_vision_2d" ? "yolo_pose" : "apple_vision_2d";
+        if (secondary.pts) poseSecondary.pts = await loadPtsArray(await drive.toFile(secondary.pts));
       }
       // Optional sibling: ST-GCN punch detections for the primary engine.
       let punches = null;
@@ -919,6 +923,7 @@ function loadFromIndex(videoFile, slot) {
           const rMeta = await drive.toFile(slot.rtmpose.meta);
           poseRtm = await loadPose([rNpy, rMeta], size);
           poseRtm.engine = "rtmpose_body17";
+          if (slot.rtmpose.pts) poseRtm.pts = await loadPtsArray(await drive.toFile(slot.rtmpose.pts));
         } catch (err) {
           console.warn("rtmpose pose load failed:", err.message);
         }

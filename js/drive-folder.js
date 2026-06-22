@@ -48,7 +48,7 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm)$/i;
 // otherwise be eaten as `(vision)` with base ending in `_vision`, then
 // `_glove_r…` would fail to match.
 const CACHE_FILE_RE =
-  /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj)?\.(npy|json)$/;
+  /^(.+?)_(vision_glove|vision3d|vision|yolo|rtmpose|glove)_r(\d+)(_meta|_punches|_cam|_proj|_pts)?\.(npy|json)$/;
 // Punch-classifier predictions dump (one file per training run, schema in
 // js/rules/punch_classifier.js). Walker captures these and exposes them as
 // `state.predictionFiles` so the lens auto-loads without a file picker.
@@ -223,6 +223,7 @@ export async function walk(rootHandle) {
       const engineSlot = slot[engine];
       if (ext === "npy" && suffix === "_cam")        engineSlot.cam = entry;
       else if (ext === "npy" && suffix === "_proj")  engineSlot.proj = entry;
+      else if (ext === "npy" && suffix === "_pts")   engineSlot.pts = entry;
       else if (ext === "npy")                        engineSlot.npy = entry;
       else if (suffix === "_meta")                   engineSlot.meta = entry;
       else if (suffix === "_punches")                engineSlot.punches = entry;

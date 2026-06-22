@@ -189,8 +189,26 @@ export const EngineCompareRule = {
 // primary's frame N. Returns null when video time falls outside the
 // secondary cache's range.
 function frameOf(bPose, state) {
-  const a = state.pose;
-  const t = (a.start_sec || 0) + state.frame / a.fps;
+  const a = state.pose, f = state.frame;
+  const ap = a.pts, bp = bPose.pts;
+  // Preferred: align by per-frame PTS, RELATIVE to each cache's first frame so a
+  // constant clock offset between engines can't shift it. Fixes the ±1 the
+  // uniform start_sec+fps model produces when the two caches' fps differ
+  // slightly (29.97 vs 30, keyframe-seek phase, etc.).
+  if (ap && bp && bp.length && f < ap.length && ap[f] === ap[f] && bp[0] === bp[0]) {
+    const t = ap[f] - ap[0], b0 = bp[0];
+    let lo = 0, hi = bp.length - 1;
+    while (lo < hi) {                      // first index with (bp-b0) >= t
+      const mid = (lo + hi) >> 1;
+      if (bp[mid] - b0 < t) lo = mid + 1; else hi = mid;
+    }
+    let best = lo;
+    if (lo > 0 && Math.abs((bp[lo - 1] - b0) - t) <= Math.abs((bp[lo] - b0) - t)) best = lo - 1;
+    const span = bp[bp.length - 1] - b0, tol = 0.75 / (bPose.fps || 30);
+    return (t < -tol || t > span + tol) ? null : best;   // out of B's coverage
+  }
+  // Fallback: uniform-fps model.
+  const t = (a.start_sec || 0) + f / a.fps;
   const sf = Math.round((t - (bPose.start_sec || 0)) * bPose.fps);
   return (sf >= 0 && sf < bPose.n_frames) ? sf : null;
 }

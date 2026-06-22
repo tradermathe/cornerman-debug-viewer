@@ -252,6 +252,20 @@ function parseNpy(buffer) {
   return { data, shape, dtype };
 }
 
+// Load a per-frame PTS sidecar (<base>_<engine>_r<N>_pts.npy → (N,) float32,
+// seconds) for deterministic cross-engine time alignment. Returns a
+// Float32Array, or null if absent / wrong dtype.
+export async function loadPtsArray(file) {
+  if (!file) return null;
+  try {
+    const { data, dtype } = parseNpy(await file.arrayBuffer());
+    return dtype === "<f4" ? data : null;
+  } catch (e) {
+    console.warn("pts sidecar load failed:", e.message);
+    return null;
+  }
+}
+
 export function jointXY(pose, frame, joint) {
   const i = (frame * N_JOINTS + joint) * 2;
   return [pose.skeleton[i], pose.skeleton[i + 1]];
