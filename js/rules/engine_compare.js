@@ -108,17 +108,39 @@ export const EngineCompareRule = {
     const s = state.renderScale || 1;
     const avail = engines(state);
     const active = activeKeys(state);
+    const labels = [["#fff", `video  f${state.frame}`]];
     active.forEach((key, i) => {
       const e = avail.find(x => x.key === key);
       if (!e) return;
       const fr = engineFrame(e.pose, state);
-      if (fr == null) return;
       const c = PALETTE[i % PALETTE.length];
+      // Flag engines NOT frame-aligned with the video (≠ state.frame ⇒ a
+      // different-timeline cache mixed in — usually a production cache that
+      // collided with the bake-off ones under the same base/round).
+      const off = fr != null && fr !== state.frame;
+      labels.push([c.ink, `${e.label}  f${fr == null ? "—" : fr}${off ? "  ⚠" : ""}`]);
+      if (fr == null) return;
       drawEngineSkeleton(ctx, e.pose, fr, {
         boneColor: c.bone, jointColor: c.ink, wristColor: c.ink,
         boneWidth: 2 * s, jointRadius: 4 * s, wristRadius: 9 * s, strokeWidth: 2 * s,
       });
     });
+    // On-canvas frame readout: video frame + each engine's drawn frame, so a
+    // skeleton/video offset is visible without reading the side panel.
+    ctx.save();
+    const fontPx = Math.round(16 * s), pad = 8 * s;
+    ctx.font = `bold ${fontPx}px ui-monospace, "SF Mono", monospace`;
+    ctx.textBaseline = "top";
+    let y = pad;
+    for (const [color, text] of labels) {
+      const w = ctx.measureText(text).width;
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(pad - 3 * s, y - 1 * s, w + 6 * s, fontPx + 3 * s);
+      ctx.fillStyle = color;
+      ctx.fillText(text, pad, y);
+      y += fontPx + 4 * s;
+    }
+    ctx.restore();
   },
 
   update(state) {
@@ -134,7 +156,15 @@ export const EngineCompareRule = {
     // (mismatch ⇒ temporal offset) and the cache's EXTRACTION dims from its
     // meta (≠ video dims, in red ⇒ this clip isn't the cache's source video —
     // e.g. an original loaded instead of the prepared clip → spatial mismatch).
-    const head = `<div class="muted">video ${vw}×${vh} · frame ${state.frame} · t=${t.toFixed(2)}s</div>`;
+    const mixed = active.some(key => {
+      const e = avail.find(x => x.key === key); if (!e) return false;
+      const fr = engineFrame(e.pose, state);
+      return fr != null && fr !== state.frame;
+    });
+    const warn = mixed
+      ? `<div style="color:#e85a5a">⚠ mixed timelines — an engine isn't frame-aligned with the video. You're likely viewing a folder that mixes production caches with the bake-off ones; point the picker at <code>bakeoff_cache/</code> only.</div>`
+      : "";
+    const head = `<div class="muted">video ${vw}×${vh} · frame ${state.frame} · t=${t.toFixed(2)}s</div>${warn}`;
     const rows = active.map((key, i) => {
       const e = avail.find(x => x.key === key);
       if (!e) return "";
