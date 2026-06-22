@@ -128,15 +128,26 @@ export const EngineCompareRule = {
     const active = activeKeys(state);
     if (!active.length) { el.innerHTML = "—"; return; }
     const t = videoTime(state);
-    const line = (label, pose, ink) => {
-      const fr = frameAt(pose, t, state, pose === state.pose);
-      const conf = j => (fr == null ? "—" : (pose.conf[fr * 17 + j] ?? 0).toFixed(2));
-      return `<span style="color:${ink}">${label}</span>: Lw ${conf(J.L_WRIST)} · Rw ${conf(J.R_WRIST)}`;
-    };
-    el.innerHTML = active.map((key, i) => {
+    const vid = (typeof document !== "undefined") && document.getElementById("video");
+    const vw = vid?.videoWidth || 0, vh = vid?.videoHeight || 0;
+    // Header: video dims + current frame. Per engine: resolved frame index
+    // (mismatch ⇒ temporal offset) and the cache's EXTRACTION dims from its
+    // meta (≠ video dims, in red ⇒ this clip isn't the cache's source video —
+    // e.g. an original loaded instead of the prepared clip → spatial mismatch).
+    const head = `<div class="muted">video ${vw}×${vh} · frame ${state.frame} · t=${t.toFixed(2)}s</div>`;
+    const rows = active.map((key, i) => {
       const e = avail.find(x => x.key === key);
-      return e ? line(e.label, e.pose, PALETTE[i % PALETTE.length].ink) : "";
-    }).filter(Boolean).join("<br>");
+      if (!e) return "";
+      const p = e.pose, ink = PALETTE[i % PALETTE.length].ink;
+      const fr = frameAt(p, t, state, p === state.pose);
+      const mw = p.meta?.width ?? p.width, mh = p.meta?.height ?? p.height;
+      const dimBad = mw && vw && (mw !== vw || mh !== vh);
+      const conf = j => (fr == null ? "—" : (p.conf[fr * 17 + j] ?? 0).toFixed(2));
+      return `<div><span style="color:${ink}">${e.label}</span> · f${fr == null ? "—" : fr}`
+        + ` · <span style="color:${dimBad ? "#e85a5a" : "#888"}">cache ${mw}×${mh}</span>`
+        + ` · Lw ${conf(J.L_WRIST)} Rw ${conf(J.R_WRIST)}</div>`;
+    }).join("");
+    el.innerHTML = head + rows;
   },
 };
 
