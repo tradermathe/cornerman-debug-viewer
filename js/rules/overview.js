@@ -34,16 +34,22 @@ let ovSel = null;   // selected source label (persists across rounds)
 // Map the viewer's current frame to the selected pose's frame by ABSOLUTE pts
 // (same alignment engine_compare uses); falls back to the start_sec+fps model.
 function ovFrame(p, state) {
-  if (p === state.pose) return state.frame;
-  const ap = state.pose.pts, bp = p.pts, f = state.frame;
-  if (ap && bp && bp.length && f < ap.length && ap[f] === ap[f]) {
-    const t = ap[f]; let lo = 0, hi = bp.length - 1;
+  if (p === state.pose) return state.frame;            // primary: canonical frame
+  // Reference time = what the VIDEO is actually displaying (currentTime), not the
+  // primary's pts — the player seeks on a uniform timeline that can drift a frame
+  // or two from a non-uniform primary cache. Match the on-screen instant.
+  const vid = document.getElementById("video");
+  const t = (vid && isFinite(vid.currentTime))
+    ? vid.currentTime
+    : (state.pose.start_sec || 0) + state.frame / state.pose.fps;
+  const bp = p.pts;
+  if (bp && bp.length) {
+    let lo = 0, hi = bp.length - 1;
     while (lo < hi) { const m = (lo + hi) >> 1; if (bp[m] < t) lo = m + 1; else hi = m; }
     let best = lo;
     if (lo > 0 && Math.abs(bp[lo - 1] - t) <= Math.abs(bp[lo] - t)) best = lo - 1;
     return best;
   }
-  const t = (state.pose.start_sec || 0) + f / state.pose.fps;
   const sf = Math.round((t - (p.start_sec || 0)) * p.fps);
   return (sf >= 0 && sf < p.n_frames) ? sf : 0;
 }
