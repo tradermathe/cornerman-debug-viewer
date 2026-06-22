@@ -6,7 +6,7 @@
 // the current frame falls inside a labelled (or model-detected) punch window.
 // Source order: state.labels (ground truth) > state.punches (ST-GCN) > none.
 
-import { JOINT_NAMES, confColor } from "../skeleton.js";
+import { JOINT_NAMES, confColor, drawSkeleton } from "../skeleton.js";
 
 let host;
 
@@ -53,6 +53,11 @@ function ovFrame(p, state) {
   const sf = Math.round((t - (p.start_sec || 0)) * p.fps);
   return (sf >= 0 && sf < p.n_frames) ? sf : 0;
 }
+// The single source the per-joint table AND the on-video overlay both follow.
+function ovSelected(state) {
+  const srcs = ovSources(state);
+  return srcs.find(s => s.label === ovSel) || srcs[0] || null;
+}
 
 export const OverviewRule = {
   id: "overview",
@@ -71,20 +76,24 @@ export const OverviewRule = {
       <div id="ov-source" class="hint" style="margin-bottom:8px"></div>
       <p class="hint">Confidence is colour-coded: green ≥ 0.5, amber ≥ 0.2, red below.
       A zero means the engine didn't detect that joint (Vision emits 0; YOLO/RTMPose
-      usually return a low-conf guess). Non-primary engines are mapped to this frame by PTS.</p>
+      usually return a low-conf guess). Non-primary engines are mapped to this frame by PTS.
+      The picked skeleton is also what's drawn on the video.</p>
       <table class="joint-table">
         <thead><tr><th>#</th><th>Joint</th><th>x</th><th>y</th><th>conf</th></tr></thead>
         <tbody id="joint-tbody"></tbody>
       </table>
     `;
     const sel = host.querySelector("#ov-engine");
-    if (sel) sel.addEventListener("change", () => { ovSel = sel.value; this.update(state); });
+    if (sel) sel.addEventListener("change", () => {
+      ovSel = sel.value;
+      this.update(state);
+      window.__viewerRedraw?.();   // repaint the overlay too, not just the table
+    });
     renderSourceLine(state);
   },
 
   update(state) {
-    const srcs = ovSources(state);
-    const src = srcs.find(s => s.label === ovSel) || srcs[0];
+    const src = ovSelected(state);
     const tbody = host.querySelector("#joint-tbody");
     if (!src) { if (tbody) tbody.innerHTML = ""; renderSourceLine(state); return; }
     const pose = src.pose, fr = ovFrame(pose, state);
@@ -107,13 +116,34 @@ export const OverviewRule = {
     renderSourceLine(state);
   },
 
-  // Top-left punch label, mimicking the labeler's HUD. Stacks one block per
+  // The base renderer (viewer.js) always draws the primary, state.pose. When a
+  // different engine is picked, suppress it here so we can draw the picked
+  // skeleton ourselves in draw() — the overlay then tracks the dropdown, not
+  // just the per-joint table. "primary" selected → {} → normal overlay.
+  skeletonStyle(state) {
+    const src = ovSelected(state);
+    if (src && src.pose !== state.pose) {
+      return { boneColor: "rgba(0,0,0,0)", jointRadius: 0, minConf: Infinity, showImputed: false };
+    }
+    return {};
+  },
+
+  // Draws the picked non-primary skeleton (when one is selected), then the
+  // top-left punch label, mimicking the labeler's HUD. Stacks one block per
   // active punch when multiple windows overlap (fast combos).
   draw(ctx, state) {
-    const aps = activePunches(state, state.frame);
-    if (aps.length === 0) return;
     const s = state.renderScale || 1;
-    drawPunchHudStack(ctx, aps, state, s);
+    // Picked a non-primary engine → draw its skeleton (PTS-mapped to this
+    // frame), confidence-coloured exactly like the primary overlay.
+    const src = ovSelected(state);
+    if (src && src.pose !== state.pose) {
+      drawSkeleton(ctx, src.pose, ovFrame(src.pose, state), {
+        boneWidth: 2 * s,
+        jointRadius: 4 * s,
+      });
+    }
+    const aps = activePunches(state, state.frame);
+    if (aps.length) drawPunchHudStack(ctx, aps, state, s);
   },
 };
 
