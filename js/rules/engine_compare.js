@@ -191,21 +191,23 @@ export const EngineCompareRule = {
 function frameOf(bPose, state) {
   const a = state.pose, f = state.frame;
   const ap = a.pts, bp = bPose.pts;
-  // Preferred: align by per-frame PTS, RELATIVE to each cache's first frame so a
-  // constant clock offset between engines can't shift it. Fixes the ±1 the
-  // uniform start_sec+fps model produces when the two caches' fps differ
-  // slightly (29.97 vs 30, keyframe-seek phase, etc.).
-  if (ap && bp && bp.length && f < ap.length && ap[f] === ap[f] && bp[0] === bp[0]) {
-    const t = ap[f] - ap[0], b0 = bp[0];
+  // Align by ABSOLUTE per-frame PTS — both caches are in the same video-time
+  // clock (confirmed: their last frames coincide). Absolute (not relative)
+  // matters because caches can start at different times: e.g. the YOLO/RTMPose
+  // extractor keeps a 1.5s pre-buffer while the Vision cache doesn't, so a
+  // relative match would shift one engine by the whole pre-buffer. This also
+  // absorbs fps drift (29.97 vs 30) → fixes the ±1.
+  if (ap && bp && bp.length && f < ap.length && ap[f] === ap[f]) {
+    const t = ap[f];
     let lo = 0, hi = bp.length - 1;
-    while (lo < hi) {                      // first index with (bp-b0) >= t
+    while (lo < hi) {                      // first index with bp >= t
       const mid = (lo + hi) >> 1;
-      if (bp[mid] - b0 < t) lo = mid + 1; else hi = mid;
+      if (bp[mid] < t) lo = mid + 1; else hi = mid;
     }
     let best = lo;
-    if (lo > 0 && Math.abs((bp[lo - 1] - b0) - t) <= Math.abs((bp[lo] - b0) - t)) best = lo - 1;
-    const span = bp[bp.length - 1] - b0, tol = 0.75 / (bPose.fps || 30);
-    return (t < -tol || t > span + tol) ? null : best;   // out of B's coverage
+    if (lo > 0 && Math.abs(bp[lo - 1] - t) <= Math.abs(bp[lo] - t)) best = lo - 1;
+    const tol = 0.75 / (bPose.fps || 30);
+    return (t < bp[0] - tol || t > bp[bp.length - 1] + tol) ? null : best;
   }
   // Fallback: uniform-fps model.
   const t = (a.start_sec || 0) + f / a.fps;
