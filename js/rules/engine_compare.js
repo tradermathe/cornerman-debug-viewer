@@ -111,7 +111,7 @@ export const EngineCompareRule = {
     active.forEach((key, i) => {
       const e = avail.find(x => x.key === key);
       if (!e) return;
-      const fr = frameAt(e.pose, videoTime(state), state, e.pose === state.pose);
+      const fr = engineFrame(e.pose, state);
       if (fr == null) return;
       const c = PALETTE[i % PALETTE.length];
       drawEngineSkeleton(ctx, e.pose, fr, {
@@ -139,7 +139,7 @@ export const EngineCompareRule = {
       const e = avail.find(x => x.key === key);
       if (!e) return "";
       const p = e.pose, ink = PALETTE[i % PALETTE.length].ink;
-      const fr = frameAt(p, t, state, p === state.pose);
+      const fr = engineFrame(p, state);
       const mw = p.meta?.width ?? p.width, mh = p.meta?.height ?? p.height;
       const dimBad = mw && vw && (mw !== vw || mh !== vh);
       const conf = j => (fr == null ? "—" : (p.conf[fr * 17 + j] ?? 0).toFixed(2));
@@ -150,6 +150,26 @@ export const EngineCompareRule = {
     el.innerHTML = head + rows;
   },
 };
+
+// Resolve which frame of `pose` to draw at the current moment.
+//
+// For caches that are frame-aligned with the video (same clip → same fps,
+// start_sec and length, as in the bake-off) the answer is EXACT: it's the
+// canonical `state.frame` — the same index the base renderer uses and the
+// frame the player actually displays (set on seek, rVFC-synced on playback).
+// Using that avoids the `nearest_PTS(currentTime)` rounding that makes the
+// overlay lead the video by a frame, and keeps every aligned engine locked to
+// the same index regardless of whether its PTS sidecar loaded.
+//
+// Only when an engine has a DIFFERENT timeline (e.g. production caches with a
+// 1.5s pre-buffer or NTSC fps drift) do we fall back to PTS/time alignment.
+function engineFrame(pose, state) {
+  const aligned = pose.n_frames === state.n_frames
+    && Math.abs((pose.fps || 0) - (state.fps || 0)) < 0.01
+    && Math.abs((pose.start_sec || 0) - (state.start_sec || 0)) < 1e-3;
+  if (aligned) return Math.min(Math.max(state.frame, 0), pose.n_frames - 1);
+  return frameAt(pose, videoTime(state), state, pose === state.pose);
+}
 
 // ── time alignment (per-engine PTS, falling back to fps model) ──────────────
 function videoTime(state) {
