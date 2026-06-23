@@ -25,7 +25,13 @@ const BIG = new Set(["left_wrist", "right_wrist", "left_ankle", "right_ankle", "
 
 let host = null;
 let rowEls = [];                 // 33 <tr>, built once in mount()
-let enabled = new Set(GROUPS.filter(g => g[2]).map(g => g[0]));  // body+feet+hand_anchor on
+// Per-joint overlay visibility is the real gate — each joint has its own
+// checkbox in the table. The region checkboxes are bulk select/deselect over a
+// region's joints; default-on regions seed the initial selection.
+const DEFAULT_ON_TAGS = new Set(GROUPS.filter(g => g[2]).map(g => g[0]));  // body+feet+hand_anchor
+let jointOn = new Set();
+for (let j = 0; j < J; j++) if (DEFAULT_ON_TAGS.has(TAGS[j])) jointOn.add(j);
+let regionCbs = {};              // tag → region checkbox, for two-way sync
 let THR = 0;                     // visibility gate (0 = draw every joint)
 let showLabels = false;
 let hoverJoint = -1;             // table-hovered joint → ringed in the overlay
@@ -62,9 +68,26 @@ function grade(v) {
 }
 function fmt(v, d = 2) { return (v !== v) ? "—" : v.toFixed(d); }
 
-function applyRegionVisibility() {
+function setJoint(j, on) { if (on) jointOn.add(j); else jointOn.delete(j); }
+
+// Reflect jointOn into the per-joint checkboxes (+ dim rows that are off).
+function syncRowChecks() {
   for (let j = 0; j < J; j++) {
-    if (rowEls[j]) rowEls[j].style.display = enabled.has(TAGS[j]) ? "" : "none";
+    const tr = rowEls[j];
+    if (!tr || !tr.__check) continue;
+    tr.__check.checked = jointOn.has(j);
+    tr.style.opacity = jointOn.has(j) ? "" : "0.4";
+  }
+}
+
+// A region box is checked when all its joints are on, indeterminate when some.
+function syncRegionChecks() {
+  for (const tag in regionCbs) {
+    let on = 0, total = 0;
+    for (let j = 0; j < J; j++) if (TAGS[j] === tag) { total++; if (jointOn.has(j)) on++; }
+    const cb = regionCbs[tag];
+    cb.checked = total > 0 && on === total;
+    cb.indeterminate = on > 0 && on < total;
   }
 }
 
@@ -84,7 +107,7 @@ function renderValues(state) {
   const base = f == null ? -1 : f * J * CH;
   for (let j = 0; j < J; j++) {
     const tr = rowEls[j];
-    if (!tr || tr.style.display === "none") continue;
+    if (!tr) continue;
     const cells = tr.__cells;
     if (base < 0) { cells.vis.textContent = cells.pres.textContent = cells.z.textContent = cells.zw.textContent = "—"; continue; }
     const o = base + j * CH;
@@ -138,10 +161,12 @@ export const BlazePoseInspectorRule = {
       </table></div>
       <p class="hint" style="margin-top:8px">vis = visible-vs-occluded · pres = in-frame-vs-cropped (per-joint, BlazePose's
         only confidence signals). z = image-space depth (hip-relative, x-scaled, − toward camera);
-        z·m = world depth in metres. Hover a row to ring that joint on the video.</p>
+        z·m = world depth in metres. Tick a joint's box to show/hide just that joint on
+        the overlay; region boxes + all/none bulk-toggle. Hover a row to ring that joint.</p>
     `;
 
-    // Region toggles (blazepose33 has body / feet / hand_anchor / hand_other).
+    // Region checkboxes = bulk select/deselect every joint in that region;
+    // the per-joint checkboxes in the table give exact control.
     const tg = host.querySelector("#bp-toggles");
     const present = new Set(TAGS);
     for (const [tag, label] of GROUPS) {
@@ -149,17 +174,29 @@ export const BlazePoseInspectorRule = {
       const lab = document.createElement("label");
       lab.style.cssText = "display:flex;gap:4px;align-items:center;cursor:pointer";
       const cb = document.createElement("input");
-      cb.type = "checkbox"; cb.checked = enabled.has(tag); cb.dataset.tag = tag;
+      cb.type = "checkbox"; cb.dataset.tag = tag;
       cb.addEventListener("change", () => {
-        if (cb.checked) enabled.add(tag); else enabled.delete(tag);
-        applyRegionVisibility();
-        renderValues(state);
+        const on = cb.checked;
+        for (let j = 0; j < J; j++) if (TAGS[j] === tag) setJoint(j, on);
+        cb.indeterminate = false;
+        syncRowChecks();
         forceRedraw();
       });
+      regionCbs[tag] = cb;
       lab.appendChild(cb);
       lab.appendChild(document.createTextNode(label));
       tg.appendChild(lab);
     }
+    // all / none over every joint.
+    const mkBtn = (text, fn) => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      b.style.cssText = "font-size:11px;padding:1px 8px;cursor:pointer;background:#222;color:#ccc;border:1px solid #3a3a3a;border-radius:4px";
+      b.addEventListener("click", fn);
+      return b;
+    };
+    tg.appendChild(mkBtn("all", () => { for (let j = 0; j < J; j++) jointOn.add(j); syncRowChecks(); syncRegionChecks(); forceRedraw(); }));
+    tg.appendChild(mkBtn("none", () => { jointOn.clear(); syncRowChecks(); syncRegionChecks(); forceRedraw(); }));
 
     // Build the 33 rows ONCE; updates only set text/colour afterwards.
     const tbody = host.querySelector("#bp-tbody");
@@ -171,6 +208,20 @@ export const BlazePoseInspectorRule = {
       const nameTd = document.createElement("td");
       nameTd.style.cssText = "text-align:left;padding:2px 6px;white-space:nowrap";
       nameTd.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${dot};margin-right:5px;vertical-align:middle"></span>${j} ${NAMES[j]}`;
+      // Per-joint show/hide checkbox — exact control over what's drawn.
+      const jc = document.createElement("input");
+      jc.type = "checkbox";
+      jc.checked = jointOn.has(j);
+      jc.style.cssText = "margin-right:6px;vertical-align:middle;cursor:pointer";
+      jc.addEventListener("change", () => {
+        setJoint(j, jc.checked);
+        tr.style.opacity = jc.checked ? "" : "0.4";
+        syncRegionChecks();
+        forceRedraw();
+      });
+      nameTd.prepend(jc);
+      tr.__check = jc;
+      tr.style.opacity = jc.checked ? "" : "0.4";
       const mk = () => { const td = document.createElement("td"); td.style.cssText = "text-align:right;padding:2px 6px"; td.textContent = "—"; return td; };
       const vis = mk(), pres = mk(), z = mk(), zw = mk();
       tr.append(nameTd, vis, pres, z, zw);
@@ -185,7 +236,8 @@ export const BlazePoseInspectorRule = {
     thr.addEventListener("input", () => { THR = parseFloat(thr.value); thrOut.textContent = THR.toFixed(2); forceRedraw(); });
     host.querySelector("#bp-labels").addEventListener("change", e => { showLabels = e.target.checked; forceRedraw(); });
 
-    applyRegionVisibility();
+    syncRowChecks();
+    syncRegionChecks();
     renderValues(state);
   },
 
@@ -209,7 +261,7 @@ export const BlazePoseInspectorRule = {
     // Bones.
     ctx.lineWidth = 2 * s;
     for (const [a, bb, tag] of EDGES) {
-      if (!enabled.has(tag)) continue;
+      if (!jointOn.has(a) || !jointOn.has(bb)) continue;
       const va = vis(a), vb = vis(bb);
       if (!(va >= THR) || !(vb >= THR)) continue;
       const ax = px(a), ay = py(a), bx = px(bb), by = py(bb);
@@ -224,7 +276,7 @@ export const BlazePoseInspectorRule = {
     ctx.font = `${Math.round(10 * s)}px ui-monospace, "SF Mono", monospace`;
     ctx.textBaseline = "middle";
     for (let j = 0; j < J; j++) {
-      if (!enabled.has(TAGS[j])) continue;
+      if (!jointOn.has(j)) continue;
       const vj = vis(j);
       if (!(vj >= THR)) continue;
       const x = px(j), y = py(j);
