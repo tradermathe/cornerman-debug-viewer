@@ -51,19 +51,43 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   const round_start_sec = Number(meta.start_sec ?? start_sec);
   const pre_buffer_sec = Math.max(0, round_start_sec - start_sec);
   const layout = meta.layout || "coco17";
-  if (layout !== "coco17") {
-    throw new Error(`Unsupported layout '${layout}' — only coco17 is wired up.`);
+  if (layout !== "coco17" && layout !== "blazepose33") {
+    throw new Error(`Unsupported layout '${layout}' — only coco17 and blazepose33 are wired up.`);
   }
 
   const { data, shape, dtype } = parseNpy(await npyFile.arrayBuffer());
-  if (shape.length !== 3 || shape[1] !== 17 || shape[2] !== 3) {
+  if (dtype !== "<f4") {
+    throw new Error(`Expected float32 LE in .npy, got dtype '${dtype}'.`);
+  }
+
+  // BlazePose-33 production cache (blazepose_pose_cache/, shape (N,33,8) =
+  // [x, y, z, x_world_m, y_world_m, z_world_m, visibility, presence]) is read
+  // THROUGH a 33→COCO-17 remap so the rest of the viewer — and the
+  // engine-compare lens — sees an ordinary COCO-17 engine. x,y are already
+  // image-normalised like coco17; `conf` is BlazePose's per-joint `visibility`
+  // (channel 6), its cleanest occlusion signal. The extra 33-joint data (feet,
+  // world-3D) rides the schema-aware skeleton_compare lens, not this path.
+  const isBlaze = layout === "blazepose33" ||
+                  (shape.length === 3 && shape[1] === 33 && shape[2] === 8);
+  if (isBlaze) {
+    if (shape.length !== 3 || shape[1] !== 33 || shape[2] !== 8) {
+      throw new Error(
+        `Expected .npy shape (N, 33, 8) for blazepose33 cache, got (${shape.join(", ")}).`
+      );
+    }
+  } else if (shape.length !== 3 || shape[1] !== 17 || shape[2] !== 3) {
     throw new Error(
       `Expected .npy shape (N, 17, 3) for coco17 cache, got (${shape.join(", ")}).`
     );
   }
-  if (dtype !== "<f4") {
-    throw new Error(`Expected float32 LE in .npy, got dtype '${dtype}'.`);
-  }
+
+  // COCO-17 joint j ← BlazePose-33 source index (mouth/hands/feet-extra dropped).
+  const BLAZE_TO_COCO = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+  const J_IN    = isBlaze ? 33 : 17;
+  const CH      = isBlaze ? 8  : 3;
+  const CONF_CH = isBlaze ? 6  : 2;   // BlazePose visibility vs coco17 conf
+  // Base offset into `data` for the source joint backing COCO joint j at frame f.
+  const srcBase = (f, j) => (f * J_IN + (isBlaze ? BLAZE_TO_COCO[j] : j)) * CH;
 
   const n_frames = shape[0];
   const w = videoSize?.width || meta.width || 1;
@@ -72,10 +96,13 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   // Detect normalised (0..1) vs pixel coords by probing the first ~20 frames.
   // The cached files are normalised; the check is cheap insurance.
   let maxXY = 0;
-  const probe = Math.min(20 * 17 * 3, data.length);
-  for (let i = 0; i < probe; i += 3) {
-    if (data[i]   > maxXY) maxXY = data[i];
-    if (data[i+1] > maxXY) maxXY = data[i+1];
+  const probeFrames = Math.min(20, n_frames);
+  for (let f = 0; f < probeFrames; f++) {
+    for (let j = 0; j < N_JOINTS; j++) {
+      const b = srcBase(f, j);
+      if (data[b]   > maxXY) maxXY = data[b];
+      if (data[b+1] > maxXY) maxXY = data[b+1];
+    }
   }
   const normalised = maxXY <= 1.5;
   const sx = normalised ? w : 1;
@@ -107,10 +134,10 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   // originally missing).
   for (let f = 0; f < n_frames; f++) {
     for (let j = 0; j < N_JOINTS; j++) {
-      const base = (f * 17 + j) * 3;
+      const base = srcBase(f, j);
       const rx = data[base + 0];
       const ry = data[base + 1];
-      const rc = data[base + 2];
+      const rc = data[base + CONF_CH];
       // `x !== x` is the standard NaN check that works on raw Float32Array
       // reads without a function call. Faster than Number.isNaN inside this
       // hot loop.
