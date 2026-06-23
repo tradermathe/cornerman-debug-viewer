@@ -50,6 +50,7 @@
 
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
+import { SCHEMAS } from "./_skeleton_schemas.js";
 
 // blaze33 channels: 0 x  1 y  2 z  3 xw  4 yw  5 zw  6 visibility  7 presence
 const CH = 8, X = 0, Y = 1, VIS = 6, NJ = 33;
@@ -59,6 +60,7 @@ const L_SHOULDER = 11, R_SHOULDER = 12, L_WRIST = 15, R_WRIST = 16;
 const L_HIP = 23, R_HIP = 24;
 // All head landmarks: nose(0), eye inner/main/outer (1-6), ears(7,8), mouth(9,10).
 const HEAD_JOINTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const NAMES = SCHEMAS.blazepose33.names;   // joint index → landmark name (for labels)
 
 const MIN_TORSO_PX = 5;
 const DEFAULTS = {
@@ -127,15 +129,15 @@ function jointAt(b, base, j, w, h) {
 // y is the mean of the visible points — only used to place the marker; the metric
 // uses x. minX/maxX are returned so the overlay can show the span.
 function headPoint(b, base, w, h) {
-  let minX = Infinity, maxX = -Infinity, sy = 0, n = 0;
+  let minX = Infinity, maxX = -Infinity, minJ = -1, maxJ = -1, minP = null, maxP = null, sy = 0, n = 0;
   for (const j of HEAD_JOINTS) {
     const p = jointAt(b, base, j, w, h);
     if (!p) continue;
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
+    if (p.x < minX) { minX = p.x; minJ = j; minP = p; }
+    if (p.x > maxX) { maxX = p.x; maxJ = j; maxP = p; }
     sy += p.y; n++;
   }
-  return n ? { x: (minX + maxX) / 2, y: sy / n, n, minX, maxX } : null;
+  return n ? { x: (minX + maxX) / 2, y: sy / n, n, minX, maxX, minJ, maxJ, minP, maxP } : null;
 }
 
 function torsoAt(b, base, w, h) {
@@ -356,6 +358,10 @@ export const HeadOffCenterLensRule = {
   // Needs the full 33-joint cache — mouth/eye landmarks aren't in the COCO-17 remap.
   requires(slot) { return !!(slot && slot.blazepose); },
 
+  // Hide the base COCO-17 head joints (nose + eyes + ears) so the head shows ONLY
+  // the two extreme landmarks this lens actually uses.
+  skeletonStyle() { return { hideJoints: new Set([0, 1, 2, 3, 4]) }; },
+
   mount(_host, state) {
     host = _host;
     host.innerHTML = `
@@ -377,6 +383,7 @@ export const HeadOffCenterLensRule = {
         <div class="metric"><div class="metric-label">head off · mid</div><div class="metric-val" id="hoc-offmid">—</div></div>
         <div class="metric"><div class="metric-label">head off · hip</div><div class="metric-val" id="hoc-offhip">—</div></div>
       </div>
+      <div id="hoc-extremes" class="hint" style="font-size:11px;margin:2px 0 6px">—</div>
       <div class="metric">
         <div class="metric-label">Active straight — head_travel</div>
         <div class="metric-val" id="hoc-live-travel">—</div>
@@ -453,6 +460,9 @@ function renderLive(state) {
     const off = (T && f != null) ? offsetAt(b, f * NJ * CH, b.width, b.height) : null;
     setText("hoc-offmid", off ? `${fmtSigned(off.offMid / T)} T` : "—");
     setText("hoc-offhip", off ? `${fmtSigned(off.offHip / T)} T` : "—");
+    setText("hoc-extremes", off
+      ? `extremes: <code>${NAMES[off.head.minJ]}</code> ↔ <code>${NAMES[off.head.maxJ]}</code> · ${off.head.n}/11 head pts`
+      : `<span class="muted">head not visible</span>`);
 
     const c = classifiedAtFrame(state.frame);
     if (!c) {
@@ -500,19 +510,32 @@ function drawOverlay(ctx, state) {
     ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(torso.midX, head.y); ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // Head point.
+    // The two extreme head landmarks (leftmost / rightmost) whose midpoint is the
+    // head point — drawn at their real positions as open rings and labelled, so
+    // it's clear exactly which landmarks are driving the read.
+    if (head.minP && head.maxP) {
+      ctx.strokeStyle = COLOR_HEAD;
+      ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5 * s;
+      ctx.beginPath(); ctx.moveTo(head.minP.x, head.minP.y); ctx.lineTo(head.maxP.x, head.maxP.y); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.font = `${Math.round(11 * s)}px ui-monospace, "SF Mono", monospace`;
+      const tag = (p, name, toLeft) => {
+        ctx.strokeStyle = COLOR_HEAD; ctx.lineWidth = 2 * s;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 5 * s, 0, Math.PI * 2); ctx.stroke();
+        const tw = ctx.measureText(name).width;
+        const lx = toLeft ? p.x - tw - 12 * s : p.x + 12 * s;
+        const ly = p.y - 8 * s;
+        ctx.fillStyle = "rgba(0,0,0,0.70)"; ctx.fillRect(lx - 3 * s, ly, tw + 6 * s, 15 * s);
+        ctx.fillStyle = COLOR_HEAD; ctx.fillText(name, lx, ly + 11 * s);
+      };
+      tag(head.minP, NAMES[head.minJ], true);    // leftmost → label to the left
+      tag(head.maxP, NAMES[head.maxJ], false);   // rightmost → label to the right
+    }
+
+    // Head midpoint — the point the metric actually uses (filled, white outline).
     ctx.fillStyle = COLOR_HEAD;
     ctx.beginPath(); ctx.arc(head.x, head.y, 6 * s, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.65)"; ctx.lineWidth = 1.5 * s; ctx.stroke();
-
-    // Head extent — the leftmost/rightmost head landmarks whose midpoint is head x.
-    if (Number.isFinite(head.minX) && head.maxX > head.minX) {
-      ctx.strokeStyle = COLOR_HEAD; ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5 * s;
-      for (const ex of [head.minX, head.maxX]) {
-        ctx.beginPath(); ctx.moveTo(ex, head.y - 7 * s); ctx.lineTo(ex, head.y + 7 * s); ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-    }
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5 * s; ctx.stroke();
 
     // Live offset label by the head.
     const T = calib.torsoBaseline;
