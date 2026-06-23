@@ -57,7 +57,7 @@ import { qualityOf, qualityColor, qualityBand } from "./_score.js";
 const CH = 8, X = 0, Y = 1, VIS = 6, NJ = 33;
 
 // BlazePose-33 joint indices.
-const L_SHOULDER = 11, R_SHOULDER = 12, L_WRIST = 15, R_WRIST = 16;
+const L_SHOULDER = 11, R_SHOULDER = 12;
 const L_HIP = 23, R_HIP = 24;
 // All head landmarks: nose(0), eye inner/main/outer (1-6), ears(7,8), mouth(9,10).
 const HEAD_JOINTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -69,12 +69,6 @@ const DEFAULTS = {
   scoreTarget:    0.28,          // head off-center (torso) for full marks; 0 = on the line
   scoreSteepness: 10,            // sigmoid k (shared shape with hit_height/arm_extension)
   minVis:         0.30,          // per-joint BlazePose visibility gate
-};
-
-// orthodox lead = L, southpaw lead = R.
-const SIDE_FOR = {
-  lead: { orthodox: "L", southpaw: "R" },
-  rear: { orthodox: "R", southpaw: "L" },
 };
 
 const COLOR_CENTER = "#ffd24a";   // body-center vertical line (mid anchor)
@@ -176,81 +170,44 @@ function calibrate(b, w, h) {
 }
 
 // --- punches --------------------------------------------------------------
-// lead/rear from explicit d.hand when present, else inferred from punch_type
-// (jab/lead = lead, cross/rear = rear); stance flips L/R.
-function sideFor(d) {
-  let role = (d.hand === "lead" || d.hand === "rear") ? d.hand : null;
-  if (!role) {
-    const t = String(d.punch_type || "").toLowerCase();
-    if (/(^|_)jab(_|$)/.test(t) || t.startsWith("lead")) role = "lead";
-    else if (/(^|_)cross(_|$)/.test(t) || t.startsWith("rear")) role = "rear";
-  }
-  if (!role) return null;
-  const stance = d.stance === "southpaw" ? "southpaw" : "orthodox";
-  return SIDE_FOR[role][stance];
-}
 function isBody(d) { return /_body$/.test(String(d.punch_type || "").toLowerCase()); }
 
-// Frame of max wrist-from-shoulder distance in the window (contact moment).
-// Iterates PRIMARY frames (so the seek target is primary-timeline) and reads
-// geometry at the mapped blaze frame.
-function peakFrame(b, state, sP, eP, side, w, h) {
-  const wj = side === "L" ? L_WRIST : R_WRIST;
-  const sj = side === "L" ? L_SHOULDER : R_SHOULDER;
-  let bestP = -1, bestB = -1, bestD = -1;
-  for (let pf = sP; pf <= eP; pf++) {
-    const bf = blazeFrame(b, state, pf);
-    if (bf == null) continue;
-    const base = bf * NJ * CH;
-    const wp = jointAt(b, base, wj, w, h);
-    const sp = jointAt(b, base, sj, w, h);
-    if (!wp || !sp) continue;
-    const d = Math.hypot(wp.x - sp.x, wp.y - sp.y);
-    if (d > bestD) { bestD = d; bestP = pf; bestB = bf; }
-  }
-  return bestP >= 0 ? { primary: bestP, blaze: bestB, extension: bestD } : null;
-}
-
 function classifyPunch(b, state, d, idx, T, w, h) {
-  const side = sideFor(d);
   const base = {
-    idx, det: d, side, body: isBody(d),
+    idx, det: d, body: isBody(d),
     timestamp: d.timestamp, punch_type: d.punch_type || "?",
   };
-  if (!side) return { ...base, skip: "?hand" };
 
   // Axiality gate — join by punch_uuid, fall back to on-device per-punch axiality.
   const ax = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality;
   if (ax == null || !Number.isFinite(ax)) return { ...base, axiality: null, skip: "axial?" };
   if (ax > cfg.axialityMax) return { ...base, axiality: ax, skip: "axial" };
 
-  const sP = Math.max(0, d.start_frame);
-  const eP = d.end_frame;
-  const peak = peakFrame(b, state, sP, eP, side, w, h);
-  if (!peak) return { ...base, axiality: ax, skip: "no peak" };
-
-  // start offset = first usable frame from the window start onward.
-  let startOff = null, startP = sP;
+  // Walk the whole punch window, recording head off-center (mid anchor) per frame.
+  // The score uses the FURTHEST the head gets off the line anywhere in the window
+  // (its biggest excursion) — that frame is the "peak" we mark and seek to.
+  const sP = Math.max(0, d.start_frame), eP = d.end_frame;
+  const series = [];                 // { frame (primary), dist (signed, torso) }
+  let peakPrimary = -1, peakDist = 0, peakAbs = -1, peakHead = null, startDist = null;
   for (let pf = sP; pf <= eP; pf++) {
     const bf = blazeFrame(b, state, pf);
     if (bf == null) continue;
     const o = offsetAt(b, bf * NJ * CH, w, h);
-    if (o) { startOff = o; startP = pf; break; }
+    if (!o) continue;
+    const dist = o.offMid / T;
+    series.push({ frame: pf, dist });
+    if (startDist == null) startDist = dist;
+    if (Math.abs(dist) > peakAbs) { peakAbs = Math.abs(dist); peakDist = dist; peakPrimary = pf; peakHead = o.head; }
   }
-  const peakOff = offsetAt(b, peak.blaze * NJ * CH, w, h);
-  if (!startOff || !peakOff) return { ...base, axiality: ax, peakPrimary: peak.primary, skip: "no head/torso" };
+  if (peakPrimary < 0) return { ...base, axiality: ax, skip: "no head/torso" };
 
-  const peakMid = peakOff.offMid / T;
-  const sc = scoreOffCenter(peakMid);   // scored on |off-center at peak|
+  const sc = scoreOffCenter(peakDist);   // scored on the furthest off-center in the window
   return {
     ...base, axiality: ax, skip: "",
-    startPrimary: startP, peakPrimary: peak.primary,
-    travelMid: (peakOff.offMid - startOff.offMid) / T,
-    travelHip: (peakOff.offHip - startOff.offHip) / T,
-    peakMid,
-    peakHip: peakOff.offHip / T,
+    series, startDist,
+    peakPrimary, peakDist,
     score: sc.quality, mistake: sc.mistake,
-    headAtPeak: peakOff.head,
+    headAtPeak: peakHead,
   };
 }
 
@@ -312,8 +269,6 @@ function setText(id, html) { const el = host?.querySelector("#" + id); if (el) e
 const SKIP_LABEL = {
   "axial":  "axial (skipped)",
   "axial?": "no axiality",
-  "?hand":  "unknown hand",
-  "no peak": "no confident peak",
   "no head/torso": "no head/torso",
 };
 
@@ -357,19 +312,18 @@ function renderTable(state) {
     if (c.skip) {
       return `<tr data-frame="${seek}" style="cursor:pointer">
         <td>${c.idx + 1}</td><td>${t}</td><td>${c.punch_type}</td>
-        <td colspan="3" class="muted">${SKIP_LABEL[c.skip] || c.skip}</td></tr>`;
+        <td colspan="2" class="muted">${SKIP_LABEL[c.skip] || c.skip}</td></tr>`;
     }
     const q = c.score, col = qualityColor(q);
     return `<tr data-frame="${seek}" style="cursor:pointer">
       <td>${c.idx + 1}</td><td>${t}</td><td>${c.punch_type}${c.body ? ' <span class="muted">b</span>' : ''}</td>
       <td class="num" style="color:${col};font-weight:700">${q.toFixed(0)}</td>
-      <td class="num">${fmtSigned(c.peakMid)}</td>
-      <td class="num">${fmtSigned(c.travelMid)}</td></tr>`;
+      <td class="num">${fmtSigned(c.peakDist)}</td></tr>`;
   }).join("");
 
   tableEl.innerHTML = `
     <table class="joint-table">
-      <thead><tr><th>#</th><th>t</th><th>type</th><th>score</th><th>off·mid</th><th>travel</th></tr></thead>
+      <thead><tr><th>#</th><th>t</th><th>type</th><th>score</th><th>peak·dist</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 }
@@ -405,8 +359,8 @@ export const HeadOffCenterLensRule = {
       <h3>Live</h3>
       <div class="metric-grid">
         <div class="metric"><div class="metric-label">torso baseline</div><div class="metric-val" id="hoc-torso">—</div></div>
-        <div class="metric"><div class="metric-label">head off · mid</div><div class="metric-val" id="hoc-offmid">—</div></div>
-        <div class="metric"><div class="metric-label">head off · hip</div><div class="metric-val" id="hoc-offhip">—</div></div>
+        <div class="metric"><div class="metric-label">distance · mid</div><div class="metric-val" id="hoc-offmid">—</div></div>
+        <div class="metric"><div class="metric-label">distance · hip</div><div class="metric-val" id="hoc-offhip">—</div></div>
       </div>
       <div id="hoc-extremes" class="hint" style="font-size:11px;margin:2px 0 6px">—</div>
       <div class="metric">
@@ -414,6 +368,8 @@ export const HeadOffCenterLensRule = {
         <div class="metric-val" id="hoc-live-travel">—</div>
         <div class="metric-sub" id="hoc-live-sub"></div>
       </div>
+      <div class="metric-label" style="margin-top:8px">Punch distance trace (torso vs frame)</div>
+      <div id="hoc-graph" class="hint" style="margin-top:2px">—</div>
 
       <h3>Per-punch</h3>
       <div id="hoc-summary" class="hint"></div>
@@ -505,9 +461,10 @@ function renderLive(state) {
       const col = qualityColor(c.score);
       setText("hoc-live-travel", `<span style="color:${col};font-weight:700">${c.score.toFixed(0)}</span> <span style="color:${col};font-size:12px;font-weight:700">${qualityBand(c.score).toUpperCase()}</span>`);
       setText("hoc-live-sub",
-        `off·mid ${fmtSigned(c.peakMid)} T · travel ${fmtSigned(c.travelMid)} · ax ${c.axiality.toFixed(2)} · ` +
+        `peak dist ${fmtSigned(c.peakDist)} T · ax ${c.axiality.toFixed(2)} · ` +
         (c.peakPrimary === state.frame ? `<span class="muted">at peak</span>` : `<a href="#" data-frame="${c.peakPrimary}">→ peak f${c.peakPrimary}</a>`));
     }
+    setText("hoc-graph", graphSVG(c && !c.skip ? c : null, state.frame));
 }
 
 function drawOverlay(ctx, state) {
@@ -589,7 +546,7 @@ function drawOverlay(ctx, state) {
         ctx.beginPath(); ctx.arc(c.headAtPeak.x, c.headAtPeak.y, 22 * s, 0, Math.PI * 2); ctx.stroke();
         ctx.globalAlpha = 1;
       }
-      banner(ctx, `${c.punch_type} → ${c.score.toFixed(0)} ${qualityBand(c.score).toUpperCase()}  ·  off ${fmtSigned(c.peakMid)} torso`, col, s);
+      banner(ctx, `${c.punch_type} → ${c.score.toFixed(0)} ${qualityBand(c.score).toUpperCase()}  ·  peak dist ${fmtSigned(c.peakDist)} torso`, col, s);
     } else if (c && (c.skip === "axial" || c.skip === "axial?")) {
       banner(ctx, `${c.punch_type} → axial — head read skipped`, "#9aa0a6", s);
     }
@@ -605,4 +562,39 @@ function banner(ctx, text, col, s) {
   ctx.fillStyle = "rgba(0,0,0,0.78)"; ctx.fillRect(bx, by, bw, bh);
   ctx.strokeStyle = col; ctx.lineWidth = 2 * s; ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
   ctx.fillStyle = col; ctx.fillText(text, bx + 12 * s, by + fontPx + 4 * s);
+}
+
+// Mini line chart of head off-center distance (mid anchor) across the active
+// punch window, with the score peak (furthest excursion) dot, the ±target lines,
+// and a cursor at the current frame.
+function graphSVG(c, currentFrame) {
+  if (!c || !c.series || c.series.length < 2) {
+    return `<span class="muted">scrub to a scored straight to see its distance trace</span>`;
+  }
+  const W = 260, Hh = 96, padX = 6, padT = 8, padB = 16;
+  const pts = c.series;
+  const f0 = pts[0].frame, f1 = pts[pts.length - 1].frame, fSpan = Math.max(1, f1 - f0);
+  const maxAbs = Math.max(cfg.scoreTarget * 1.15, ...pts.map(p => Math.abs(p.dist)));
+  const px = fr => padX + ((fr - f0) / fSpan) * (W - 2 * padX);
+  const py = di => padT + (1 - (di + maxAbs) / (2 * maxAbs)) * (Hh - padT - padB);
+  const col = qualityColor(c.score);
+  const f = n => n.toFixed(1);
+  const line = pts.map(p => `${f(px(p.frame))},${f(py(p.dist))}`).join(" ");
+  const y0 = py(0), yT = py(cfg.scoreTarget), yTn = py(-cfg.scoreTarget);
+  const pkx = px(c.peakPrimary), pky = py(c.peakDist);
+  const cf = Math.max(f0, Math.min(f1, currentFrame)), cx = px(cf);
+  const MONO = `font-size="9" font-family="ui-monospace,monospace"`;
+  return `
+    <svg viewBox="0 0 ${W} ${Hh}" width="100%" style="display:block">
+      <line x1="${padX}" x2="${W - padX}" y1="${f(y0)}" y2="${f(y0)}" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+      <line x1="${padX}" x2="${W - padX}" y1="${f(yT)}" y2="${f(yT)}" stroke="${col}" stroke-width="0.75" stroke-dasharray="3 3" opacity="0.55"/>
+      <line x1="${padX}" x2="${W - padX}" y1="${f(yTn)}" y2="${f(yTn)}" stroke="${col}" stroke-width="0.75" stroke-dasharray="3 3" opacity="0.55"/>
+      <line x1="${f(cx)}" x2="${f(cx)}" y1="${padT}" y2="${Hh - padB}" stroke="#fff" stroke-width="1" opacity="0.5"/>
+      <polyline points="${line}" fill="none" stroke="${COLOR_HEAD}" stroke-width="1.5"/>
+      <circle cx="${f(pkx)}" cy="${f(pky)}" r="3.5" fill="${col}"/>
+      <text x="${padX}" y="${Hh - 4}" fill="rgba(255,255,255,0.5)" ${MONO}>f${f0}</text>
+      <text x="${W - padX}" y="${Hh - 4}" text-anchor="end" fill="rgba(255,255,255,0.5)" ${MONO}>f${f1}</text>
+      <text x="${f(Math.min(W - 36, Math.max(24, pkx)))}" y="${f(Math.max(9, pky - 6))}" text-anchor="middle" fill="${col}" ${MONO}>peak ${fmtSigned(c.peakDist)}</text>
+      <text x="${W - padX}" y="${f(yT - 2)}" text-anchor="end" fill="${col}" font-size="8" font-family="ui-monospace,monospace" opacity="0.7">target ${cfg.scoreTarget.toFixed(2)}</text>
+    </svg>`;
 }
