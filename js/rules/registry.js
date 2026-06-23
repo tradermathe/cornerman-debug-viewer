@@ -15,6 +15,7 @@ import { GuardDropRule } from "./guard_drop.js";
 import { GuardHeightRule } from "./guard_height.js";
 import { ArmExtensionRule } from "./arm_extension.js";
 import { HandReturnPathRule } from "./hand_return_path.js";
+import { HeadOffCenterLensRule } from "./head_offcenter_lens.js";
 import { HitHeightRule } from "./hit_height.js";
 import { EngineCompareRule } from "./engine_compare.js";
 import { BlazePoseInspectorRule } from "./blazepose_inspector.js";
@@ -47,6 +48,7 @@ export const RULES = [
   GuardDropRule,
   GuardHeightRule,
   HandReturnPathRule,
+  HeadOffCenterLensRule,
   HipRotationModelRule,
   HipRotationReviewRule,
   HitHeightRule,
