@@ -17,6 +17,7 @@ import { ArmExtensionRule } from "./arm_extension.js";
 import { HandReturnPathRule } from "./hand_return_path.js";
 import { HitHeightRule } from "./hit_height.js";
 import { EngineCompareRule } from "./engine_compare.js";
+import { BlazePoseInspectorRule } from "./blazepose_inspector.js";
 import { WristSwapRule } from "./wrist_swap.js";
 import { CombinedCompareRule } from "./combined_compare.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
@@ -40,6 +41,7 @@ export const RULES = [
   AngleChangeRule,
   ArmExtensionRule,
   AudioImpactLensRule,
+  BlazePoseInspectorRule,
   CombinedCompareRule,
   EngineCompareRule,
   GuardDropRule,

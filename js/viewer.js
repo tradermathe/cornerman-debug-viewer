@@ -12,7 +12,7 @@ const BUILD = "2026-06-16.24";
   if (el) el.textContent = `build ${BUILD}`;
 }
 
-import { loadPose, loadGloveWrists, loadPtsArray } from "./pose-loader.js";
+import { loadPose, loadGloveWrists, loadPtsArray, loadBlaze33 } from "./pose-loader.js";
 import { loadPose3D } from "./pose-3d-loader.js";
 import { loadPunches } from "./punches-loader.js";
 import { fetchLiveLabels } from "./sheet-labels.js";
@@ -950,9 +950,21 @@ function loadFromIndex(videoFile, slot) {
       const poseYolo11  = await loadEngine(slot.yolo11, "yolo11_pose");
       const poseBlaze   = await loadEngine(slot.blazepose, "blazepose");
 
+      // Full BlazePose-33 (all joints + z + visibility + presence) for the
+      // dedicated inspector lens. The COCO-17 remap above (poseBlaze) feeds
+      // engine_compare; this keeps everything the engine_compare path drops.
+      let blaze33 = null;
+      if (slot.blazepose) {
+        try {
+          blaze33 = await loadBlaze33(await drive.toFile(slot.blazepose.npy),
+                                      await drive.toFile(slot.blazepose.meta), size);
+          if (slot.blazepose.pts) blaze33.pts = await loadPtsArray(await drive.toFile(slot.blazepose.pts));
+        } catch (err) { console.warn("blaze33 load failed:", err.message); }
+      }
+
       if (token !== currentLoadToken) return;
       start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm,
-            [poseMovenet, poseYolo11, poseBlaze].filter(Boolean));
+            [poseMovenet, poseYolo11, poseBlaze].filter(Boolean), blaze33);
 
       // Expose cache identity on state so lenses that key by (stem, round, frame)
       // — e.g. orientation_lens looking up orientation GT labels — can find it
@@ -1157,8 +1169,9 @@ function engineDisplayLabel(tag) {
   return t || "pose";
 }
 
-function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null, poseRtm = null, extraEngines = []) {
+function start(pose, poseSecondary = null, punches = null, pose3d = null, poseCombined = null, poseV6 = null, analysis = null, poseRtm = null, extraEngines = [], blaze33 = null) {
   state.pose = pose;
+  state.blaze33 = blaze33;               // optional full BlazePose-33 (inspector lens)
   state.poseSecondary = poseSecondary;   // optional second engine for compare
   state.poseCombined = poseCombined;     // optional vision+glove combined cache
   state.poseV6 = poseV6;                 // optional pose_cache_v6 (vision+glove_v6)

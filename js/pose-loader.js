@@ -228,6 +228,36 @@ function interpolateNanTrajectories(arr, n_frames, n_joints, n_channels) {
   }
 }
 
+// Full BlazePose-33 production cache loader (blazepose_pose_cache/<stem>_blazepose_r<N>.npy).
+// Unlike loadPose — which remaps to COCO-17 and keeps only x/y/conf — this keeps
+// ALL 33 joints and ALL 8 channels so the BlazePose inspector lens can surface
+// z / world-3D / visibility / presence per joint. x,y are image-normalised
+// (0..1); the lens de-normalises to video pixels itself.
+//
+//   channels: 0 x  1 y  2 z  3 x_world_m  4 y_world_m  5 z_world_m  6 visibility  7 presence
+//
+// Returns { data: Float32Array(N*33*8) (NaN where undetected), n_frames,
+//           n_joints: 33, n_channels: 8, fps, start_sec, round_start_sec,
+//           pre_buffer_sec, width, height }.
+export async function loadBlaze33(npyFile, metaFile, videoSize) {
+  const meta = JSON.parse(await metaFile.text());
+  const { data, shape, dtype } = parseNpy(await npyFile.arrayBuffer());
+  if (shape.length !== 3 || shape[1] !== 33 || shape[2] !== 8) {
+    throw new Error(`Expected (N, 33, 8) blazepose33 cache, got (${shape.join(", ")}).`);
+  }
+  if (dtype !== "<f4") throw new Error(`Expected float32 LE in .npy, got '${dtype}'.`);
+  const start_sec = Number(meta.actual_start_sec ?? meta.start_sec ?? 0);
+  const round_start_sec = Number(meta.start_sec ?? start_sec);
+  return {
+    data, n_frames: shape[0], n_joints: 33, n_channels: 8,
+    fps: Number(meta.fps) || 30,
+    start_sec, round_start_sec,
+    pre_buffer_sec: Math.max(0, round_start_sec - start_sec),
+    width: videoSize?.width || meta.width || 0,
+    height: videoSize?.height || meta.height || 0,
+  };
+}
+
 // ── .npy parser ────────────────────────────────────────────────────────────
 // Implements numpy's NPY format v1/v2/v3 (subset we need).
 // https://numpy.org/doc/stable/reference/generated/numpy.lib.format.html
