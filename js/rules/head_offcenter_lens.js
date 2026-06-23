@@ -16,10 +16,12 @@
 // through the body center; a side-bend slip then correctly reads as the head
 // leaving that line.
 //
-// Head point: centroid of the visible eyes(2,5)/ears(7,8)/mouth(9,10) — these
-// only exist on the full BlazePose-33 cache (state.blaze33), NOT the COCO-17
-// remap, so this lens reads blaze33 directly and gates joints on BlazePose's
-// per-joint `visibility`.
+// Head point: x = midpoint of the left/right EXTENT of the visible head
+// landmarks (nose, eyes, ears, mouth) — the center of the head's horizontal
+// silhouette, which holds up under head rotation (frontal it's ear-to-ear, in
+// profile ear-to-nose; both straddle the head center). These landmarks only
+// exist on the full BlazePose-33 cache (state.blaze33), NOT the COCO-17 remap,
+// so this lens reads blaze33 directly and gates joints on per-joint `visibility`.
 //
 // Two anchors, shown side by side, because which to ship is an open question:
 //   mid = midpoint(shoulder_center_x, hip_center_x)   ← steadier
@@ -53,10 +55,10 @@ import { activeDetections, isStraightType } from "./_detections.js";
 const CH = 8, X = 0, Y = 1, VIS = 6, NJ = 33;
 
 // BlazePose-33 joint indices.
-const L_EYE = 2, R_EYE = 5, L_EAR = 7, R_EAR = 8, MOUTH_L = 9, MOUTH_R = 10;
 const L_SHOULDER = 11, R_SHOULDER = 12, L_WRIST = 15, R_WRIST = 16;
 const L_HIP = 23, R_HIP = 24;
-const HEAD_JOINTS = [L_EYE, R_EYE, L_EAR, R_EAR, MOUTH_L, MOUTH_R];
+// All head landmarks: nose(0), eye inner/main/outer (1-6), ears(7,8), mouth(9,10).
+const HEAD_JOINTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const MIN_TORSO_PX = 5;
 const DEFAULTS = {
@@ -116,14 +118,24 @@ function jointAt(b, base, j, w, h) {
   return (Number.isFinite(x) && Number.isFinite(y)) ? { x, y } : null;
 }
 
+// Head x = midpoint of the horizontal EXTENT of the visible head landmarks
+// ((leftmost + rightmost) / 2), not the centroid. This tracks the center of the
+// head's silhouette through rotation: frontal the extremes are ear-to-ear, in
+// profile they become ear-to-nose — both straddle the head roughly symmetrically,
+// so the midpoint stays near the true head center even when the face has turned
+// (and it isn't dragged sideways by the front-face cluster the way a centroid is).
+// y is the mean of the visible points — only used to place the marker; the metric
+// uses x. minX/maxX are returned so the overlay can show the span.
 function headPoint(b, base, w, h) {
-  let sx = 0, sy = 0, n = 0;
+  let minX = Infinity, maxX = -Infinity, sy = 0, n = 0;
   for (const j of HEAD_JOINTS) {
     const p = jointAt(b, base, j, w, h);
     if (!p) continue;
-    sx += p.x; sy += p.y; n++;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    sy += p.y; n++;
   }
-  return n ? { x: sx / n, y: sy / n, n } : null;
+  return n ? { x: (minX + maxX) / 2, y: sy / n, n, minX, maxX } : null;
 }
 
 function torsoAt(b, base, w, h) {
@@ -350,9 +362,10 @@ export const HeadOffCenterLensRule = {
       <h2>Head off the center line</h2>
       <p class="hint">
         Per straight punch (jab/cross, head or body): how far the head moves off
-        the body's center line, in torso heights. Head = centroid of the visible
-        eyes/ears/mouth on the <b>BlazePose-33</b> cache; center line = a vertical
-        through the shoulder/hip mid. Measured relative to the body so stepping or
+        the body's center line, in torso heights. Head = midpoint of the left/right
+        extent of the visible head landmarks on the <b>BlazePose-33</b> cache (holds
+        up when the head turns); center line = a vertical through the shoulder/hip
+        mid. Measured relative to the body so stepping or
         circling doesn't count. <b>mid</b> = shoulder+hip anchor (steadier),
         <b>hip</b> = hips-only (more slip-sensitive). Straights thrown down the
         camera axis are foreshortened, so they're <b>gated out by axiality</b>.
@@ -491,6 +504,15 @@ function drawOverlay(ctx, state) {
     ctx.fillStyle = COLOR_HEAD;
     ctx.beginPath(); ctx.arc(head.x, head.y, 6 * s, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "rgba(0,0,0,0.65)"; ctx.lineWidth = 1.5 * s; ctx.stroke();
+
+    // Head extent — the leftmost/rightmost head landmarks whose midpoint is head x.
+    if (Number.isFinite(head.minX) && head.maxX > head.minX) {
+      ctx.strokeStyle = COLOR_HEAD; ctx.globalAlpha = 0.55; ctx.lineWidth = 1.5 * s;
+      for (const ex of [head.minX, head.maxX]) {
+        ctx.beginPath(); ctx.moveTo(ex, head.y - 7 * s); ctx.lineTo(ex, head.y + 7 * s); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
 
     // Live offset label by the head.
     const T = calib.torsoBaseline;
