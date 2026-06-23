@@ -51,6 +51,7 @@
 import { ensureAxialityModel, axialityForPunch } from "./axiality_model.js";
 import { activeDetections, isStraightType } from "./_detections.js";
 import { SCHEMAS } from "./_skeleton_schemas.js";
+import { qualityOf, qualityColor, qualityBand } from "./_score.js";
 
 // blaze33 channels: 0 x  1 y  2 z  3 xw  4 yw  5 zw  6 visibility  7 presence
 const CH = 8, X = 0, Y = 1, VIS = 6, NJ = 33;
@@ -64,9 +65,10 @@ const NAMES = SCHEMAS.blazepose33.names;   // joint index → landmark name (for
 
 const MIN_TORSO_PX = 5;
 const DEFAULTS = {
-  axialityMax:   Math.SQRT1_2,   // ≈0.7071 = cos45°; skip straights more axial
-  headTravelMin: 0.10,           // |travel| below this (torso) = stayed on the line = the fault
-  minVis:        0.30,           // per-joint BlazePose visibility gate
+  axialityMax:    Math.SQRT1_2,  // ≈0.7071 = cos45°; skip straights more axial
+  scoreTarget:    0.28,          // head off-center (torso) for full marks; 0 = on the line
+  scoreSteepness: 10,            // sigmoid k (shared shape with hit_height/arm_extension)
+  minVis:         0.30,          // per-joint BlazePose visibility gate
 };
 
 // orthodox lead = L, southpaw lead = R.
@@ -77,9 +79,7 @@ const SIDE_FOR = {
 
 const COLOR_CENTER = "#ffd24a";   // body-center vertical line (mid anchor)
 const COLOR_HIP    = "#3ad9e0";   // hips-only vertical line
-const COLOR_HEAD   = "#c08bff";   // head point (eyes/ears/mouth centroid)
-const COLOR_GOOD   = "#5fd97a";   // moved off the line
-const COLOR_FAULT  = "#e85a5a";   // stayed on the line
+const COLOR_HEAD   = "#c08bff";   // head point / extremes
 
 let host = null;
 let cfg = { ...DEFAULTS };
@@ -240,13 +240,16 @@ function classifyPunch(b, state, d, idx, T, w, h) {
   const peakOff = offsetAt(b, peak.blaze * NJ * CH, w, h);
   if (!startOff || !peakOff) return { ...base, axiality: ax, peakPrimary: peak.primary, skip: "no head/torso" };
 
+  const peakMid = peakOff.offMid / T;
+  const sc = scoreOffCenter(peakMid);   // scored on |off-center at peak|
   return {
     ...base, axiality: ax, skip: "",
     startPrimary: startP, peakPrimary: peak.primary,
     travelMid: (peakOff.offMid - startOff.offMid) / T,
     travelHip: (peakOff.offHip - startOff.offHip) / T,
-    peakMid: peakOff.offMid / T,
+    peakMid,
     peakHip: peakOff.offHip / T,
+    score: sc.quality, mistake: sc.mistake,
     headAtPeak: peakOff.head,
   };
 }
@@ -289,7 +292,20 @@ function classifiedAtFrame(frame) {
   return null;
 }
 
-function travelColor(t) { return Math.abs(t) >= cfg.headTravelMin ? COLOR_GOOD : COLOR_FAULT; }
+// 0–100 quality from how far the head is off the line at the punch peak. 0 = head
+// on the center line (worst); ramps via the house sigmoid (same shape as
+// hit_height/arm_extension) to 100 at scoreTarget — flat-bad near the line, steep
+// in the middle, flat-perfect past target. We keep the MISTAKE (0 = best) too,
+// since _score.js's rollup + bands work in mistake space.
+function sigmoid01(x, k) {
+  const L = (t) => 1 / (1 + Math.exp(-k * (t - 0.5)));
+  return (L(x) - L(0)) / (L(1) - L(0));
+}
+function scoreOffCenter(offTorso) {
+  const x = Math.max(0, Math.min(1, Math.abs(offTorso) / cfg.scoreTarget));
+  const quality = 100 * sigmoid01(x, cfg.scoreSteepness);
+  return { quality, mistake: 100 - quality };
+}
 function fmtSigned(v, d = 2) { return v == null || !Number.isFinite(v) ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}`; }
 function setText(id, html) { const el = host?.querySelector("#" + id); if (el) el.innerHTML = html; }
 
@@ -319,13 +335,20 @@ function renderTable(state) {
   }
 
   const scored = classified.filter(c => !c.skip);
-  const nMoved = scored.filter(c => Math.abs(c.travelMid) >= cfg.headTravelMin).length;
-  const nOnLine = scored.length - nMoved;
   const nAxial = classified.filter(c => c.skip === "axial" || c.skip === "axial?").length;
+
+  // Round score = worst-decile mean of per-punch mistakes (surface the punches
+  // where the head stayed on the line), flipped to quality + band like hit_height.
+  let roundPart = "";
+  if (scored.length) {
+    const mis = scored.map(c => c.mistake).sort((a, b) => b - a);   // worst (highest mistake) first
+    const k = Math.max(1, Math.round(mis.length / 10));
+    const roundMistake = mis.slice(0, k).reduce((a, b) => a + b, 0) / k;
+    const Q = qualityOf(roundMistake);
+    roundPart = `round <b style="color:${Q.color}">${Q.q.toFixed(0)} ${Q.label.toUpperCase()}</b> (worst ${k} of ${scored.length}) · `;
+  }
   sumEl.innerHTML = scored.length
-    ? `<span style="color:${COLOR_GOOD}">moved off ${nMoved}</span> · ` +
-      `<span style="color:${COLOR_FAULT}">stayed on line ${nOnLine}</span> / ${scored.length} straights` +
-      (nAxial ? ` · ${nAxial} axial (skipped)` : "")
+    ? roundPart + `${scored.length} straights scored` + (nAxial ? ` · ${nAxial} axial (skipped)` : "")
     : `No straights scored${nAxial ? ` — ${nAxial} skipped as axial / no-axiality (load predictions_axiality_*.json)` : ""}.`;
 
   const rows = classified.map(c => {
@@ -336,17 +359,17 @@ function renderTable(state) {
         <td>${c.idx + 1}</td><td>${t}</td><td>${c.punch_type}</td>
         <td colspan="3" class="muted">${SKIP_LABEL[c.skip] || c.skip}</td></tr>`;
     }
-    const col = travelColor(c.travelMid);
+    const q = c.score, col = qualityColor(q);
     return `<tr data-frame="${seek}" style="cursor:pointer">
       <td>${c.idx + 1}</td><td>${t}</td><td>${c.punch_type}${c.body ? ' <span class="muted">b</span>' : ''}</td>
-      <td class="num" style="color:${col};font-weight:600">${fmtSigned(c.travelMid)}</td>
-      <td class="num">${fmtSigned(c.travelHip)}</td>
-      <td class="num">${fmtSigned(c.peakMid)}</td></tr>`;
+      <td class="num" style="color:${col};font-weight:700">${q.toFixed(0)}</td>
+      <td class="num">${fmtSigned(c.peakMid)}</td>
+      <td class="num">${fmtSigned(c.travelMid)}</td></tr>`;
   }).join("");
 
   tableEl.innerHTML = `
     <table class="joint-table">
-      <thead><tr><th>#</th><th>t</th><th>type</th><th>travel·mid</th><th>travel·hip</th><th>peak·mid</th></tr></thead>
+      <thead><tr><th>#</th><th>t</th><th>type</th><th>score</th><th>off·mid</th><th>travel</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 }
@@ -375,6 +398,8 @@ export const HeadOffCenterLensRule = {
         circling doesn't count. <b>mid</b> = shoulder+hip anchor (steadier),
         <b>hip</b> = hips-only (more slip-sensitive). Straights thrown down the
         camera axis are foreshortened, so they're <b>gated out by axiality</b>.
+        Each straight is <b>scored 0–100</b> by how far the head is off the line at
+        the punch (0 = on the line, 100 at ≥ target), higher = better.
       </p>
 
       <h3>Live</h3>
@@ -385,7 +410,7 @@ export const HeadOffCenterLensRule = {
       </div>
       <div id="hoc-extremes" class="hint" style="font-size:11px;margin:2px 0 6px">—</div>
       <div class="metric">
-        <div class="metric-label">Active straight — head_travel</div>
+        <div class="metric-label">Active straight — score</div>
         <div class="metric-val" id="hoc-live-travel">—</div>
         <div class="metric-sub" id="hoc-live-sub"></div>
       </div>
@@ -396,8 +421,12 @@ export const HeadOffCenterLensRule = {
 
       <h3>Tuning</h3>
       <label class="slider">
-        <span>flag |travel| &lt; <output id="hoc-o1">${cfg.headTravelMin.toFixed(2)}</output> torso</span>
-        <input type="range" id="hoc-s1" min="0" max="0.5" step="0.01" value="${cfg.headTravelMin}">
+        <span>full score at off ≥ <output id="hoc-o1">${cfg.scoreTarget.toFixed(2)}</output> torso</span>
+        <input type="range" id="hoc-s1" min="0.05" max="0.6" step="0.01" value="${cfg.scoreTarget}">
+      </label>
+      <label class="slider">
+        <span>score steepness = <output id="hoc-o4">${cfg.scoreSteepness.toFixed(1)}</output></span>
+        <input type="range" id="hoc-s4" min="2" max="20" step="0.5" value="${cfg.scoreSteepness}">
       </label>
       <label class="slider">
         <span>axiality gate ≤ <output id="hoc-o2">${cfg.axialityMax.toFixed(2)}</output></span>
@@ -419,7 +448,8 @@ export const HeadOffCenterLensRule = {
         window.__viewerRedraw?.();
       });
     };
-    wire("#hoc-s1", "#hoc-o1", "headTravelMin");
+    wire("#hoc-s1", "#hoc-o1", "scoreTarget");
+    wire("#hoc-s4", "#hoc-o4", "scoreSteepness");
     wire("#hoc-s2", "#hoc-o2", "axialityMax");
     wire("#hoc-s3", "#hoc-o3", "minVis");
 
@@ -472,10 +502,10 @@ function renderLive(state) {
       setText("hoc-live-travel", `<span class="muted">${SKIP_LABEL[c.skip] || c.skip}</span>`);
       setText("hoc-live-sub", `<code>${c.punch_type}</code>${c.axiality != null ? ` · axiality ${c.axiality.toFixed(2)}` : ""}`);
     } else {
-      const col = travelColor(c.travelMid);
-      setText("hoc-live-travel", `<span style="color:${col};font-weight:600">${fmtSigned(c.travelMid)} T</span>`);
+      const col = qualityColor(c.score);
+      setText("hoc-live-travel", `<span style="color:${col};font-weight:700">${c.score.toFixed(0)}</span> <span style="color:${col};font-size:12px;font-weight:700">${qualityBand(c.score).toUpperCase()}</span>`);
       setText("hoc-live-sub",
-        `hip ${fmtSigned(c.travelHip)} · peak·mid ${fmtSigned(c.peakMid)} · ax ${c.axiality.toFixed(2)} · ` +
+        `off·mid ${fmtSigned(c.peakMid)} T · travel ${fmtSigned(c.travelMid)} · ax ${c.axiality.toFixed(2)} · ` +
         (c.peakPrimary === state.frame ? `<span class="muted">at peak</span>` : `<a href="#" data-frame="${c.peakPrimary}">→ peak f${c.peakPrimary}</a>`));
     }
 }
@@ -551,7 +581,7 @@ function drawOverlay(ctx, state) {
     // Active straight punch: ring the head at peak + top banner (scored only).
     const c = classifiedAtFrame(state.frame);
     if (c && !c.skip) {
-      const col = travelColor(c.travelMid);
+      const col = qualityColor(c.score);
       if (c.peakPrimary === state.frame && c.headAtPeak) {
         ctx.strokeStyle = col; ctx.lineWidth = 2.5 * s;
         ctx.beginPath(); ctx.arc(c.headAtPeak.x, c.headAtPeak.y, 15 * s, 0, Math.PI * 2); ctx.stroke();
@@ -559,7 +589,7 @@ function drawOverlay(ctx, state) {
         ctx.beginPath(); ctx.arc(c.headAtPeak.x, c.headAtPeak.y, 22 * s, 0, Math.PI * 2); ctx.stroke();
         ctx.globalAlpha = 1;
       }
-      banner(ctx, `${c.punch_type} → head_travel ${fmtSigned(c.travelMid)} torso (mid) · ${fmtSigned(c.travelHip)} (hip)`, col, s);
+      banner(ctx, `${c.punch_type} → ${c.score.toFixed(0)} ${qualityBand(c.score).toUpperCase()}  ·  off ${fmtSigned(c.peakMid)} torso`, col, s);
     } else if (c && (c.skip === "axial" || c.skip === "axial?")) {
       banner(ctx, `${c.punch_type} → axial — head read skipped`, "#9aa0a6", s);
     }
