@@ -1311,6 +1311,14 @@ function applyZoom() {
   const t = `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.scale})`;
   els.video.style.transform = t;
   els.canvas.style.transform = t;
+  // Hint that the frame is draggable once it's zoomed in.
+  if (videoWrap) videoWrap.style.cursor = zoom.scale > 1 ? "grab" : "";
+}
+
+// Keep the frame covering the wrap (no black gaps) after any tx/ty change.
+function clampPan(rect) {
+  zoom.tx = Math.max(rect.width  * (1 - zoom.scale), Math.min(0, zoom.tx));
+  zoom.ty = Math.max(rect.height * (1 - zoom.scale), Math.min(0, zoom.ty));
 }
 
 function resetZoom() {
@@ -1336,12 +1344,31 @@ if (videoWrap) {
     // Keep that content point pinned under the cursor.
     zoom.tx = mx - cx * zoom.scale;
     zoom.ty = my - cy * zoom.scale;
-    // Constrain panning so the frame always covers the wrap (no black gaps).
-    zoom.tx = Math.max(rect.width  * (1 - zoom.scale), Math.min(0, zoom.tx));
-    zoom.ty = Math.max(rect.height * (1 - zoom.scale), Math.min(0, zoom.ty));
+    clampPan(rect);
     applyZoom();
   }, { passive: false });
   videoWrap.addEventListener("dblclick", resetZoom);
+
+  // Hold left mouse + drag to pan the zoomed-in frame around.
+  let drag = null;
+  videoWrap.addEventListener("mousedown", e => {
+    if (e.button !== 0 || zoom.scale <= 1) return;
+    e.preventDefault();
+    drag = { x: e.clientX, y: e.clientY, tx: zoom.tx, ty: zoom.ty };
+    videoWrap.style.cursor = "grabbing";
+  });
+  window.addEventListener("mousemove", e => {
+    if (!drag) return;
+    zoom.tx = drag.tx + (e.clientX - drag.x);
+    zoom.ty = drag.ty + (e.clientY - drag.y);
+    clampPan(videoWrap.getBoundingClientRect());
+    applyZoom();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    drag = null;
+    applyZoom();                       // restores the "grab" cursor
+  });
 }
 
 // ── Rule panels ─────────────────────────────────────────────────────────────
