@@ -23,11 +23,11 @@
 // exist on the full BlazePose-33 cache (state.blaze33), NOT the COCO-17 remap,
 // so this lens reads blaze33 directly and gates joints on per-joint `visibility`.
 //
-// Two anchors, shown side by side, because which to ship is an open question:
-//   mid = midpoint(shoulder_center_x, hip_center_x)   ← steadier
-//   hip = hip_center_x only                            ← more slip-sensitive
-// (bending to slip plants the hips but drifts the shoulders toward the head, so
-// the mid anchor undercounts the slip vs hips-only.)
+// Center-line reference = the HIP center (hip_center_x). The hips stay planted
+// through a slip, whereas the shoulder/hip midpoint drifts toward the head as you
+// bend at the waist and so under-reads the slip — hips is the fairer benchmark.
+// The mid line (midpoint of shoulder_center_x and hip_center_x) is kept only as a
+// faint on-screen reference.
 //
 // AXIALITY GATE: this lens reads lateral (screen-x) head movement, which is only
 // trustworthy when the boxer FACES the camera. A punch toward the camera (axial)
@@ -188,7 +188,7 @@ function classifyPunch(b, state, d, idx, T, w, h) {
   if (ax == null || !Number.isFinite(ax)) return { ...base, axiality: null, skip: "no-ax" };
   if (ax < cfg.axialityMin) return { ...base, axiality: ax, skip: "sideways" };
 
-  // Walk the whole punch window, recording head off-center (mid anchor) per frame.
+  // Walk the whole punch window, recording head off-center (HIP anchor) per frame.
   // The score uses the FURTHEST the head gets off the line anywhere in the window
   // (its biggest excursion) — that frame is the "peak" we mark and seek to.
   const sP = Math.max(0, d.start_frame), eP = d.end_frame;
@@ -199,7 +199,7 @@ function classifyPunch(b, state, d, idx, T, w, h) {
     if (bf == null) continue;
     const o = offsetAt(b, bf * NJ * CH, w, h);
     if (!o) continue;
-    const dist = o.offMid / T;
+    const dist = o.offHip / T;
     series.push({ frame: pf, dist });
     if (startDist == null) startDist = dist;
     if (Math.abs(dist) > peakAbs) { peakAbs = Math.abs(dist); peakDist = dist; peakPrimary = pf; peakHead = o.head; }
@@ -354,8 +354,10 @@ export const HeadOffCenterLensRule = {
         extent of the visible head landmarks on the <b>BlazePose-33</b> cache (holds
         up when the head turns); center line = a vertical through the shoulder/hip
         mid. Measured relative to the body so stepping or
-        circling doesn't count. <b>mid</b> = shoulder+hip anchor (steadier),
-        <b>hip</b> = hips-only (more slip-sensitive). The lateral read only works
+        circling doesn't count. We measure against the <b>hip</b> center line —
+        the hips stay planted through a slip, while the shoulder/hip mid drifts
+        toward the head and under-reads it (the yellow mid line is just a faint
+        reference). The lateral read only works
         front-on, so only straights <b>toward the camera</b> (within ~45° of the
         camera axis) are scored — side-on punches are gated out by axiality.
         Each straight is <b>scored 0–100</b> by how far the head gets off the line
@@ -365,8 +367,8 @@ export const HeadOffCenterLensRule = {
       <h3>Live</h3>
       <div class="metric-grid">
         <div class="metric"><div class="metric-label">torso baseline</div><div class="metric-val" id="hoc-torso">—</div></div>
-        <div class="metric"><div class="metric-label">distance · mid</div><div class="metric-val" id="hoc-offmid">—</div></div>
         <div class="metric"><div class="metric-label">distance · hip</div><div class="metric-val" id="hoc-offhip">—</div></div>
+        <div class="metric"><div class="metric-label">mid (ref)</div><div class="metric-val" id="hoc-offmid">—</div></div>
       </div>
       <div id="hoc-extremes" class="hint" style="font-size:11px;margin:2px 0 6px">—</div>
       <div class="metric">
@@ -485,22 +487,26 @@ function drawOverlay(ctx, state) {
 
     ctx.save();
 
-    // Vertical center line (mid anchor) + hips-only line.
-    ctx.lineWidth = 2 * s;
-    ctx.strokeStyle = COLOR_CENTER;
-    ctx.beginPath(); ctx.moveTo(torso.midX, 0); ctx.lineTo(torso.midX, H); ctx.stroke();
-
+    // Center line. We score against the HIP center (solid cyan) — the hips stay
+    // planted through a slip; the shoulder/hip mid (dashed yellow) drifts toward
+    // the head and under-reads it, so it's kept only as a faint reference.
     ctx.lineWidth = 1.5 * s;
-    ctx.strokeStyle = COLOR_HIP;
+    ctx.strokeStyle = COLOR_CENTER;
+    ctx.globalAlpha = 0.7;
     ctx.setLineDash([6 * s, 5 * s]);
-    ctx.beginPath(); ctx.moveTo(torso.hipX, 0); ctx.lineTo(torso.hipX, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(torso.midX, 0); ctx.lineTo(torso.midX, H); ctx.stroke();
     ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
 
-    // Horizontal connector head → center line (the offset we measure).
+    ctx.lineWidth = 2 * s;
+    ctx.strokeStyle = COLOR_HIP;
+    ctx.beginPath(); ctx.moveTo(torso.hipX, 0); ctx.lineTo(torso.hipX, H); ctx.stroke();
+
+    // Horizontal connector head → the hip center line (the offset we score).
     ctx.strokeStyle = COLOR_HEAD;
     ctx.globalAlpha = 0.6;
     ctx.lineWidth = 1.5 * s;
-    ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(torso.midX, head.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(torso.hipX, head.y); ctx.stroke();
     ctx.globalAlpha = 1;
 
     // The two extreme head landmarks (leftmost / rightmost) whose midpoint is the
@@ -533,7 +539,7 @@ function drawOverlay(ctx, state) {
     // Live offset label by the head.
     const T = calib.torsoBaseline;
     ctx.font = `bold ${Math.round(11 * s)}px ui-monospace, "SF Mono", monospace`;
-    const txt = `${fmtSigned(off.offMid / T)} torso`;
+    const txt = `${fmtSigned(off.offHip / T)} torso`;
     const tw = ctx.measureText(txt).width;
     const tx = head.x + 10 * s, ty = head.y - 18 * s;
     ctx.fillStyle = "rgba(0,0,0,0.70)";
