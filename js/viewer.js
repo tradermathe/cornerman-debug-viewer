@@ -784,15 +784,24 @@ function onFirebaseRecentPick() {
 }
 
 function loadFromIndex(videoFile, slot) {
-  // `slot` may have `yolo`, `vision`, and/or `vision_glove`. Primary pose
-  // is APPLE VISION when present — it's what the production iOS app runs
-  // on, and its clean `conf = 0` for non-detected joints is what the
-  // facing-direction lens (and any rule that consults face-confidence
-  // asymmetry) needs. YOLO is loaded as the secondary so the engine-compare
-  // lens still has both. If neither raw engine exists but the v6 cache does
-  // (someone synced only pose_cache_v6/), fall back to it so the viewer
-  // still has a skeleton to render — the v6 cache is shape-compatible with
-  // raw vision.
+  // BlazePose is REQUIRED for every lens (user request 2026-06-24). If this
+  // round has no BlazePose cache, show the video with a clear "missing
+  // BlazePose" message and NO skeleton — never silently fall back to Apple
+  // Vision. loadVideoOnly clears any leftover skeleton so the screen is honest
+  // about the gap.
+  if (!slot.blazepose) {
+    loadVideoOnly(videoFile,
+      `⚠ No BlazePose cache for this round — the viewer requires BlazePose for ` +
+      `every lens (Apple Vision fallback is disabled). Extract a _blazepose_ ` +
+      `cache for this video/round.`);
+    return;
+  }
+  // `slot` may also have `yolo`, `vision`, and/or `vision_glove`. The `primary`
+  // variable below is the SIDECAR ANCHOR (glove wrists, punches, 3D, v6) and
+  // keeps the Vision-first priority — but it is NOT the skeleton the rule
+  // lenses run on. The rule-facing primary is forced to BlazePose just before
+  // start() (see below); Vision is demoted to the secondary slot there so the
+  // compare lenses and wrist_swap can still reach it.
   const primary = slot.vision || slot.yolo || slot.vision_glove || slot.rtmpose
                 || slot.movenet || slot.yolo11 || slot.blazepose;
   const secondary = (slot.vision && slot.yolo) ? slot.yolo : null;
@@ -963,8 +972,36 @@ function loadFromIndex(videoFile, slot) {
       }
 
       if (token !== currentLoadToken) return;
-      start(posePrimary, poseSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm,
-            [poseMovenet, poseYolo11, poseBlaze].filter(Boolean), blaze33);
+
+      // ── BlazePose is the REQUIRED working skeleton for every rule lens ─────
+      // (user request 2026-06-24): the primary handed to start() must be
+      // BlazePose so every lens that reads state.pose runs on it. poseBlaze is
+      // already the 33→COCO-17 remap (pose-loader), so each lens keeps the EXACT
+      // joint indices it used for Vision — a 17-joint lens still sees 17, an
+      // ankles-only lens still sees ankles. The rounds-without-BlazePose case is
+      // handled loudly at the top of loadFromIndex; reaching here with no blaze
+      // pose means the cache file was present but failed to load — fail loudly
+      // rather than silently rendering Apple Vision.
+      const rulePrimary = posePrimary.engine === "blazepose" ? posePrimary : poseBlaze;
+      if (!rulePrimary) {
+        throw new Error(
+          `BlazePose cache for this round failed to load (${primary.npy.name}). ` +
+          `The viewer requires BlazePose for every lens — Apple Vision fallback is disabled.`
+        );
+      }
+      // Keep the original non-BlazePose primary (Vision/YOLO/…, with its glove /
+      // punch sidecars) reachable for the compare lenses and the Vision-anchored
+      // wrist_swap lens: demote it to the secondary slot when free, else to an
+      // extra engine.
+      let ruleSecondary = poseSecondary;
+      let extraEngines = [poseMovenet, poseYolo11, poseBlaze].filter(Boolean);
+      if (rulePrimary !== posePrimary) {
+        if (!ruleSecondary) ruleSecondary = posePrimary;
+        else extraEngines.push(posePrimary);
+      }
+      extraEngines = extraEngines.filter(p => p !== rulePrimary);
+      start(rulePrimary, ruleSecondary, punches, pose3d, poseCombined, poseV6, null, poseRtm,
+            extraEngines, blaze33);
 
       // Expose cache identity on state so lenses that key by (stem, round, frame)
       // — e.g. orientation_lens looking up orientation GT labels — can find it
@@ -982,9 +1019,9 @@ function loadFromIndex(videoFile, slot) {
       // the lens falls back to ST-GCN / heuristic.
       tryLiveLabels({
         cacheBasename: state.cacheBasename,
-        cacheStartSec: posePrimary.start_sec || 0,
-        fps: posePrimary.fps,
-        nFrames: posePrimary.n_frames,
+        cacheStartSec: rulePrimary.start_sec || 0,
+        fps: rulePrimary.fps,
+        nFrames: rulePrimary.n_frames,
         token,
       });
     })
