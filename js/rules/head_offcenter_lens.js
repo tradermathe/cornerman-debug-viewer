@@ -70,7 +70,7 @@ const MIN_TORSO_PX = 5;
 const DEFAULTS = {
   axialityMin:    Math.SQRT1_2,  // ≈0.7071 = cos45°; KEEP straights within 45° of the
                                  // camera axis (toward camera) — skip side-on ones
-  scoreTarget:    0.28,          // head off-center (torso) for full marks; 0 = on the line
+  scoreTarget:    0.25,          // head off-center (torso) for full marks; 0 = on the line
   scoreSteepness: 10,            // sigmoid k (shared shape with hit_height/arm_extension)
   minVis:         0.30,          // per-joint BlazePose visibility gate
 };
