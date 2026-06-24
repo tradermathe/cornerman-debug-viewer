@@ -29,12 +29,15 @@
 // (bending to slip plants the hips but drifts the shoulders toward the head, so
 // the mid anchor undercounts the slip vs hips-only.)
 //
-// AXIALITY GATE (same as arm_extension / hit_height): a straight thrown down the
-// camera axis foreshortens — its lateral head movement projects into depth and
-// the 2D read can't be trusted. So we join each punch to the trained axiality
-// model by punch_uuid and SKIP straights more axial than cos45° (≈0.707),
-// falling back to the on-device per-punch axiality when the model isn't loaded.
-// Missing axiality fails closed (skipped, not silently trusted).
+// AXIALITY GATE: this lens reads lateral (screen-x) head movement, which is only
+// trustworthy when the boxer FACES the camera. A punch toward the camera (axial)
+// means the boxer is square to it, so the head slip is in-plane; a side-on punch
+// (low axiality) throws that slip into depth where we can't see it. So we join
+// each punch to the trained axiality model by punch_uuid and KEEP only straights
+// within ~45° of the camera axis (axiality >= cos45° ≈ 0.707), skipping side-on
+// ones — the OPPOSITE direction to hit_height/arm_extension, which keep side-on
+// punches because they read fist HEIGHT (foreshortens head-on, not lateral).
+// Falls back to on-device per-punch axiality; missing axiality fails closed.
 //
 // Normalization: a body straight drops the level and FORESHORTENS the torso in
 // the image, so we normalize by a STABLE per-round torso height (median over
@@ -65,7 +68,8 @@ const NAMES = SCHEMAS.blazepose33.names;   // joint index → landmark name (for
 
 const MIN_TORSO_PX = 5;
 const DEFAULTS = {
-  axialityMax:    Math.SQRT1_2,  // ≈0.7071 = cos45°; skip straights more axial
+  axialityMin:    Math.SQRT1_2,  // ≈0.7071 = cos45°; KEEP straights within 45° of the
+                                 // camera axis (toward camera) — skip side-on ones
   scoreTarget:    0.28,          // head off-center (torso) for full marks; 0 = on the line
   scoreSteepness: 10,            // sigmoid k (shared shape with hit_height/arm_extension)
   minVis:         0.30,          // per-joint BlazePose visibility gate
@@ -178,10 +182,11 @@ function classifyPunch(b, state, d, idx, T, w, h) {
     timestamp: d.timestamp, punch_type: d.punch_type || "?",
   };
 
-  // Axiality gate — join by punch_uuid, fall back to on-device per-punch axiality.
+  // Axiality gate — keep only punches toward the camera (boxer facing it, so the
+  // lateral head read is in-plane); skip side-on straights > 45° off the axis.
   const ax = axialityForPunch(d.punch_uuid)?.predAxiality ?? d.axiality;
-  if (ax == null || !Number.isFinite(ax)) return { ...base, axiality: null, skip: "axial?" };
-  if (ax > cfg.axialityMax) return { ...base, axiality: ax, skip: "axial" };
+  if (ax == null || !Number.isFinite(ax)) return { ...base, axiality: null, skip: "no-ax" };
+  if (ax < cfg.axialityMin) return { ...base, axiality: ax, skip: "sideways" };
 
   // Walk the whole punch window, recording head off-center (mid anchor) per frame.
   // The score uses the FURTHEST the head gets off the line anywhere in the window
@@ -267,8 +272,8 @@ function fmtSigned(v, d = 2) { return v == null || !Number.isFinite(v) ? "—" :
 function setText(id, html) { const el = host?.querySelector("#" + id); if (el) el.innerHTML = html; }
 
 const SKIP_LABEL = {
-  "axial":  "axial (skipped)",
-  "axial?": "no axiality",
+  "sideways": "side-on (skipped)",
+  "no-ax":    "no axiality",
   "no head/torso": "no head/torso",
 };
 
@@ -290,7 +295,7 @@ function renderTable(state) {
   }
 
   const scored = classified.filter(c => !c.skip);
-  const nAxial = classified.filter(c => c.skip === "axial" || c.skip === "axial?").length;
+  const nSkip = classified.filter(c => c.skip === "sideways" || c.skip === "no-ax").length;
 
   // Round score = worst-decile mean of per-punch mistakes (surface the punches
   // where the head stayed on the line), flipped to quality + band like hit_height.
@@ -303,8 +308,8 @@ function renderTable(state) {
     roundPart = `round <b style="color:${Q.color}">${Q.q.toFixed(0)} ${Q.label.toUpperCase()}</b> (worst ${k} of ${scored.length}) · `;
   }
   sumEl.innerHTML = scored.length
-    ? roundPart + `${scored.length} straights scored` + (nAxial ? ` · ${nAxial} axial (skipped)` : "")
-    : `No straights scored${nAxial ? ` — ${nAxial} skipped as axial / no-axiality (load predictions_axiality_*.json)` : ""}.`;
+    ? roundPart + `${scored.length} straights scored` + (nSkip ? ` · ${nSkip} side-on (skipped)` : "")
+    : `No straights scored${nSkip ? ` — ${nSkip} skipped as side-on / no-axiality (load predictions_axiality_*.json)` : ""}.`;
 
   const rows = classified.map(c => {
     const t = Number.isFinite(c.timestamp) ? c.timestamp.toFixed(2) + "s" : "—";
@@ -350,10 +355,11 @@ export const HeadOffCenterLensRule = {
         up when the head turns); center line = a vertical through the shoulder/hip
         mid. Measured relative to the body so stepping or
         circling doesn't count. <b>mid</b> = shoulder+hip anchor (steadier),
-        <b>hip</b> = hips-only (more slip-sensitive). Straights thrown down the
-        camera axis are foreshortened, so they're <b>gated out by axiality</b>.
-        Each straight is <b>scored 0–100</b> by how far the head is off the line at
-        the punch (0 = on the line, 100 at ≥ target), higher = better.
+        <b>hip</b> = hips-only (more slip-sensitive). The lateral read only works
+        front-on, so only straights <b>toward the camera</b> (within ~45° of the
+        camera axis) are scored — side-on punches are gated out by axiality.
+        Each straight is <b>scored 0–100</b> by how far the head gets off the line
+        during the punch (0 = on the line, 100 at ≥ target), higher = better.
       </p>
 
       <h3>Live</h3>
@@ -385,8 +391,8 @@ export const HeadOffCenterLensRule = {
         <input type="range" id="hoc-s4" min="2" max="20" step="0.5" value="${cfg.scoreSteepness}">
       </label>
       <label class="slider">
-        <span>axiality gate ≤ <output id="hoc-o2">${cfg.axialityMax.toFixed(2)}</output></span>
-        <input type="range" id="hoc-s2" min="0" max="1" step="0.01" value="${cfg.axialityMax}">
+        <span>keep axiality ≥ <output id="hoc-o2">${cfg.axialityMin.toFixed(2)}</output> (toward camera)</span>
+        <input type="range" id="hoc-s2" min="0" max="1" step="0.01" value="${cfg.axialityMin}">
       </label>
       <label class="slider">
         <span>min visibility = <output id="hoc-o3">${cfg.minVis.toFixed(2)}</output></span>
@@ -406,7 +412,7 @@ export const HeadOffCenterLensRule = {
     };
     wire("#hoc-s1", "#hoc-o1", "scoreTarget");
     wire("#hoc-s4", "#hoc-o4", "scoreSteepness");
-    wire("#hoc-s2", "#hoc-o2", "axialityMax");
+    wire("#hoc-s2", "#hoc-o2", "axialityMin");
     wire("#hoc-s3", "#hoc-o3", "minVis");
 
     // Click a row → seek to that punch's peak frame.
@@ -547,8 +553,8 @@ function drawOverlay(ctx, state) {
         ctx.globalAlpha = 1;
       }
       banner(ctx, `${c.punch_type} → ${c.score.toFixed(0)} ${qualityBand(c.score).toUpperCase()}  ·  peak dist ${fmtSigned(c.peakDist)} torso`, col, s);
-    } else if (c && (c.skip === "axial" || c.skip === "axial?")) {
-      banner(ctx, `${c.punch_type} → axial — head read skipped`, "#9aa0a6", s);
+    } else if (c && (c.skip === "sideways" || c.skip === "no-ax")) {
+      banner(ctx, `${c.punch_type} → side-on — head read skipped`, "#9aa0a6", s);
     }
 
     ctx.restore();
