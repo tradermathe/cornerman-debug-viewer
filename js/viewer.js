@@ -1298,6 +1298,52 @@ window.addEventListener("resize", () => {
   redraw();
 });
 
+// ── Ctrl+scroll to zoom the video + overlay ──────────────────────────────────
+// Scales the video and its skeleton overlay together via a shared CSS transform
+// (transform-origin 0 0, so identical transforms stay aligned). Ctrl+wheel —
+// which is also what a macOS trackpad pinch dispatches — zooms toward the
+// cursor; scrolling back out clamps to 1× and recentres. Double-click resets.
+const videoWrap = document.querySelector(".video-wrap");
+const zoom = { scale: 1, tx: 0, ty: 0 };
+const ZOOM_MAX = 8;
+
+function applyZoom() {
+  const t = `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.scale})`;
+  els.video.style.transform = t;
+  els.canvas.style.transform = t;
+}
+
+function resetZoom() {
+  zoom.scale = 1; zoom.tx = 0; zoom.ty = 0;
+  applyZoom();
+}
+
+if (videoWrap) {
+  els.video.style.transformOrigin = "0 0";
+  els.canvas.style.transformOrigin = "0 0";
+  videoWrap.addEventListener("wheel", e => {
+    if (!e.ctrlKey) return;            // only ctrl+scroll / pinch zooms
+    e.preventDefault();
+    const rect = videoWrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // Content point currently under the cursor, in unscaled wrap coords.
+    const cx = (mx - zoom.tx) / zoom.scale;
+    const cy = (my - zoom.ty) / zoom.scale;
+    // Exponential step feels uniform across zoom levels.
+    const next = zoom.scale * Math.exp(-e.deltaY * 0.0015);
+    zoom.scale = Math.max(1, Math.min(ZOOM_MAX, next));
+    // Keep that content point pinned under the cursor.
+    zoom.tx = mx - cx * zoom.scale;
+    zoom.ty = my - cy * zoom.scale;
+    // Constrain panning so the frame always covers the wrap (no black gaps).
+    zoom.tx = Math.max(rect.width  * (1 - zoom.scale), Math.min(0, zoom.tx));
+    zoom.ty = Math.max(rect.height * (1 - zoom.scale), Math.min(0, zoom.ty));
+    applyZoom();
+  }, { passive: false });
+  videoWrap.addEventListener("dblclick", resetZoom);
+}
+
 // ── Rule panels ─────────────────────────────────────────────────────────────
 function populateRuleSelect() {
   // Preserve current selection across the rebuild so loading a new video
@@ -1359,6 +1405,7 @@ els.speedSel.addEventListener("change", () => {
 // reality.
 els.video.addEventListener("loadedmetadata", () => {
   els.video.playbackRate = parseFloat(els.speedSel.value);
+  resetZoom();
 });
 
 document.addEventListener("keydown", e => {
