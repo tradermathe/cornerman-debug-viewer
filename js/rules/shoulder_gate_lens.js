@@ -32,7 +32,7 @@ const COLOR_PROXY   = "#ffd95c";
 const COLOR_FLARE   = "#c0a7ff";   // label colour for the "flare" word
 const COLOR_HOOK    = "#2e8b57";   // dark green — flare excluded during a hook
 // Flare value bands.
-const FLARE_OK   = "#9aa7b4";      // < 0.2 — tucked, fine
+const FLARE_OK   = "#7adf7a";      // < 0.2 — tucked (light green)
 const FLARE_WARN = "#ff9e64";      // 0.2–0.3 — orange
 const FLARE_BAD  = "#ff4d4d";      // > 0.3 — red
 
