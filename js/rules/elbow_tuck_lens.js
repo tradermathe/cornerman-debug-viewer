@@ -17,6 +17,7 @@
 // stays "just the width" until we decide how to gate.
 
 import { J } from "../skeleton.js";
+import { activeDetections } from "./_detections.js";
 
 // ── tunables (driven by the sidebar sliders) ────────────────────────────────
 const cfg = {
@@ -28,13 +29,20 @@ const cfg = {
 // Joints that must be confident for a frame to count (both arms + torso).
 const REQUIRED = [J.L_SHOULDER, J.R_SHOULDER, J.L_ELBOW, J.R_ELBOW, J.L_HIP, J.R_HIP];
 
-const COLOR_FLAG    = "#ff5d6c";  // flared (over threshold)
-const COLOR_OK      = "#7adf7a";  // tucked (under threshold)
+const COLOR_FLAG    = "#ff5d6c";  // red — flare > 0.3
+const COLOR_WARN    = "#ff9e64";  // orange — flare 0.2–0.3
+const COLOR_OK      = "#7adf7a";  // green — flare < 0.2 (tucked)
 const COLOR_INVALID = "#888";     // filtered / side-on
+const COLOR_HOOK    = "#2e8b57";  // dark green — excluded (hand throwing a hook)
 const COLOR_L       = "#7ec8ff";  // left side accents
 const COLOR_R       = "#ffd95c";  // right side accents
 const COLOR_FRAME   = "#3ad9e0";  // current-frame marker
 const COLOR_FRONTAL = "#b48cff";  // frontal-ness strip
+
+// Hook exclusion: punch `hand` is boxer-relative (lead/rear); map to anatomical
+// L/R via stance (default orthodox), the same convention arm_extension uses.
+const SIDE_FOR = { lead: { orthodox: "L", southpaw: "R" }, rear: { orthodox: "R", southpaw: "L" } };
+const isHook = t => /hook/i.test(t || "");
 
 // ── metric core ─────────────────────────────────────────────────────────────
 
@@ -64,7 +72,8 @@ function pickPose(state) {
 function computeMetrics(state) {
   const pose = pickPose(state);
   if (!pose) return null;
-  if (metricCache.pose === pose && metricCache.fps === state.fps) return metricCache;
+  const dets = activeDetections(state);
+  if (metricCache.pose === pose && metricCache.dets === dets && metricCache.fps === state.fps) return metricCache;
 
   const n = pose.n_frames;
   const sk = pose.skeleton, conf = pose.conf;
@@ -85,21 +94,53 @@ function computeMetrics(state) {
     valid[f] = frameValid(conf, f);
   }
 
-  metricCache = { pose, fps: state.fps, n, flareL, flareR, frontal, valid };
+  // Per-side hook exclusion: frames where THAT hand is throwing a hook.
+  const hookL = new Array(n).fill(false), hookR = new Array(n).fill(false);
+  if (dets) {
+    const roundStance = state.analysis?.ankleOrientation?.stance;
+    for (const d of dets) {
+      if (!isHook(d.punch_type)) continue;
+      const stance = (d.stance === "southpaw" || d.stance === "orthodox") ? d.stance
+                   : (roundStance === "southpaw" || roundStance === "orthodox") ? roundStance
+                   : "orthodox";
+      const side = SIDE_FOR[d.hand]?.[stance];
+      if (!side) continue;
+      const s = Math.max(0, Math.round(d.start_frame));
+      const e = Math.min(n - 1, Math.round(d.end_frame));
+      const arr = side === "L" ? hookL : hookR;
+      for (let g = s; g <= e; g++) arr[g] = true;
+    }
+  }
+
+  metricCache = { pose, dets, fps: state.fps, n, flareL, flareR, frontal, valid, hookL, hookR };
   return metricCache;
 }
 
 // Per-frame frame-state for one side, given current slider values.
-//   "flag" | "ok" | "filtered"
+//   "flag" | "ok" | "filtered" | "hook"
 function sideState(c, side, f) {
   const flare = side === "L" ? c.flareL[f] : c.flareR[f];
   if (!c.valid[f] || !Number.isFinite(flare)) return "filtered";
   if (c.frontal[f] < cfg.frontalGate) return "filtered";   // side-on
+  if ((side === "L" ? c.hookL : c.hookR)[f]) return "hook"; // throwing a hook
   return flare > cfg.flareThreshold ? "flag" : "ok";
 }
 
 function stateColor(s) {
-  return s === "flag" ? COLOR_FLAG : s === "ok" ? COLOR_OK : COLOR_INVALID;
+  return s === "flag" ? COLOR_FLAG : s === "hook" ? COLOR_HOOK
+       : s === "ok" ? COLOR_OK : COLOR_INVALID;
+}
+
+// Per-side flare colour: dark green if hooked, grey if filtered, else banded by
+// magnitude — tucked (<0.2) green, 0.2–0.3 orange, >0.3 red.
+function flareColorAt(c, side, f) {
+  const st = sideState(c, side, f);
+  if (st === "filtered") return COLOR_INVALID;
+  if (st === "hook") return COLOR_HOOK;
+  const v = side === "L" ? c.flareL[f] : c.flareR[f];
+  if (v > 0.3) return COLOR_FLAG;
+  if (v > 0.2) return COLOR_WARN;
+  return COLOR_OK;
 }
 
 // ── round rollup (cheap, recomputed on every slider move) ───────────────────
@@ -109,9 +150,11 @@ function rollup(c) {
   const flaresL = [], flaresR = [];
   for (let f = 0; f < c.n; f++) {
     const sl = sideState(c, "L", f), sr = sideState(c, "R", f);
-    if (sl !== "filtered") { consideredL++; if (sl === "flag") flagL++; flaresL.push(c.flareL[f]); }
-    if (sr !== "filtered") { consideredR++; if (sr === "flag") flagR++; flaresR.push(c.flareR[f]); }
-    if (sl !== "filtered" || sr !== "filtered") {
+    const exL = sl === "filtered" || sl === "hook";   // hooks are excluded too
+    const exR = sr === "filtered" || sr === "hook";
+    if (!exL) { consideredL++; if (sl === "flag") flagL++; flaresL.push(c.flareL[f]); }
+    if (!exR) { consideredR++; if (sr === "flag") flagR++; flaresR.push(c.flareR[f]); }
+    if (!exL || !exR) {
       considered++;
       if (sl === "flag" || sr === "flag") flagEither++;
     }
@@ -159,9 +202,11 @@ export const ElbowTuckRule = {
       <p class="hint">
         Horizontal shoulder→elbow gap / torso height, per side. A flared elbow
         sits far to the side of the shoulder ⇒ large gap. Drag the threshold to
-        read the tuck cutoff off the footage. On-video bracket:
-        <span style="color:${COLOR_OK}">tucked</span> ·
-        <span style="color:${COLOR_FLAG}">flared</span>.
+        read the tuck cutoff off the footage. Flare colour:
+        <span style="color:${COLOR_OK}">&lt;0.2</span> ·
+        <span style="color:${COLOR_WARN}">0.2–0.3</span> ·
+        <span style="color:${COLOR_FLAG}">&gt;0.3</span> ·
+        <span style="color:${COLOR_HOOK}">hook (excluded)</span>.
         Frontal gate is OFF by default — this only measures tuck from the front.
       </p>
 
@@ -222,9 +267,9 @@ export const ElbowTuckRule = {
     host.querySelector("#et-frame").innerHTML = `
       <strong>frame ${f}:</strong>
       <span style="color:${COLOR_L}">L</span> <span style="color:${stateColor(sl)}; font-weight:600">${sl}</span>
-      <code>${fmt(c.flareL[f])}</code> ·
+      <code style="color:${flareColorAt(c, "L", f)}">${fmt(c.flareL[f], 2)}</code> ·
       <span style="color:${COLOR_R}">R</span> <span style="color:${stateColor(sr)}; font-weight:600">${sr}</span>
-      <code>${fmt(c.flareR[f])}</code><br>
+      <code style="color:${flareColorAt(c, "R", f)}">${fmt(c.flareR[f], 2)}</code><br>
       <span class="muted">frontal (shoulderW/torso): <code>${fmt(c.frontal[f], 2)}</code>${
         cfg.frontalGate > 0 ? ` · gate ${cfg.frontalGate.toFixed(2)}` : ""}</span>`;
 
@@ -247,7 +292,7 @@ export const ElbowTuckRule = {
       const elX = pose.skeleton[(base + elJ) * 2], elY = pose.skeleton[(base + elJ) * 2 + 1];
       if (![shX, shY, elX, elY].every(Number.isFinite)) return;
       const side = shJ === J.L_SHOULDER ? "L" : "R";
-      const color = stateColor(sideState(c, side, f));
+      const color = flareColorAt(c, side, f);
       ctx.save();
       // plumb line (shoulder x, down to elbow height)
       ctx.strokeStyle = accent;
@@ -270,8 +315,8 @@ export const ElbowTuckRule = {
     // corner HUD
     const fsz = Math.round(13 * s), lineH = fsz + 4 * s;
     const lines = [
-      [`L flare ${fmt(c.flareL[f])}`, COLOR_L],
-      [`R flare ${fmt(c.flareR[f])}`, COLOR_R],
+      [`L flare ${fmt(c.flareL[f], 2)}${c.hookL[f] ? " hook" : ""}`, flareColorAt(c, "L", f)],
+      [`R flare ${fmt(c.flareR[f], 2)}${c.hookR[f] ? " hook" : ""}`, flareColorAt(c, "R", f)],
       [`frontal ${fmt(c.frontal[f], 2)}`, COLOR_FRONTAL],
       [`thr     ${cfg.flareThreshold.toFixed(2)}`, "#fff"],
     ];
@@ -354,10 +399,7 @@ function drawTimeline(canvas, c, frame) {
   let maxFrontal = 0.6;
   for (let f = 0; f < N; f++) if (Number.isFinite(c.frontal[f]) && c.frontal[f] > maxFrontal) maxFrontal = c.frontal[f];
 
-  const tracks = [
-    { label: "L", get: f => sideState(c, "L", f) },
-    { label: "R", get: f => sideState(c, "R", f) },
-  ];
+  const tracks = [{ label: "L", side: "L" }, { label: "R", side: "R" }];
   const gap = 6, top = 4, stripH = 16;
   const trackH = Math.floor((H - top * 2 - gap * tracks.length - stripH) / tracks.length);
   ctx.font = "10px ui-monospace, monospace";
@@ -367,7 +409,7 @@ function drawTimeline(canvas, c, frame) {
     ctx.fillStyle = i === 0 ? COLOR_L : COLOR_R;
     ctx.fillText(t.label, 6, y + trackH / 2 + 3);
     for (let f = 0; f < N; f++) {
-      ctx.fillStyle = stateColor(t.get(f));
+      ctx.fillStyle = flareColorAt(c, t.side, f);
       ctx.globalAlpha = 0.9;
       ctx.fillRect(xOf(f), y, colW + 0.5, trackH);
     }
