@@ -29,8 +29,12 @@ const COLOR_REJECT  = "#ff5d6c";
 const COLOR_INVALID = "#888";
 const COLOR_FRAME   = "#3ad9e0";
 const COLOR_PROXY   = "#ffd95c";
-const COLOR_FLARE   = "#c0a7ff";
-const COLOR_HOOK    = "#ff9e64";
+const COLOR_FLARE   = "#c0a7ff";   // label colour for the "flare" word
+const COLOR_HOOK    = "#2e8b57";   // dark green — flare excluded during a hook
+// Flare value bands.
+const FLARE_OK   = "#9aa7b4";      // < 0.2 — tucked, fine
+const FLARE_WARN = "#ff9e64";      // 0.2–0.3 — orange
+const FLARE_BAD  = "#ff4d4d";      // > 0.3 — red
 
 // Hook exclusion: punch `hand` is boxer-relative (lead/rear); map to anatomical
 // L/R via stance (default orthodox), the same convention arm_extension uses.
@@ -133,6 +137,15 @@ function frameState(c, f) {
 function stateColor(s) { return s === "pass" ? COLOR_PASS : s === "reject" ? COLOR_REJECT : COLOR_INVALID; }
 function fmt(x, d = 1) { return Number.isFinite(x) ? x.toFixed(d) : "—"; }
 
+// Flare value → colour band; a hook overrides to dark green (excluded).
+function flareColor(val, hooked) {
+  if (hooked) return COLOR_HOOK;
+  if (!Number.isFinite(val)) return COLOR_INVALID;
+  if (val > 0.3) return FLARE_BAD;
+  if (val > 0.2) return FLARE_WARN;
+  return FLARE_OK;
+}
+
 function coverage(c) {
   let pass = 0, considered = 0;
   for (let f = 0; f < c.n; f++) {
@@ -171,8 +184,11 @@ export const ShoulderGateRule = {
         Is the shoulder line across the view (<span style="color:${COLOR_PASS}">qualifies</span>)
         or pointing at the camera (<span style="color:${COLOR_REJECT}">rejected</span>)? Gate is the
         z-free proxy — <span style="color:${COLOR_PROXY}">shoulderW/torso vs its p95</span>. Elbow
-        <span style="color:${COLOR_FLARE}">flare</span> = |Δx shoulder→elbow|/torso per side (raw).
-        A hand's flare is <span style="color:${COLOR_HOOK}">excluded</span> while it throws a hook.
+        <span style="color:${COLOR_FLARE}">flare</span> = |Δx shoulder→elbow|/torso per side (raw):
+        <span style="color:${FLARE_OK}">&lt;0.2</span> ·
+        <span style="color:${FLARE_WARN}">0.2–0.3</span> ·
+        <span style="color:${FLARE_BAD}">&gt;0.3</span> ·
+        <span style="color:${COLOR_HOOK}">hook (excluded)</span>.
       </p>
 
       <label class="slider-row" style="display:block; font-size:12px; margin-top:6px">
@@ -217,8 +233,8 @@ export const ShoulderGateRule = {
       <span style="color:${stateColor(s)}; font-weight:700; text-transform:uppercase">${s === "pass" ? "QUALIFIES" : s}</span> ·
       <span style="color:${COLOR_PROXY}">φproxy</span> <code>${fmt(c.phiProxy[f])}</code>°<br>
       <span style="color:${COLOR_FLARE}">elbow flare (|Δx|/torso)</span>:
-        L <code>${fmt(c.flareL[f], 2)}</code>${hookTag(c.hookL[f])} ·
-        R <code>${fmt(c.flareR[f], 2)}</code>${hookTag(c.hookR[f])}<br>
+        L <code style="color:${flareColor(c.flareL[f], c.hookL[f])}">${fmt(c.flareL[f], 2)}</code>${hookTag(c.hookL[f])} ·
+        R <code style="color:${flareColor(c.flareR[f], c.hookR[f])}">${fmt(c.flareR[f], 2)}</code>${hookTag(c.hookR[f])}<br>
       <span class="muted">shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
 
     drawTrace(host.querySelector("#sg-trace"), c, f);
@@ -246,13 +262,11 @@ export const ShoulderGateRule = {
     const fsz = Math.round(13 * s), lineH = fsz + 4 * s;
     const lines = [
       [`φproxy ${fmt(c.phiProxy[f])}`, COLOR_PROXY],
-      [`flare ${fmt(c.flareL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flareR[f], 2)}${c.hookR[f] ? "h" : ""}`, COLOR_FLARE],
+      [`flL ${fmt(c.flareL[f], 2)}${c.hookL[f] ? " hook" : ""}`, flareColor(c.flareL[f], c.hookL[f])],
+      [`flR ${fmt(c.flareR[f], 2)}${c.hookR[f] ? " hook" : ""}`, flareColor(c.flareR[f], c.hookR[f])],
       [`thr   ${cfg.thresholdDeg}`, "#fff"],
       [frameState(c, f) === "pass" ? "QUALIFIES" : frameState(c, f).toUpperCase(), stateColor(frameState(c, f))],
     ];
-    if (c.hookL[f] || c.hookR[f]) {
-      lines.push([`hook excl ${c.hookL[f] ? "L" : ""}${c.hookR[f] ? "R" : ""}`, COLOR_HOOK]);
-    }
     const padX = 10 * s, padY = 8 * s, boxW = 138 * s;
     const boxH = lines.length * lineH + padY * 2 - 4 * s;
     const bx = ctx.canvas.width - boxW - 10 * s, by = 10 * s;
