@@ -21,6 +21,7 @@ import { EngineCompareRule } from "./engine_compare.js";
 import { BlazePoseInspectorRule } from "./blazepose_inspector.js";
 import { WristSwapRule } from "./wrist_swap.js";
 import { CombinedCompareRule } from "./combined_compare.js";
+import { ElbowTuckRule } from "./elbow_tuck_lens.js";
 import { StepPunchSyncRule } from "./step_punch_sync.js";
 import { StepDetectorRule } from "./step_detector.js";
 import { HipRotationReviewRule } from "./hip_rotation_review.js";
@@ -28,6 +29,7 @@ import { HipRotationModelRule } from "./hip_rotation_model.js";
 import { Vision3DRule } from "./vision_3d.js";
 import { AngleChangeRule } from "./angle_change.js";
 import { RoundV6Rule } from "./round_v6.js";
+import { ShoulderGateRule } from "./shoulder_gate_lens.js";
 import { PunchClassifierRule } from "./punch_classifier.js";
 import { OnDeviceLensRule } from "./ondevice_lens.js";
 import { PoseCoverageLensRule } from "./pose_coverage_lens.js";
@@ -44,6 +46,7 @@ export const RULES = [
   AudioImpactLensRule,
   BlazePoseInspectorRule,
   CombinedCompareRule,
+  ElbowTuckRule,
   EngineCompareRule,
   GuardDropRule,
   GuardHeightRule,
@@ -57,6 +60,7 @@ export const RULES = [
   PunchClassifierRule,
   PunchPredictionsRule,
   RoundV6Rule,
+  ShoulderGateRule,
   SkeletonCompareRule,
   StanceWidthLensRule,
   StepPunchSyncRule,
