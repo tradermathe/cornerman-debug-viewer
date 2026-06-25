@@ -1,39 +1,25 @@
-// Shoulder broadside gate lens.
+// Shoulder broadside gate + elbow flare (2D, z-free).
 //
-// The elbow-flare metric is only valid when we can SEE the axis the elbow
-// flares along — the shoulder line — i.e. when the shoulder line is broadside
-// to the camera (the coronal plane is roughly fronto-parallel). This lens
-// computes that gate per frame and shows whether the frame QUALIFIES.
+// Validity gate for elbow flare: is the shoulder line broadside to the camera
+// (so the flare axis is visible)? Shoulders only — no hips — so a bladed stance
+// with broadside shoulders still passes, and a square stance turned sideways
+// gets rejected. Gate signal is the z-free foreshortening proxy: per-person
+// calibrate the broadest shoulder span (p95 of shoulderW/torso ≈ fully square),
+// and a frame's turn angle is acos(ratio / p95). Pass when within `threshold`.
 //
-// It is deliberately NOT a hip / "facing" gate: flare is a shoulder/upper-arm
-// quantity, so a bladed stance whose shoulders are broadside still qualifies,
-// and a square stance turned sideways still gets rejected. We only ask one
-// thing: is the shoulder line across the view, or pointing at the camera?
+// Elbow flare (just a number for now): |x_shoulder − x_elbow| / torso, per
+// side, on every frame. Known limit: on bladed frames a forward-reaching guard
+// leaks into this horizontal number — demo-grade, not production.
 //
-// Two estimators, shown side by side so we can judge how much to trust z:
-//
-//   3D angle (uses z):  φ3d = asin(|unit(R_sh−L_sh) · unit(cam − shoulder_mid)|)
-//     0° = shoulder line perpendicular to the camera ray (broadside, good),
-//     90° = shoulder line pointing straight at the camera (foreshortened).
-//     Uses pose3d.xyz + camMatrices. z is mediocre, so it's rolling-median
-//     smoothed over time (orientation is slow).
-//
-//   2D proxy (z-free):  φproxy = acos(clamp( (shoulderW/torso)_f / p95 , 0,1))
-//     Per-person calibrated: p95 of shoulderW/torso over the round ≈ the
-//     fighter's broadest (most-frontal) shoulder span. No depth needed.
-//
-// QUALIFIES = chosen estimator's angle < threshold. Frames past threshold are
-// dropped (the metric simply can't be measured there), never guessed.
+// Hook exclusion: during a hook the throwing hand's elbow abducts on purpose,
+// so that side's flare is excluded within the hook's frame window.
 
 import { J } from "../skeleton.js";
-import { J3 } from "../skeleton-3d.js";
 import { activeDetections } from "./_detections.js";
 
 const cfg = {
-  thresholdDeg: 35,       // shoulder line within this of broadside ⇒ qualifies
-  smoothSeconds: 0.5,     // rolling-median half-window for the noisy 3D angle
+  thresholdDeg: 35,       // shoulder within this many degrees of broadside ⇒ qualifies
   minConfidence: 0.5,
-  mode: "auto",           // "auto" | "3d" | "proxy"  (auto = 3d when available)
 };
 
 const REQUIRED_2D = [J.L_SHOULDER, J.R_SHOULDER, J.L_HIP, J.R_HIP];
@@ -42,14 +28,11 @@ const COLOR_PASS    = "#7adf7a";
 const COLOR_REJECT  = "#ff5d6c";
 const COLOR_INVALID = "#888";
 const COLOR_FRAME   = "#3ad9e0";
-const COLOR_3D      = "#7ec8ff";
 const COLOR_PROXY   = "#ffd95c";
-const COLOR_FLARE3D = "#5ad1b0";
+const COLOR_FLARE   = "#c0a7ff";
 const COLOR_HOOK    = "#ff9e64";
 
-// Hook exclusion: during a hook the throwing hand's elbow abducts on purpose,
-// so that side's flare is legitimate, not a fault — exclude those frames for
-// that side only. Punch `hand` is boxer-relative (lead/rear); map to anatomical
+// Hook exclusion: punch `hand` is boxer-relative (lead/rear); map to anatomical
 // L/R via stance (default orthodox), the same convention arm_extension uses.
 const SIDE_FOR = { lead: { orthodox: "L", southpaw: "R" }, rear: { orthodox: "R", southpaw: "L" } };
 const isHook = t => /hook/i.test(t || "");
@@ -78,93 +61,6 @@ function valid2d(conf, f) {
   return true;
 }
 
-function xyz3(pose3d, f, j) {
-  const b = (f * 17 + j) * 3;
-  return [pose3d.xyz[b], pose3d.xyz[b + 1], pose3d.xyz[b + 2]];
-}
-
-// Camera position in body-frame metres (row-major 4x4 translation column).
-function camPos(pose3d, f) {
-  if (!pose3d.camMatrices) return null;
-  const m = f * 16;
-  const c = [pose3d.camMatrices[m + 3], pose3d.camMatrices[m + 7], pose3d.camMatrices[m + 11]];
-  return Number.isFinite(c[0]) ? c : null;
-}
-
-// φ3d in degrees, or NaN if 3D unavailable for this frame.
-function broadside3d(pose3d, f) {
-  const L = xyz3(pose3d, f, J3.L_SHOULDER);
-  const R = xyz3(pose3d, f, J3.R_SHOULDER);
-  const C = camPos(pose3d, f);
-  if (!C || !Number.isFinite(L[0]) || !Number.isFinite(R[0])) return NaN;
-  const sh = [R[0] - L[0], R[1] - L[1], R[2] - L[2]];
-  const shLen = Math.hypot(sh[0], sh[1], sh[2]);
-  if (!(shLen > 1e-6)) return NaN;
-  const mid = [(L[0] + R[0]) / 2, (L[1] + R[1]) / 2, (L[2] + R[2]) / 2];
-  const ray = [C[0] - mid[0], C[1] - mid[1], C[2] - mid[2]];
-  const rayLen = Math.hypot(ray[0], ray[1], ray[2]);
-  if (!(rayLen > 1e-6)) return NaN;
-  let dot = (sh[0] * ray[0] + sh[1] * ray[1] + sh[2] * ray[2]) / (shLen * rayLen);
-  dot = Math.min(1, Math.abs(dot));
-  return Math.asin(dot) * 180 / Math.PI;
-}
-
-// 3D vector helpers.
-const v_sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const v_dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const v_cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const v_norm = a => Math.hypot(a[0], a[1], a[2]);
-const v_mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
-const v_unit = a => { const n = v_norm(a) || 1; return [a[0] / n, a[1] / n, a[2] / n]; };
-
-// Body-frame elbow flare from 3D: the elbow's displacement from its shoulder
-// projected onto the lateral (shoulder-line) axis, normalized by 3D torso.
-// Yaw-invariant — the forward arm reach lands on the sagittal axis and drops
-// out, so it doesn't contaminate the lateral number the way image-x does.
-// Outward-positive per side (+ = flared out, - = tucked under). Also returns
-// the forward component (the "leak" that inflates the 2D horizontal metric).
-// Needs only the 3D joints; the camera matrix is used only to sign forward.
-function bodyFlare3d(pose3d, f) {
-  const Ls = xyz3(pose3d, f, J3.L_SHOULDER), Rs = xyz3(pose3d, f, J3.R_SHOULDER);
-  const Le = xyz3(pose3d, f, J3.L_ELBOW),    Re = xyz3(pose3d, f, J3.R_ELBOW);
-  const Lh = xyz3(pose3d, f, J3.L_HIP),      Rh = xyz3(pose3d, f, J3.R_HIP);
-  if ([Ls, Rs, Le, Re, Lh, Rh].some(p => !Number.isFinite(p[0]))) return null;
-  const sm = v_mid(Ls, Rs), hm = v_mid(Lh, Rh);
-  const torso = v_norm(v_sub(sm, hm));
-  if (!(torso > 1e-6)) return null;
-
-  const lat = v_unit(v_sub(Rs, Ls));   // toward the fighter's right
-  const up  = v_unit(v_sub(sm, hm));   // up the torso
-  let fwd = v_cross(lat, up);
-  if (!(v_norm(fwd) > 1e-6)) return null;
-  fwd = v_unit(fwd);
-  const C = camPos(pose3d, f);          // orient forward toward the camera if known
-  if (C && v_dot(fwd, v_sub(C, sm)) < 0) fwd = [-fwd[0], -fwd[1], -fwd[2]];
-
-  const eL = v_sub(Le, Ls), eR = v_sub(Re, Rs);
-  return {
-    latL: -v_dot(eL, lat) / torso,   // left flares toward -lat, so negate for outward+
-    latR:  v_dot(eR, lat) / torso,
-    fwdL:  v_dot(eL, fwd) / torso,
-    fwdR:  v_dot(eR, fwd) / torso,
-  };
-}
-
-function rollingMedian(xs, halfWin) {
-  if (halfWin <= 0) return xs.slice();
-  const n = xs.length, out = new Array(n).fill(NaN);
-  for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - halfWin), hi = Math.min(n - 1, i + halfWin);
-    const v = [];
-    for (let k = lo; k <= hi; k++) if (Number.isFinite(xs[k])) v.push(xs[k]);
-    if (!v.length) continue;
-    v.sort((a, b) => a - b);
-    const m = v.length >> 1;
-    out[i] = v.length % 2 ? v[m] : 0.5 * (v[m - 1] + v[m]);
-  }
-  return out;
-}
-
 function percentile(xs, p) {
   const v = xs.filter(Number.isFinite).sort((a, b) => a - b);
   if (!v.length) return NaN;
@@ -173,32 +69,22 @@ function percentile(xs, p) {
 
 // ── per-pose memo ───────────────────────────────────────────────────────────
 
-let cache = { pose: null, pose3d: null, fps: 0, smooth: -1 };
+let cache = { pose: null, dets: null, fps: 0 };
 
 function pickPose(state) { return state.poseV6 || state.pose; }
 
 function compute(state) {
   const pose = pickPose(state);
   if (!pose) return null;
-  const pose3d = state.pose3d || null;
   const dets = activeDetections(state);
-  const halfWin = Math.max(0, Math.round(cfg.smoothSeconds * state.fps));
-  if (cache.pose === pose && cache.pose3d === pose3d && cache.dets === dets && cache.fps === state.fps && cache.smooth === halfWin) {
-    return cache;
-  }
+  if (cache.pose === pose && cache.dets === dets && cache.fps === state.fps) return cache;
 
   const n = pose.n_frames, sk = pose.skeleton, conf = pose.conf;
-  const ratio = new Array(n).fill(NaN);   // shoulderW / torso (2D)
+  const ratio = new Array(n).fill(NaN);   // shoulderW / torso
   const v2d = new Array(n).fill(false);
-  const phi3d = new Array(n).fill(NaN);
-  // Raw horizontal elbow flare, |x_shoulder - x_elbow| / torso, per side.
-  // Computed for ALL frames (even ones the gate rejects) — just a number for now.
+  // Raw horizontal elbow flare, |x_shoulder − x_elbow| / torso, per side, all frames.
   const flareL = new Array(n).fill(NaN);
   const flareR = new Array(n).fill(NaN);
-  // 3D body-frame flare (yaw-invariant lateral) + the forward leak it removes.
-  const flare3dL = new Array(n).fill(NaN), flare3dR = new Array(n).fill(NaN);
-  const fwd3dL = new Array(n).fill(NaN), fwd3dR = new Array(n).fill(NaN);
-  const has3d = !!pose3d;
 
   for (let f = 0; f < n; f++) {
     const th = torsoHeight2d(sk, f);
@@ -208,11 +94,6 @@ function compute(state) {
       const b = f * 17;
       flareL[f] = Math.abs(sk[(b + J.L_SHOULDER) * 2] - sk[(b + J.L_ELBOW) * 2]) / th;
       flareR[f] = Math.abs(sk[(b + J.R_SHOULDER) * 2] - sk[(b + J.R_ELBOW) * 2]) / th;
-    }
-    if (has3d) {
-      phi3d[f] = broadside3d(pose3d, f);
-      const bf = bodyFlare3d(pose3d, f);
-      if (bf) { flare3dL[f] = bf.latL; flare3dR[f] = bf.latR; fwd3dL[f] = bf.fwdL; fwd3dR[f] = bf.fwdR; }
     }
   }
 
@@ -238,26 +119,13 @@ function compute(state) {
   const phiProxy = ratio.map(r =>
     Number.isFinite(r) && Number.isFinite(p95) && p95 > 1e-6
       ? Math.acos(Math.min(1, Math.max(0, r / p95))) * 180 / Math.PI : NaN);
-  const phi3dSmooth = rollingMedian(phi3d, halfWin);
 
-  cache = { pose, pose3d, dets, fps: state.fps, smooth: halfWin, n, ratio, v2d, p95, phiProxy, phi3d, phi3dSmooth, flareL, flareR, flare3dL, flare3dR, fwd3dL, fwd3dR, hookL, hookR, has3d };
+  cache = { pose, dets, fps: state.fps, n, ratio, v2d, p95, phiProxy, flareL, flareR, hookL, hookR };
   return cache;
 }
 
-function activeMode(c) {
-  if (cfg.mode === "3d") return "3d";
-  if (cfg.mode === "proxy") return "proxy";
-  return c.has3d ? "3d" : "proxy";   // auto
-}
-
-// "pass" | "reject" | "invalid" for a frame under the active mode.
+// "pass" | "reject" | "invalid" for the current frame.
 function frameState(c, f) {
-  const mode = activeMode(c);
-  if (mode === "3d") {
-    const a = c.phi3dSmooth[f];
-    if (!Number.isFinite(a)) return "invalid";
-    return a < cfg.thresholdDeg ? "pass" : "reject";
-  }
   if (!c.v2d[f] || !Number.isFinite(c.phiProxy[f])) return "invalid";
   return c.phiProxy[f] < cfg.thresholdDeg ? "pass" : "reject";
 }
@@ -296,30 +164,20 @@ export const ShoulderGateRule = {
 
   mount(_host) {
     host = _host;
-    cache = { pose: null, pose3d: null, fps: 0, smooth: -1 };
+    cache = { pose: null, dets: null, fps: 0 };
     host.innerHTML = `
-      <h2>Shoulder gate — broadside</h2>
+      <h2>Shoulder gate — broadside + elbow flare</h2>
       <p class="hint">
         Is the shoulder line across the view (<span style="color:${COLOR_PASS}">qualifies</span>)
-        or pointing at the camera (<span style="color:${COLOR_REJECT}">rejected</span>)? This is
-        the validity gate for elbow-flare — shoulders only, no hips, so a bladed stance with
-        broadside shoulders still passes.
-        <span style="color:${COLOR_3D}">3D angle</span> uses z;
-        <span style="color:${COLOR_PROXY}">2D proxy</span> is z-free (shoulderW/torso vs its p95).
+        or pointing at the camera (<span style="color:${COLOR_REJECT}">rejected</span>)? Gate is the
+        z-free proxy — <span style="color:${COLOR_PROXY}">shoulderW/torso vs its p95</span>. Elbow
+        <span style="color:${COLOR_FLARE}">flare</span> = |Δx shoulder→elbow|/torso per side (raw).
+        A hand's flare is <span style="color:${COLOR_HOOK}">excluded</span> while it throws a hook.
       </p>
 
       <label class="slider-row" style="display:block; font-size:12px; margin-top:6px">
         broadside threshold = <output id="sg-thr-out">35</output>°
         <input type="range" id="sg-thr" min="10" max="70" step="1" value="35"></label>
-      <label class="slider-row" style="display:block; font-size:12px">
-        3D smoothing = <output id="sg-sm-out">0.50</output>s
-        <input type="range" id="sg-sm" min="0" max="1.5" step="0.05" value="0.5"></label>
-      <label class="slider-row" style="display:block; font-size:12px">gate on:
-        <select id="sg-mode" style="font-size:12px">
-          <option value="auto">auto (3D if present)</option>
-          <option value="3d">3D angle (z)</option>
-          <option value="proxy">2D proxy (z-free)</option>
-        </select></label>
 
       <h3>Round</h3>
       <div id="sg-round" style="font-size:13px; line-height:1.6"></div>
@@ -327,18 +185,13 @@ export const ShoulderGateRule = {
       <h3>Current frame</h3>
       <div id="sg-frame" style="font-size:13px; line-height:1.6"></div>
 
-      <h3><span style="color:${COLOR_3D}">3D</span> / <span style="color:${COLOR_PROXY}">proxy</span> angle over time</h3>
+      <h3><span style="color:${COLOR_PROXY}">broadside angle</span> over time</h3>
       <canvas id="sg-trace" width="320" height="120"></canvas>
     `;
     mountTimeline();
 
     const thr = host.querySelector("#sg-thr"), thrOut = host.querySelector("#sg-thr-out");
     thr.addEventListener("input", () => { cfg.thresholdDeg = parseInt(thr.value); thrOut.textContent = thr.value; refresh(); });
-    const sm = host.querySelector("#sg-sm"), smOut = host.querySelector("#sg-sm-out");
-    sm.addEventListener("input", () => { cfg.smoothSeconds = parseFloat(sm.value); smOut.textContent = cfg.smoothSeconds.toFixed(2); refresh(); });
-    const mode = host.querySelector("#sg-mode");
-    mode.value = cfg.mode;
-    mode.addEventListener("change", () => { cfg.mode = mode.value; refresh(); });
   },
 
   update(state) {
@@ -347,14 +200,10 @@ export const ShoulderGateRule = {
     if (!c) { host.querySelector("#sg-round").innerHTML = `<p class="muted">No pose cache loaded.</p>`; return; }
     const f = state.frame;
     const cov = coverage(c);
-    const mode = activeMode(c);
     let hkCntL = 0, hkCntR = 0;
     for (let i = 0; i < c.n; i++) { if (c.hookL[i]) hkCntL++; if (c.hookR[i]) hkCntR++; }
 
     host.querySelector("#sg-round").innerHTML = `
-      <div>gate: <code>${mode === "3d" ? "3D angle (z)" : "2D proxy"}</code>
-        ${cfg.mode === "auto" ? `<span class="muted">(auto)</span>` : ""}
-        ${c.has3d ? "" : `<span style="color:${COLOR_REJECT}"> · no 3D cache</span>`}</div>
       <div>qualifies <code>${cov.pct.toFixed(1)}%</code>
         <span class="muted">(${cov.pass}/${cov.considered} frames, thr ${cfg.thresholdDeg}°)</span></div>
       <div class="muted" style="font-size:12px">p95 shoulderW/torso = <code>${fmt(c.p95, 2)}</code>
@@ -365,15 +214,12 @@ export const ShoulderGateRule = {
     const s = frameState(c, f);
     host.querySelector("#sg-frame").innerHTML = `
       <strong>frame ${f}:</strong>
-      <span style="color:${stateColor(s)}; font-weight:700; text-transform:uppercase">${s === "pass" ? "QUALIFIES" : s}</span><br>
-      <span style="color:${COLOR_3D}">φ3d</span> <code>${fmt(c.phi3dSmooth[f])}</code>°
-        <span class="muted">(raw ${fmt(c.phi3d[f])}°)</span> ·
+      <span style="color:${stateColor(s)}; font-weight:700; text-transform:uppercase">${s === "pass" ? "QUALIFIES" : s}</span> ·
       <span style="color:${COLOR_PROXY}">φproxy</span> <code>${fmt(c.phiProxy[f])}</code>°<br>
-      <span class="muted">2D flare (|Δx|/torso): L <code>${fmt(c.flareL[f], 2)}</code>${hookTag(c.hookL[f])} · R <code>${fmt(c.flareR[f], 2)}</code>${hookTag(c.hookR[f])}</span><br>
-      <span style="color:${COLOR_FLARE3D}">3D flare (body-lateral): L <code>${fmt(c.flare3dL[f], 2)}</code>${hookTag(c.hookL[f])} · R <code>${fmt(c.flare3dR[f], 2)}</code>${hookTag(c.hookR[f])}</span>
-        <span class="muted">(+out / −tuck)</span><br>
-      <span class="muted">fwd leak: L <code>${fmt(c.fwd3dL[f], 2)}</code> · R <code>${fmt(c.fwd3dR[f], 2)}</code>
-        · shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
+      <span style="color:${COLOR_FLARE}">elbow flare (|Δx|/torso)</span>:
+        L <code>${fmt(c.flareL[f], 2)}</code>${hookTag(c.hookL[f])} ·
+        R <code>${fmt(c.flareR[f], 2)}</code>${hookTag(c.hookR[f])}<br>
+      <span class="muted">shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
 
     drawTrace(host.querySelector("#sg-trace"), c, f);
     drawTimeline(document.getElementById("sg-timeline"), c, f);
@@ -397,21 +243,17 @@ export const ShoulderGateRule = {
       ctx.restore();
     }
 
-    const mode = activeMode(c);
     const fsz = Math.round(13 * s), lineH = fsz + 4 * s;
     const lines = [
-      [`gate ${mode === "3d" ? "3D" : "proxy"}`, "#fff"],
-      [`φ3d   ${fmt(c.phi3dSmooth[f])}`, COLOR_3D],
-      [`φprx  ${fmt(c.phiProxy[f])}`, COLOR_PROXY],
-      [`flr2d ${fmt(c.flareL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flareR[f], 2)}${c.hookR[f] ? "h" : ""}`, "#c0a7ff"],
-      [`flr3d ${fmt(c.flare3dL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flare3dR[f], 2)}${c.hookR[f] ? "h" : ""}`, COLOR_FLARE3D],
+      [`φproxy ${fmt(c.phiProxy[f])}`, COLOR_PROXY],
+      [`flare ${fmt(c.flareL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flareR[f], 2)}${c.hookR[f] ? "h" : ""}`, COLOR_FLARE],
       [`thr   ${cfg.thresholdDeg}`, "#fff"],
       [frameState(c, f) === "pass" ? "QUALIFIES" : frameState(c, f).toUpperCase(), stateColor(frameState(c, f))],
     ];
     if (c.hookL[f] || c.hookR[f]) {
       lines.push([`hook excl ${c.hookL[f] ? "L" : ""}${c.hookR[f] ? "R" : ""}`, COLOR_HOOK]);
     }
-    const padX = 10 * s, padY = 8 * s, boxW = 132 * s;
+    const padX = 10 * s, padY = 8 * s, boxW = 138 * s;
     const boxH = lines.length * lineH + padY * 2 - 4 * s;
     const bx = ctx.canvas.width - boxW - 10 * s, by = 10 * s;
     ctx.save();
@@ -423,7 +265,7 @@ export const ShoulderGateRule = {
   },
 };
 
-// ── below-video timeline (3D / proxy tracks, click to seek) ─────────────────
+// ── below-video timeline (gate track + hook markers, click to seek) ─────────
 
 const TL_LABEL_W = 56;
 
@@ -436,12 +278,12 @@ function mountTimeline() {
   const label = document.createElement("div");
   label.className = "muted small";
   label.style.cssText = "margin-bottom:6px";
-  label.textContent = "Shoulder gate — qualifies (green) / rejected (red) / no data (grey) · click to seek";
+  label.textContent = "Shoulder gate — qualifies (green) / rejected (red) / no data (grey) · hook windows below · click to seek";
   wrap.appendChild(label);
   const canvas = document.createElement("canvas");
   canvas.id = "sg-timeline";
-  canvas.style.cssText = "display:block;width:100%;height:70px";
-  canvas.width = 800; canvas.height = 70;
+  canvas.style.cssText = "display:block;width:100%;height:64px";
+  canvas.width = 800; canvas.height = 64;
   wrap.appendChild(canvas);
   slot.appendChild(wrap);
 
@@ -454,12 +296,6 @@ function mountTimeline() {
     slider.value = Math.max(0, Math.min(N - 1, Math.round(ratio * (N - 1))));
     slider.dispatchEvent(new Event("input"));
   });
-}
-
-// Color a frame for a given estimator's angle array (independent of active mode).
-function angleState(angle, validOk) {
-  if (!Number.isFinite(angle) || validOk === false) return "invalid";
-  return angle < cfg.thresholdDeg ? "pass" : "reject";
 }
 
 function drawTimeline(canvas, c, frame) {
@@ -477,26 +313,31 @@ function drawTimeline(canvas, c, frame) {
 
   const xOf = f => TL_LABEL_W + (f / Math.max(1, N - 1)) * (W - TL_LABEL_W - 4);
   const colW = Math.max(1, (W - TL_LABEL_W - 4) / Math.max(1, N - 1));
-  const tracks = [
-    { label: "3D",    color: COLOR_3D,    get: f => angleState(c.phi3dSmooth[f], true) },
-    { label: "proxy", color: COLOR_PROXY, get: f => angleState(c.phiProxy[f], c.v2d[f]) },
-  ];
-  const gap = 6, top = 4;
-  const trackH = Math.floor((H - top * 2 - gap) / tracks.length);
+  const gap = 6, top = 4, hookH = 14;
+  const gateH = H - top * 2 - gap - hookH;
+
+  // gate track
   ctx.font = "10px ui-monospace, monospace";
-  tracks.forEach((t, i) => {
-    const y = top + i * (trackH + gap);
-    ctx.fillStyle = t.color; ctx.fillText(t.label, 6, y + trackH / 2 + 3);
-    for (let f = 0; f < N; f++) {
-      ctx.fillStyle = stateColor(t.get(f)); ctx.globalAlpha = 0.9;
-      ctx.fillRect(xOf(f), y, colW + 0.5, trackH);
-    }
-    ctx.globalAlpha = 1;
-  });
+  ctx.fillStyle = COLOR_PASS; ctx.fillText("gate", 6, top + gateH / 2 + 3);
+  for (let f = 0; f < N; f++) {
+    ctx.fillStyle = stateColor(frameState(c, f)); ctx.globalAlpha = 0.9;
+    ctx.fillRect(xOf(f), top, colW + 0.5, gateH);
+  }
+  ctx.globalAlpha = 1;
+
+  // hook windows (L above, R below within the strip)
+  const hookY = top + gateH + gap;
+  ctx.fillStyle = COLOR_HOOK; ctx.fillText("hook", 6, hookY + hookH / 2 + 3);
+  for (let f = 0; f < N; f++) {
+    if (c.hookL[f]) { ctx.fillStyle = COLOR_HOOK; ctx.fillRect(xOf(f), hookY, colW + 0.5, hookH / 2); }
+    if (c.hookR[f]) { ctx.fillStyle = COLOR_HOOK; ctx.fillRect(xOf(f), hookY + hookH / 2, colW + 0.5, hookH / 2); }
+  }
+
   ctx.strokeStyle = COLOR_FRAME; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(xOf(frame), 1); ctx.lineTo(xOf(frame), H - 1); ctx.stroke();
 }
 
+// Broadside-angle sparkline over the round: threshold line + current-frame marker.
 function drawTrace(canvas, c, frame) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -507,16 +348,16 @@ function drawTrace(canvas, c, frame) {
   const yOf = v => H - 4 - (v / maxV) * (H - 12);
   const xOf = f => (f / Math.max(1, N - 1)) * W;
 
-  // threshold line
   ctx.strokeStyle = "rgba(255,255,255,0.45)"; ctx.setLineDash([4, 4]);
   ctx.beginPath(); ctx.moveTo(0, yOf(cfg.thresholdDeg)); ctx.lineTo(W, yOf(cfg.thresholdDeg)); ctx.stroke();
   ctx.setLineDash([]);
 
-  const dots = (arr, color) => {
-    for (let f = 0; f < N; f++) { const v = arr[f]; if (!Number.isFinite(v)) continue; ctx.fillStyle = color; ctx.fillRect(xOf(f) - 0.5, yOf(v) - 1, 2, 2); }
-  };
-  dots(c.phiProxy, COLOR_PROXY);
-  dots(c.phi3dSmooth, COLOR_3D);
+  for (let f = 0; f < N; f++) {
+    const v = c.phiProxy[f];
+    if (!Number.isFinite(v)) continue;
+    ctx.fillStyle = COLOR_PROXY;
+    ctx.fillRect(xOf(f) - 0.5, yOf(v) - 1, 2, 2);
+  }
 
   ctx.strokeStyle = COLOR_FRAME; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(xOf(frame), 0); ctx.lineTo(xOf(frame), H); ctx.stroke();
