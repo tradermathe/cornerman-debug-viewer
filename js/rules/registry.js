@@ -11,6 +11,7 @@
 // To add a new rule: drop a file in rules/, import + push it here.
 
 import { OverviewRule } from "./overview.js";
+import { Pose3DInspectRule } from "./pose3d_inspect_lens.js";
 import { GuardDropRule } from "./guard_drop.js";
 import { GuardHeightRule } from "./guard_height.js";
 import { ArmExtensionRule } from "./arm_extension.js";
@@ -41,6 +42,7 @@ import { PunchPredictionsRule } from "./punch_predictions.js";
 // Overview stays first as the default; the rest are alphabetical by label.
 export const RULES = [
   OverviewRule,
+  Pose3DInspectRule,
   AngleChangeRule,
   ArmExtensionRule,
   AudioImpactLensRule,
