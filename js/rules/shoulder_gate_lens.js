@@ -27,6 +27,7 @@
 
 import { J } from "../skeleton.js";
 import { J3 } from "../skeleton-3d.js";
+import { activeDetections } from "./_detections.js";
 
 const cfg = {
   thresholdDeg: 35,       // shoulder line within this of broadside ⇒ qualifies
@@ -44,6 +45,14 @@ const COLOR_FRAME   = "#3ad9e0";
 const COLOR_3D      = "#7ec8ff";
 const COLOR_PROXY   = "#ffd95c";
 const COLOR_FLARE3D = "#5ad1b0";
+const COLOR_HOOK    = "#ff9e64";
+
+// Hook exclusion: during a hook the throwing hand's elbow abducts on purpose,
+// so that side's flare is legitimate, not a fault — exclude those frames for
+// that side only. Punch `hand` is boxer-relative (lead/rear); map to anatomical
+// L/R via stance (default orthodox), the same convention arm_extension uses.
+const SIDE_FOR = { lead: { orthodox: "L", southpaw: "R" }, rear: { orthodox: "R", southpaw: "L" } };
+const isHook = t => /hook/i.test(t || "");
 
 // ── geometry ────────────────────────────────────────────────────────────────
 
@@ -172,8 +181,9 @@ function compute(state) {
   const pose = pickPose(state);
   if (!pose) return null;
   const pose3d = state.pose3d || null;
+  const dets = activeDetections(state);
   const halfWin = Math.max(0, Math.round(cfg.smoothSeconds * state.fps));
-  if (cache.pose === pose && cache.pose3d === pose3d && cache.fps === state.fps && cache.smooth === halfWin) {
+  if (cache.pose === pose && cache.pose3d === pose3d && cache.dets === dets && cache.fps === state.fps && cache.smooth === halfWin) {
     return cache;
   }
 
@@ -206,13 +216,31 @@ function compute(state) {
     }
   }
 
+  // Per-side hook exclusion: mark frames where THAT hand is throwing a hook.
+  const hookL = new Array(n).fill(false), hookR = new Array(n).fill(false);
+  if (dets) {
+    const roundStance = state.analysis?.ankleOrientation?.stance;
+    for (const d of dets) {
+      if (!isHook(d.punch_type)) continue;
+      const stance = (d.stance === "southpaw" || d.stance === "orthodox") ? d.stance
+                   : (roundStance === "southpaw" || roundStance === "orthodox") ? roundStance
+                   : "orthodox";
+      const side = SIDE_FOR[d.hand]?.[stance];
+      if (!side) continue;
+      const s = Math.max(0, Math.round(d.start_frame));
+      const e = Math.min(n - 1, Math.round(d.end_frame));
+      const arr = side === "L" ? hookL : hookR;
+      for (let f = s; f <= e; f++) arr[f] = true;
+    }
+  }
+
   const p95 = percentile(ratio.filter((r, f) => v2d[f]), 0.95);
   const phiProxy = ratio.map(r =>
     Number.isFinite(r) && Number.isFinite(p95) && p95 > 1e-6
       ? Math.acos(Math.min(1, Math.max(0, r / p95))) * 180 / Math.PI : NaN);
   const phi3dSmooth = rollingMedian(phi3d, halfWin);
 
-  cache = { pose, pose3d, fps: state.fps, smooth: halfWin, n, ratio, v2d, p95, phiProxy, phi3d, phi3dSmooth, flareL, flareR, flare3dL, flare3dR, fwd3dL, fwd3dR, has3d };
+  cache = { pose, pose3d, dets, fps: state.fps, smooth: halfWin, n, ratio, v2d, p95, phiProxy, phi3d, phi3dSmooth, flareL, flareR, flare3dL, flare3dR, fwd3dL, fwd3dR, hookL, hookR, has3d };
   return cache;
 }
 
@@ -320,6 +348,8 @@ export const ShoulderGateRule = {
     const f = state.frame;
     const cov = coverage(c);
     const mode = activeMode(c);
+    let hkCntL = 0, hkCntR = 0;
+    for (let i = 0; i < c.n; i++) { if (c.hookL[i]) hkCntL++; if (c.hookR[i]) hkCntR++; }
 
     host.querySelector("#sg-round").innerHTML = `
       <div>gate: <code>${mode === "3d" ? "3D angle (z)" : "2D proxy"}</code>
@@ -327,8 +357,11 @@ export const ShoulderGateRule = {
         ${c.has3d ? "" : `<span style="color:${COLOR_REJECT}"> · no 3D cache</span>`}</div>
       <div>qualifies <code>${cov.pct.toFixed(1)}%</code>
         <span class="muted">(${cov.pass}/${cov.considered} frames, thr ${cfg.thresholdDeg}°)</span></div>
-      <div class="muted" style="font-size:12px">p95 shoulderW/torso = <code>${fmt(c.p95, 2)}</code></div>`;
+      <div class="muted" style="font-size:12px">p95 shoulderW/torso = <code>${fmt(c.p95, 2)}</code>
+        · <span style="color:${COLOR_HOOK}">hook-excluded</span>: L ${hkCntL} · R ${hkCntR} frames
+        ${c.dets ? "" : "<span class=\"muted\">(no punch data)</span>"}</div>`;
 
+    const hookTag = h => h ? ` <span style="color:${COLOR_HOOK}">⟂hook excl</span>` : "";
     const s = frameState(c, f);
     host.querySelector("#sg-frame").innerHTML = `
       <strong>frame ${f}:</strong>
@@ -336,8 +369,8 @@ export const ShoulderGateRule = {
       <span style="color:${COLOR_3D}">φ3d</span> <code>${fmt(c.phi3dSmooth[f])}</code>°
         <span class="muted">(raw ${fmt(c.phi3d[f])}°)</span> ·
       <span style="color:${COLOR_PROXY}">φproxy</span> <code>${fmt(c.phiProxy[f])}</code>°<br>
-      <span class="muted">2D flare (|Δx|/torso): L <code>${fmt(c.flareL[f], 2)}</code> · R <code>${fmt(c.flareR[f], 2)}</code></span><br>
-      <span style="color:${COLOR_FLARE3D}">3D flare (body-lateral): L <code>${fmt(c.flare3dL[f], 2)}</code> · R <code>${fmt(c.flare3dR[f], 2)}</code></span>
+      <span class="muted">2D flare (|Δx|/torso): L <code>${fmt(c.flareL[f], 2)}</code>${hookTag(c.hookL[f])} · R <code>${fmt(c.flareR[f], 2)}</code>${hookTag(c.hookR[f])}</span><br>
+      <span style="color:${COLOR_FLARE3D}">3D flare (body-lateral): L <code>${fmt(c.flare3dL[f], 2)}</code>${hookTag(c.hookL[f])} · R <code>${fmt(c.flare3dR[f], 2)}</code>${hookTag(c.hookR[f])}</span>
         <span class="muted">(+out / −tuck)</span><br>
       <span class="muted">fwd leak: L <code>${fmt(c.fwd3dL[f], 2)}</code> · R <code>${fmt(c.fwd3dR[f], 2)}</code>
         · shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
@@ -370,11 +403,14 @@ export const ShoulderGateRule = {
       [`gate ${mode === "3d" ? "3D" : "proxy"}`, "#fff"],
       [`φ3d   ${fmt(c.phi3dSmooth[f])}`, COLOR_3D],
       [`φprx  ${fmt(c.phiProxy[f])}`, COLOR_PROXY],
-      [`flr2d ${fmt(c.flareL[f], 2)}/${fmt(c.flareR[f], 2)}`, "#c0a7ff"],
-      [`flr3d ${fmt(c.flare3dL[f], 2)}/${fmt(c.flare3dR[f], 2)}`, COLOR_FLARE3D],
+      [`flr2d ${fmt(c.flareL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flareR[f], 2)}${c.hookR[f] ? "h" : ""}`, "#c0a7ff"],
+      [`flr3d ${fmt(c.flare3dL[f], 2)}${c.hookL[f] ? "h" : ""}/${fmt(c.flare3dR[f], 2)}${c.hookR[f] ? "h" : ""}`, COLOR_FLARE3D],
       [`thr   ${cfg.thresholdDeg}`, "#fff"],
       [frameState(c, f) === "pass" ? "QUALIFIES" : frameState(c, f).toUpperCase(), stateColor(frameState(c, f))],
     ];
+    if (c.hookL[f] || c.hookR[f]) {
+      lines.push([`hook excl ${c.hookL[f] ? "L" : ""}${c.hookR[f] ? "R" : ""}`, COLOR_HOOK]);
+    }
     const padX = 10 * s, padY = 8 * s, boxW = 132 * s;
     const boxH = lines.length * lineH + padY * 2 - 4 * s;
     const bx = ctx.canvas.width - boxW - 10 * s, by = 10 * s;
