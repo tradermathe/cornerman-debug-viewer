@@ -325,8 +325,13 @@ function timelineColor(status) {
 
 // ── canvas helpers ───────────────────────────────────────────────────────────
 
+// Use the SAME pose the viewer draws the skeleton from (state.pose = BlazePose,
+// forced primary for every lens). Other lenses prefer state.poseV6 (Apple Vision
+// + glove wrists) to mirror the on-device rule, but that engine differs from the
+// drawn BlazePose skeleton, so its lines float off the joints. For guard-height
+// tuning we want the lines glued to the skeleton, so read state.pose directly.
 function pickPose(state) {
-  return state.poseV6 || state.pose;
+  return state.pose;
 }
 
 function jt(pose, frame, j) {
