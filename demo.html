@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cornerman AI — Clip Review</title>
+<link rel="stylesheet" href="./js/demo/style.css">
+<style> html,body{margin:0;background:#F4EFE6;} </style>
+</head>
+<body>
+<div class="demo-root">
+
+  <!-- Top bar -->
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:11px">
+      <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+        <rect x="13" y="2" width="6" height="4.5" rx="1" fill="#B85C3D"/>
+        <line x1="16" y1="6.5" x2="16" y2="27" stroke="#1B2A4A" stroke-width="2.4" stroke-linecap="round"/>
+        <line x1="6" y1="12" x2="26" y2="12" stroke="#1B2A4A" stroke-width="2.4" stroke-linecap="round"/>
+        <line x1="16" y1="16" x2="7" y2="25" stroke="#1B2A4A" stroke-width="2.4" stroke-linecap="round"/>
+        <line x1="16" y1="16" x2="25" y2="25" stroke="#1B2A4A" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+      <span class="brand">CORNERMAN <span class="ai">AI</span></span>
+      <span class="badge">Clip Review</span>
+    </div>
+    <div style="display:flex;align-items:flex-end;gap:4px;height:100%;padding-top:22px">
+      <div class="cond" style="font-size:15px;font-weight:700;text-transform:uppercase;padding:0 14px 7px;border-bottom:2px solid #B85C3D">Round 1</div>
+      <div class="cond" style="font-size:15px;font-weight:600;text-transform:uppercase;color:#9CA3AF;padding:0 14px 7px">Round 2</div>
+      <div class="cond" style="font-size:15px;font-weight:600;text-transform:uppercase;color:#9CA3AF;padding:0 14px 7px">Round 3</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:11px">
+      <div style="display:flex;align-items:center;gap:9px;font-size:13px;color:#4A5468;border:1px solid #E5E7EB;border-radius:8px;padding:5px 12px;background:#fff">
+        <div style="width:22px;height:22px;border-radius:50%;background:#1B2A4A;display:flex;align-items:center;justify-content:center" class="cond"><span style="font-size:11px;font-weight:700;color:#fff">BO</span></div>
+        <span style="font-weight:600;color:#1B2A4A">B. Okafor</span><span style="color:#9CA3AF;font-size:10px">▾</span>
+      </div>
+      <button class="btn-primary" style="background:#fff;color:#4A5468;border:1px solid #E5E7EB;box-shadow:none">◆ Annotate</button>
+      <button class="btn-primary">Export</button>
+    </div>
+  </div>
+
+  <!-- Body -->
+  <div class="body">
+    <!-- Left: film + frame stats -->
+    <div class="col-left">
+      <div class="film">
+        <div class="film-head">
+          <div><span class="rec"></span><span class="clip-name" id="clipName">Sparring — Round 1</span></div>
+          <div class="timecode tnum" id="timecode">0:00.00</div>
+        </div>
+        <div class="stage-wrap">
+          <div class="stage" id="stage">
+            <canvas id="overlay"></canvas>
+            <div class="centerline"></div>
+            <div class="frame-badge" id="frameBadge">FRAME 0</div>
+          </div>
+        </div>
+        <div class="scrubber" id="scrubber">
+          <div class="scrub-track"><div class="scrub-fill" id="scrubFill"></div><div class="scrub-handle" id="scrubHandle"></div></div>
+        </div>
+        <div class="transport">
+          <button class="tbtn" data-act="prevP" title="Previous punch">⏮</button>
+          <button class="tbtn" data-act="prevF" title="−1 frame">◀</button>
+          <button class="tbtn play" data-act="play" title="Play / pause">▶</button>
+          <button class="tbtn" data-act="nextF" title="+1 frame">▶</button>
+          <button class="tbtn" data-act="nextP" title="Next punch">⏭</button>
+          <span class="speed-pill">1×</span>
+        </div>
+      </div>
+      <div class="card" id="frameCard"><div id="frameStats"></div></div>
+    </div>
+
+    <!-- Right: timeline + summary + detail -->
+    <div class="col-right">
+      <div class="card" style="flex:0 0 auto">
+        <div class="tl-head">
+          <div><span class="tl-title">Punch timeline</span><span class="tl-sub" id="tlSub"></span></div>
+          <div class="tl-controls" id="tlControls"></div>
+        </div>
+        <div class="tl-track" id="timelineBody"></div>
+      </div>
+      <div class="row-bottom">
+        <div class="card" style="flex:0 0 440px"><div id="summaryBody"></div></div>
+        <div class="card" style="flex:1"><div id="detailBody" style="height:100%"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module" src="./js/demo/app.js"></script>
+</body>
+</html>

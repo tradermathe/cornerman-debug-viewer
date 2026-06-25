@@ -1,0 +1,153 @@
+/* Demo dashboard — Cornerman AI brand system (see design handoff).
+   Scoped to .demo-root so it can never bleed into the debug viewer. */
+
+@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Barlow:wght@400;500;600;700&display=swap");
+
+.demo-root {
+  /* Brand tokens */
+  --navy: #1B2A4A;        --navy-hover: #243759;
+  --rust: #B85C3D;        --rust-hover: #A04E32;
+  --rust-tint: #FDECE3;   --rust-border: #F2CDB9;
+  --paper: #F4EFE6;       --paper-deep: #ECE6D9;
+  --ink-soft: #4A5468;
+  --surface: #FFFFFF;     --border: #E5E7EB;
+  --n500: #6B7280;        --n400: #9CA3AF;  --n100: #F3F4F6;  --n50: #F9FAFB;
+  --info: #2563EB;
+  --ok: #15803D;   --ok-bg: rgba(22,163,74,0.12);
+  --warn: #B45309; --warn-bg: rgba(217,119,6,0.12);
+  --bad: #B91C1C;  --bad-bg: rgba(220,38,38,0.10);
+  --card-shadow: 0 1px 2px rgba(27,42,74,0.04), 0 12px 32px -24px rgba(27,42,74,0.35);
+
+  position: relative; width: 1440px; height: 900px; margin: 0 auto;
+  background: var(--paper); color: var(--navy);
+  display: flex; flex-direction: column; overflow: hidden;
+  font-family: "Barlow", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+}
+.demo-root * { box-sizing: border-box; }
+.cond { font-family: "Barlow Condensed", sans-serif; }
+.tnum { font-variant-numeric: tabular-nums; }
+.eyebrow { font-family: "Barlow Condensed"; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--rust); }
+
+/* Top bar */
+.topbar { height: 58px; flex: 0 0 58px; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 22px;
+  background: rgba(255,255,255,0.72); backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(27,42,74,0.14); z-index: 20; }
+.brand { font-family: "Barlow Condensed"; font-size: 19px; font-weight: 700; letter-spacing: 0.4px; }
+.brand .ai { color: var(--rust); }
+.badge { font-family: "Barlow Condensed"; font-size: 11px; font-weight: 600; letter-spacing: 1px;
+  color: var(--rust); border: 1px solid var(--rust-border); background: var(--rust-tint);
+  padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }
+
+/* Body grid */
+.body { flex: 1; min-height: 0; display: flex; gap: 18px; padding: 18px; }
+.col-left { width: 372px; flex: 0 0 372px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.col-right { flex: 1; display: flex; flex-direction: column; gap: 18px; min-height: 0; }
+.row-bottom { flex: 1; display: flex; gap: 18px; min-height: 0; }
+
+.card { background: var(--surface); border-radius: 12px; box-shadow: var(--card-shadow); padding: 16px 18px; }
+
+/* Film panel */
+.film { flex: 1; background: var(--navy); border-radius: 14px;
+  box-shadow: 0 18px 44px -18px rgba(27,42,74,0.5), 0 2px 6px rgba(27,42,74,0.15);
+  display: flex; flex-direction: column; overflow: hidden; }
+.film-head { height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--paper-deep); }
+.rec { width: 7px; height: 7px; border-radius: 50%; background: var(--rust); display: inline-block;
+  margin-right: 8px; animation: recPulse 1.5s ease-in-out infinite; }
+.clip-name { font-family: "Barlow Condensed"; font-weight: 600; letter-spacing: 0.8px; font-size: 13px; }
+.timecode { font-family: "Barlow Condensed"; font-weight: 600; font-size: 14px; }
+.timecode .total { color: var(--n500); }
+.stage-wrap { flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(85% 75% at 50% 32%, #22345A 0%, #1B2A4A 65%, #15213B 100%); }
+.stage { position: relative; height: 100%; aspect-ratio: 9 / 16; max-width: 100%; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.viewfinder::before, .viewfinder::after { content: ""; position: absolute; width: 22px; height: 22px;
+  border: 2px solid rgba(255,255,255,0.28); }
+.centerline { position: absolute; top: 8%; bottom: 8%; left: 50%; width: 0;
+  border-left: 1px dashed rgba(184,92,61,0.4); }
+.frame-badge { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  font-family: "Barlow Condensed"; font-weight: 600; font-size: 12px; color: var(--paper-deep);
+  background: rgba(10,16,30,0.55); padding: 3px 9px; border-radius: 5px; letter-spacing: 0.5px; }
+.scrubber { height: 28px; display: flex; align-items: center; padding: 0 14px; cursor: pointer; }
+.scrub-track { position: relative; height: 4px; width: 100%; border-radius: 99px; background: rgba(255,255,255,0.14); }
+.scrub-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--rust-hover), var(--rust)); }
+.scrub-handle { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%;
+  transform: translate(-50%, -50%); background: var(--rust-tint); border: 2px solid var(--rust); }
+.transport { height: 52px; flex: 0 0 52px; background: #16243F; display: flex; align-items: center;
+  justify-content: center; gap: 8px; }
+.tbtn { width: 32px; height: 32px; border: none; border-radius: 8px; background: rgba(255,255,255,0.06);
+  color: var(--paper-deep); cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+.tbtn:hover { background: rgba(255,255,255,0.12); }
+.tbtn.play { width: 46px; height: 38px; background: #F4EFE6; color: var(--navy); border-radius: 9px; font-size: 15px; }
+.tbtn.play:hover { transform: scale(1.06); }
+.speed-pill { font-family: "Barlow Condensed"; font-weight: 700; color: var(--rust-tint);
+  background: var(--rust); border-radius: 6px; padding: 4px 9px; margin-left: 6px; font-size: 13px; }
+
+/* Pills, chips, buttons */
+.pill { font-family: "Barlow Condensed"; font-weight: 600; font-size: 12px; padding: 2px 9px; border-radius: 99px; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.bad { color: var(--bad); background: var(--bad-bg); }
+.pill.neutral { color: var(--ink-soft); background: var(--n100); }
+.chip { font-family: "Barlow Condensed"; font-weight: 600; font-size: 13px; padding: 4px 12px;
+  border-radius: 99px; border: 1px solid var(--border); background: #fff; color: var(--ink-soft); cursor: pointer; }
+.chip.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+.chip.off { opacity: 0.55; }
+.btn-primary { font-size: 13px; font-weight: 600; color: #fff; background: var(--navy);
+  border: none; border-radius: 8px; padding: 8px 16px; box-shadow: 0 2px 8px rgba(27,42,74,0.22); cursor: pointer; }
+
+/* Timeline */
+.tl-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.tl-title { font-family: "Barlow Condensed"; font-weight: 700; font-size: 18px; }
+.tl-sub { color: var(--n400); font-size: 13px; margin-left: 8px; }
+.tl-controls { display: flex; align-items: center; gap: 8px; }
+.tl-track { position: relative; height: 150px; margin-left: 84px; }
+.lane { position: absolute; left: 0; right: 0; border-radius: 8px; }
+.lane.lead { top: 14px; height: 44px; background: rgba(27,42,74,0.035); }
+.lane.rear { top: 86px; height: 44px; background: rgba(37,99,235,0.06); }
+.lane-label { position: absolute; left: -84px; font-family: "Barlow Condensed"; font-size: 12px;
+  color: var(--ink-soft); display: flex; align-items: center; gap: 6px; }
+.lane-dot { width: 9px; height: 9px; border-radius: 50%; }
+.marker { position: absolute; width: 12px; height: 40px; border-radius: 3px; cursor: pointer; transition: transform .14s; }
+.marker:hover { transform: translateY(-3px); }
+.marker.sel { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--rust), 0 6px 14px rgba(184,92,61,0.5); z-index: 5; }
+.marker.dim { opacity: 0.13; pointer-events: none; }
+.playhead { position: absolute; top: 8px; bottom: 18px; width: 2px; background: var(--rust);
+  box-shadow: 0 0 8px rgba(184,92,61,0.6); }
+.playhead::before { content: ""; position: absolute; top: -4px; left: -3.5px; width: 9px; height: 9px;
+  border-radius: 50%; background: var(--rust); }
+.axis { position: absolute; bottom: 0; font-family: "Barlow Condensed"; font-size: 11px; color: var(--n400); }
+
+/* Summary */
+.big-num { font-family: "Barlow Condensed"; font-weight: 700; font-size: 46px; line-height: 1; color: var(--navy); }
+.overline { font-family: "Barlow Condensed"; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--n400); }
+.count-pill { font-family: "Barlow Condensed"; font-weight: 600; font-size: 12px; padding: 3px 10px; border-radius: 99px; }
+.count-pill.lead { color: var(--navy); background: rgba(27,42,74,0.07); }
+.count-pill.rear { color: var(--info); background: rgba(37,99,235,0.09); }
+.bar-row { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+.bar-row .lbl { width: 78px; font-size: 13px; color: var(--ink-soft); }
+.bar-track { flex: 1; height: 8px; background: var(--n100); border-radius: 99px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--navy); border-radius: 99px; }
+.bar-row .val { font-family: "Barlow Condensed"; font-weight: 700; font-size: 14px; width: 28px; text-align: right; }
+
+/* Punch detail */
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;
+  text-align: center; color: var(--n400); gap: 10px; }
+.empty .ring { width: 52px; height: 52px; border: 2px dashed var(--border); border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 22px; }
+.detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.detail-head h3 { font-family: "Barlow Condensed"; font-weight: 700; font-size: 19px; margin: 0; }
+.rule-card { display: flex; align-items: center; gap: 12px; border: 1px solid var(--n100);
+  border-radius: 9px; padding: 11px 13px; margin: 8px 0; }
+.rule-card .meta { flex: 1; }
+.rule-card .name { font-size: 13.5px; font-weight: 600; color: var(--navy); }
+.rule-card .sub { font-family: "Barlow Condensed"; font-size: 12.5px; color: var(--n500); }
+.verdict { font-family: "Barlow Condensed"; font-weight: 700; font-size: 13px; padding: 4px 10px; border-radius: 7px; }
+.verdict.ok { color: var(--ok); background: var(--ok-bg); }
+.verdict.bad { color: var(--bad); background: var(--bad-bg); }
+.verdict.skip { color: var(--n500); background: var(--n100); }
+
+@keyframes recPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.82); } }
