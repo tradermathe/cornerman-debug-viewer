@@ -43,6 +43,7 @@ const COLOR_INVALID = "#888";
 const COLOR_FRAME   = "#3ad9e0";
 const COLOR_3D      = "#7ec8ff";
 const COLOR_PROXY   = "#ffd95c";
+const COLOR_FLARE3D = "#5ad1b0";
 
 // ── geometry ────────────────────────────────────────────────────────────────
 
@@ -99,6 +100,47 @@ function broadside3d(pose3d, f) {
   return Math.asin(dot) * 180 / Math.PI;
 }
 
+// 3D vector helpers.
+const v_sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const v_dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const v_cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const v_norm = a => Math.hypot(a[0], a[1], a[2]);
+const v_mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+const v_unit = a => { const n = v_norm(a) || 1; return [a[0] / n, a[1] / n, a[2] / n]; };
+
+// Body-frame elbow flare from 3D: the elbow's displacement from its shoulder
+// projected onto the lateral (shoulder-line) axis, normalized by 3D torso.
+// Yaw-invariant — the forward arm reach lands on the sagittal axis and drops
+// out, so it doesn't contaminate the lateral number the way image-x does.
+// Outward-positive per side (+ = flared out, - = tucked under). Also returns
+// the forward component (the "leak" that inflates the 2D horizontal metric).
+// Needs only the 3D joints; the camera matrix is used only to sign forward.
+function bodyFlare3d(pose3d, f) {
+  const Ls = xyz3(pose3d, f, J3.L_SHOULDER), Rs = xyz3(pose3d, f, J3.R_SHOULDER);
+  const Le = xyz3(pose3d, f, J3.L_ELBOW),    Re = xyz3(pose3d, f, J3.R_ELBOW);
+  const Lh = xyz3(pose3d, f, J3.L_HIP),      Rh = xyz3(pose3d, f, J3.R_HIP);
+  if ([Ls, Rs, Le, Re, Lh, Rh].some(p => !Number.isFinite(p[0]))) return null;
+  const sm = v_mid(Ls, Rs), hm = v_mid(Lh, Rh);
+  const torso = v_norm(v_sub(sm, hm));
+  if (!(torso > 1e-6)) return null;
+
+  const lat = v_unit(v_sub(Rs, Ls));   // toward the fighter's right
+  const up  = v_unit(v_sub(sm, hm));   // up the torso
+  let fwd = v_cross(lat, up);
+  if (!(v_norm(fwd) > 1e-6)) return null;
+  fwd = v_unit(fwd);
+  const C = camPos(pose3d, f);          // orient forward toward the camera if known
+  if (C && v_dot(fwd, v_sub(C, sm)) < 0) fwd = [-fwd[0], -fwd[1], -fwd[2]];
+
+  const eL = v_sub(Le, Ls), eR = v_sub(Re, Rs);
+  return {
+    latL: -v_dot(eL, lat) / torso,   // left flares toward -lat, so negate for outward+
+    latR:  v_dot(eR, lat) / torso,
+    fwdL:  v_dot(eL, fwd) / torso,
+    fwdR:  v_dot(eR, fwd) / torso,
+  };
+}
+
 function rollingMedian(xs, halfWin) {
   if (halfWin <= 0) return xs.slice();
   const n = xs.length, out = new Array(n).fill(NaN);
@@ -139,12 +181,29 @@ function compute(state) {
   const ratio = new Array(n).fill(NaN);   // shoulderW / torso (2D)
   const v2d = new Array(n).fill(false);
   const phi3d = new Array(n).fill(NaN);
+  // Raw horizontal elbow flare, |x_shoulder - x_elbow| / torso, per side.
+  // Computed for ALL frames (even ones the gate rejects) — just a number for now.
+  const flareL = new Array(n).fill(NaN);
+  const flareR = new Array(n).fill(NaN);
+  // 3D body-frame flare (yaw-invariant lateral) + the forward leak it removes.
+  const flare3dL = new Array(n).fill(NaN), flare3dR = new Array(n).fill(NaN);
+  const fwd3dL = new Array(n).fill(NaN), fwd3dR = new Array(n).fill(NaN);
   const has3d = !!pose3d;
 
   for (let f = 0; f < n; f++) {
     const th = torsoHeight2d(sk, f);
-    if (th > 1e-6) { ratio[f] = shoulderWidth2d(sk, f) / th; v2d[f] = valid2d(conf, f); }
-    if (has3d) phi3d[f] = broadside3d(pose3d, f);
+    if (th > 1e-6) {
+      ratio[f] = shoulderWidth2d(sk, f) / th;
+      v2d[f] = valid2d(conf, f);
+      const b = f * 17;
+      flareL[f] = Math.abs(sk[(b + J.L_SHOULDER) * 2] - sk[(b + J.L_ELBOW) * 2]) / th;
+      flareR[f] = Math.abs(sk[(b + J.R_SHOULDER) * 2] - sk[(b + J.R_ELBOW) * 2]) / th;
+    }
+    if (has3d) {
+      phi3d[f] = broadside3d(pose3d, f);
+      const bf = bodyFlare3d(pose3d, f);
+      if (bf) { flare3dL[f] = bf.latL; flare3dR[f] = bf.latR; fwd3dL[f] = bf.fwdL; fwd3dR[f] = bf.fwdR; }
+    }
   }
 
   const p95 = percentile(ratio.filter((r, f) => v2d[f]), 0.95);
@@ -153,7 +212,7 @@ function compute(state) {
       ? Math.acos(Math.min(1, Math.max(0, r / p95))) * 180 / Math.PI : NaN);
   const phi3dSmooth = rollingMedian(phi3d, halfWin);
 
-  cache = { pose, pose3d, fps: state.fps, smooth: halfWin, n, ratio, v2d, p95, phiProxy, phi3d, phi3dSmooth, has3d };
+  cache = { pose, pose3d, fps: state.fps, smooth: halfWin, n, ratio, v2d, p95, phiProxy, phi3d, phi3dSmooth, flareL, flareR, flare3dL, flare3dR, fwd3dL, fwd3dR, has3d };
   return cache;
 }
 
@@ -277,7 +336,11 @@ export const ShoulderGateRule = {
       <span style="color:${COLOR_3D}">φ3d</span> <code>${fmt(c.phi3dSmooth[f])}</code>°
         <span class="muted">(raw ${fmt(c.phi3d[f])}°)</span> ·
       <span style="color:${COLOR_PROXY}">φproxy</span> <code>${fmt(c.phiProxy[f])}</code>°<br>
-      <span class="muted">shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
+      <span class="muted">2D flare (|Δx|/torso): L <code>${fmt(c.flareL[f], 2)}</code> · R <code>${fmt(c.flareR[f], 2)}</code></span><br>
+      <span style="color:${COLOR_FLARE3D}">3D flare (body-lateral): L <code>${fmt(c.flare3dL[f], 2)}</code> · R <code>${fmt(c.flare3dR[f], 2)}</code></span>
+        <span class="muted">(+out / −tuck)</span><br>
+      <span class="muted">fwd leak: L <code>${fmt(c.fwd3dL[f], 2)}</code> · R <code>${fmt(c.fwd3dR[f], 2)}</code>
+        · shoulderW/torso <code>${fmt(c.ratio[f], 2)}</code></span>`;
 
     drawTrace(host.querySelector("#sg-trace"), c, f);
     drawTimeline(document.getElementById("sg-timeline"), c, f);
@@ -307,6 +370,8 @@ export const ShoulderGateRule = {
       [`gate ${mode === "3d" ? "3D" : "proxy"}`, "#fff"],
       [`φ3d   ${fmt(c.phi3dSmooth[f])}`, COLOR_3D],
       [`φprx  ${fmt(c.phiProxy[f])}`, COLOR_PROXY],
+      [`flr2d ${fmt(c.flareL[f], 2)}/${fmt(c.flareR[f], 2)}`, "#c0a7ff"],
+      [`flr3d ${fmt(c.flare3dL[f], 2)}/${fmt(c.flare3dR[f], 2)}`, COLOR_FLARE3D],
       [`thr   ${cfg.thresholdDeg}`, "#fff"],
       [frameState(c, f) === "pass" ? "QUALIFIES" : frameState(c, f).toUpperCase(), stateColor(frameState(c, f))],
     ];
