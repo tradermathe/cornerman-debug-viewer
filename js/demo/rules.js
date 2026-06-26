@@ -78,17 +78,6 @@ export const SESSION_RULES = [
         sub: sep != null ? `mean sep ${(+sep).toFixed(2)}` : "", cue: r.coachCue };
     },
   },
-  {
-    id: "pivot_rate", title: "Footwork / rotation",
-    evaluate(analysis) {
-      const r = analysis?.rules?.pivot_rate; if (!r) return null;
-      const pivots = pick(r.extras, "pivotCount", "pivot_count");
-      const spp = pick(r.extras, "secPerPivot", "sec_per_pivot");
-      return { title: "Footwork / rotation", verdict: sevToVerdict(r.severity),
-        headline: pivots === 0 ? "No pivots detected" : spp != null ? `${(+spp).toFixed(1)}s / pivot` : "—",
-        sub: pivots != null ? `${pivots} pivots this round` : "", cue: r.coachCue };
-    },
-  },
 ];
 
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);

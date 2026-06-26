@@ -284,12 +284,18 @@ function renderDetail() {
     return `<div class="rule-card"><div class="meta"><div class="name">${c.title}</div><div class="sub">${c.headline}${c.sub ? " · " + c.sub : ""}</div>${graph}</div>
       <span class="verdict ${c.verdict}">${verdictWord(c.verdict)}</span></div>`;
   }).join("");
+  // Punch axiality (0 = side-on, 1 = straight down the camera axis). On the
+  // sidecar for straights only; non-straights aren't measured.
+  const ax = p.axiality;
+  const axCard = `<div class="rule-card"><div class="meta"><div class="name">Axiality</div>
+      <div class="sub">${ax == null ? "not measured (non-straight)" : ax >= 0.7 ? "down camera axis" : ax <= 0.4 ? "side-on" : "angled"}</div></div>
+      <span class="pill neutral tnum">${ax == null ? "—" : (+ax).toFixed(2)}</span></div>`;
   els.detail.innerHTML = `
     <div class="detail-head"><h3>Punch ${p.idx + 1}</h3>
       <span class="pill neutral">${prettyType(p.punch_type)}</span>
       <span class="pill ${p.hand === "lead" ? "neutral" : ""}" style="${p.hand === "rear" ? "color:var(--info);background:rgba(37,99,235,0.09)" : ""}">${cap(p.hand)} hand</span>
       <div style="flex:1"></div><button class="btn-primary" id="showFilm">▶ Show on film</button></div>
-    <div class="eyebrow">Shot analysis</div>${cards}`;
+    <div class="eyebrow">Shot analysis</div>${cards}${axCard}`;
   const sf = document.getElementById("showFilm"); if (sf) sf.addEventListener("click", () => seek(p.impact_frame ?? p.start_frame));
 }
 
