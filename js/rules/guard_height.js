@@ -47,6 +47,8 @@ const COLORS = {
 // Per-frame, per-hand status codes (also drive the timeline colours).
 const ST = { GATED: 0, EXCLUDED: 1, UP: 2, LOW: 3 };
 
+const TL_LABEL_W = 56;   // px reserved on the left of the stage timeline for L/R labels
+
 // Detection hand + stance → anatomical wrist side. Orthodox leads with the
 // left; southpaw leads with the right. Mirrors guard_drop.py's GUARD_JOINTS.
 const SIDE_FOR = {
@@ -159,6 +161,8 @@ export const GuardHeightRule = {
       const sc = document.getElementById("scrubber");
       if (sc) { sc.value = f; sc.dispatchEvent(new Event("input")); }
     });
+
+    mountStageTimeline();
   },
 
   draw(ctx, state) {
@@ -210,6 +214,7 @@ export const GuardHeightRule = {
       : `No punches loaded — nothing excluded, so this is raw per-frame flagging.`);
 
     drawTimeline(host.querySelector("#gh-timeline"), data, f);
+    drawStageTimeline(document.getElementById("gh-stage-timeline"), data, f);
   },
 };
 
@@ -411,4 +416,82 @@ function seekHack(state, f) {
   if (!slider) return;
   slider.value = f;
   slider.dispatchEvent(new Event("input"));
+}
+
+// Full-width per-hand guard timeline below the video (mirrors elbow_tuck's
+// stage timeline). Two rows — L wrist over R wrist — coloured per frame:
+// up=green · low=red · punching=excluded · low-conf=amber, with a current-frame
+// marker. Click to seek. Rendered into #stage-extras, the slot under the stage.
+function mountStageTimeline() {
+  const slot = document.getElementById("stage-extras");
+  if (!slot) return;
+  slot.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "margin-top:12px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px";
+  const label = document.createElement("div");
+  label.className = "muted small";
+  label.style.cssText = "margin-bottom:6px";
+  label.innerHTML = `Guard height — per hand: ` +
+    `<span style="color:${COLORS.up}">up</span> · ` +
+    `<span style="color:${COLORS.low}">low</span> · ` +
+    `<span style="color:rgba(255,255,255,0.45)">punching (excluded)</span> · ` +
+    `<span style="color:#f5b945">low conf</span> (click to seek)`;
+  wrap.appendChild(label);
+  const canvas = document.createElement("canvas");
+  canvas.id = "gh-stage-timeline";
+  canvas.style.cssText = "display:block;width:100%;height:64px";
+  canvas.width = 800; canvas.height = 64;
+  wrap.appendChild(canvas);
+  slot.appendChild(wrap);
+
+  canvas.addEventListener("click", (e) => {
+    const N = cache?.N;
+    if (!N) return;
+    const rect = canvas.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left - TL_LABEL_W) / Math.max(1, rect.width - TL_LABEL_W - 4);
+    seekHack(null, Math.max(0, Math.min(N - 1, Math.round(ratio * (N - 1)))));
+  });
+}
+
+function drawStageTimeline(canvas, data, frame) {
+  if (!canvas) return;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const cssW = Math.max(1, canvas.getBoundingClientRect().width);
+  const cssH = Math.max(1, canvas.getBoundingClientRect().height);
+  if (canvas.width !== Math.round(cssW * dpr)) canvas.width = Math.round(cssW * dpr);
+  if (canvas.height !== Math.round(cssH * dpr)) canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = cssW, H = cssH;
+  ctx.clearRect(0, 0, W, H);
+  const N = data.N;
+  if (!N) return;
+
+  const xOf = (f) => TL_LABEL_W + (f / Math.max(1, N - 1)) * (W - TL_LABEL_W - 4);
+  const colW = Math.max(1, (W - TL_LABEL_W - 4) / Math.max(1, N - 1));
+
+  const tracks = [
+    { label: "L", arr: data.L, accent: COLORS.l_wrist },
+    { label: "R", arr: data.R, accent: COLORS.r_wrist },
+  ];
+  const top = 4, gap = 6;
+  const trackH = Math.floor((H - top * 2 - gap * (tracks.length - 1)) / tracks.length);
+  ctx.font = "11px ui-monospace, monospace";
+
+  tracks.forEach((t, i) => {
+    const y = top + i * (trackH + gap);
+    for (let f = 0; f < N; f++) {
+      ctx.fillStyle = timelineColor(t.arr[f]);
+      ctx.fillRect(xOf(f), y, colW + 0.5, trackH);
+    }
+    ctx.fillStyle = t.accent;
+    ctx.fillText(t.label, 6, y + trackH / 2 + 4);
+  });
+
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(xOf(frame), 1);
+  ctx.lineTo(xOf(frame), H - 1);
+  ctx.stroke();
 }
