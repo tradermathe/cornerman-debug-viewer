@@ -28,6 +28,10 @@ async function boot() {
 
 function setupVideo() {
   els.film.src = S.videoUrl;
+  els.film.addEventListener("loadedmetadata", () => {
+    // Pose data covers the tail of the video; the head is pre-round footage.
+    S.videoOffsetSec = Math.max(0, els.film.duration - S.nFrames / S.fps);
+  }, { once: true });
   els.film.addEventListener("loadeddata", () => seek(S.frame), { once: true });
   els.film.addEventListener("seeked", () => { if (!S.playing) drawFilm(); });
   els.film.addEventListener("ended", pause);
@@ -89,7 +93,7 @@ function drawActiveLimb(ctx, punch) {
 function redrawFrame() { updateScrub(); drawFilm(); renderFrameStats(); updatePlayhead(); }
 function seek(f) {
   S.frame = Math.max(0, Math.min(S.nFrames - 1, f));
-  if (S.videoUrl && els.film) els.film.currentTime = (S.frame + 0.5) / S.fps;
+  if (S.videoUrl && els.film) els.film.currentTime = (S.frame + 0.5) / S.fps + S.videoOffsetSec;
   redrawFrame();
 }
 function updateScrub() { const pct = (S.frame / (S.nFrames - 1)) * 100; els.scrubFill.style.width = pct + "%"; els.scrubHandle.style.left = pct + "%"; }
@@ -100,7 +104,7 @@ function play() {
     els.film.play();
     const tick = (now, meta) => {
       if (!S.playing) return;
-      S.frame = Math.max(0, Math.min(S.nFrames - 1, Math.round((meta?.mediaTime ?? els.film.currentTime) * S.fps)));
+      S.frame = Math.max(0, Math.min(S.nFrames - 1, Math.round(((meta?.mediaTime ?? els.film.currentTime) - S.videoOffsetSec) * S.fps)));
       redrawFrame();
       if (els.film.requestVideoFrameCallback) els.film.requestVideoFrameCallback(tick);
       else timer = requestAnimationFrame(() => tick());

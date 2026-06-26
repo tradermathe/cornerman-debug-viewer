@@ -8,6 +8,10 @@ export function createState(session) {
     fps: pose.fps, nFrames: pose.n_frames, width: pose.width, height: pose.height,
     stance: analysis?.ankleOrientation?.stance || "orthodox",
     fixture: !!session.fixture, videoUrl: session.videoUrl || null,
+    // Seconds of video lead-in before pose data starts (pre-round framing/
+    // countdown). Computed from video.duration once metadata loads; the
+    // skeleton covers the TAIL of the video, so videoTime = poseTime + this.
+    videoOffsetSec: 0,
     frame: 0, playing: false, selIdx: null,
     filters: { lead: true, rear: true, type: "all" },
   };
