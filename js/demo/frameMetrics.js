@@ -19,8 +19,10 @@ export function guardHeight(p, f, wristJ) {
   const noseY = y(p, f, J.NOSE), wristY = y(p, f, wristJ);
   if (!(c(p, f, J.NOSE) >= GUARD_MIN_CONF) || !(torso > 1) ||
       !(c(p, f, wristJ) >= GUARD_MIN_CONF) || !Number.isFinite(noseY) || !Number.isFinite(wristY)) return null;
-  const dist = (wristY - (noseY + GUARD_TARGET_OFFSET * torso)) / torso;
-  return { dist, dropped: dist > 0 };
+  // Depth of the wrist below the nose, in torso units — directly comparable to
+  // the target offset (the threshold). Dropped once it passes the offset.
+  const belowNose = (wristY - noseY) / torso;
+  return { belowNose, threshold: GUARD_TARGET_OFFSET, dropped: belowNose > GUARD_TARGET_OFFSET };
 }
 
 // Elbow flare for one arm: |shoulderX − elbowX| / torso (Euclidean shoulder→hip).
