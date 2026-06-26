@@ -1,58 +1,68 @@
-// Demo rule descriptors — the bridge from real `analysis.rules` to dashboard cards.
+// Demo rule descriptors — bridge from real `analysis.rules` to dashboard cards.
 //
 // Each descriptor is PURE and DOM-free: evaluate(analysis, punch|null) → a small
-// presentation object. This is the "demo block" pattern: to feature a new rule,
-// add a descriptor here. Per-punch rules read `rules[id].perPunch` (🚩#1 data-contract);
-// if that array is absent on a real sidecar, they degrade to a clear "not scored" state
-// instead of inventing a number.
+// presentation object. Per-punch rules read `rules[id].perPunch` (the loader's
+// camelCase view of the sidecar's `per_punch` array) and join to the selected
+// punch BY TIMESTAMP (rows are a subset — only scored punches appear).
 //
-// We deliberately surface VERDICT + REAL METRIC, never an invented 0–100 score.
+// We surface VERDICT + REAL METRIC, never an invented 0–100 score. Field names
+// match the real on-device sidecar (see docs/demo-data-contract.md):
+//   arm_extension    → verdict, peak_bend, skip_reason "axial"
+//   hit_height       → zone, height_frac, flag (no verdict field)
+//   hand_return_path → verdict, return_sec, re_guarded
+//   stance_width     → session-level (extras.mean_sep_ratio)
+//   pivot_rate       → session-level (extras.secPerPivot / pivotCount)
 
 const sevToVerdict = (sev) => (sev === "none" ? "ok" : sev === "severe" ? "bad" : "warn");
+const pick = (o, ...keys) => { for (const k of keys) if (o && o[k] != null) return o[k]; return undefined; };
 
-function perPunchRow(analysis, id, punch) {
+// Find this punch's per-punch row by timestamp (rows share the detection's ts).
+function rowFor(analysis, id, punch) {
   const r = analysis?.rules?.[id];
   if (!r) return { state: "absent" };
   if (!Array.isArray(r.perPunch)) return { state: "no_perpunch", cue: r.coachCue };
-  const row = r.perPunch.find((p) => p.idx === punch.idx);
+  const row = r.perPunch.find((p) => Math.abs((p.timestamp ?? -99) - punch.timestamp) < 0.06);
   if (!row) return { state: "no_row", cue: r.coachCue };
   return { state: "ok", row, cue: r.coachCue };
 }
+const skipCard = (title, row, cue) => ({ title, verdict: "skip", headline: "Not scored",
+  sub: row.skip_reason === "axial" ? "off-axis — gated out" : (row.skip_reason || "gated out"), cue });
+const naCard = (title, state, cue) => ({ title, verdict: "skip", headline: "Not scored",
+  sub: state === "no_perpunch" ? "round-level rule" : state === "absent" ? "not produced on-device" : "no result for this punch", cue });
 
 export const PER_PUNCH_RULES = [
   {
     id: "arm_extension", title: "Max extension",
     evaluate(analysis, punch) {
-      const { state, row, cue } = perPunchRow(analysis, "arm_extension", punch);
+      const { state, row, cue } = rowFor(analysis, "arm_extension", punch);
       if (state !== "ok") return naCard("Max extension", state, cue);
-      if (row.verdict === "skip")
-        return { title: "Max extension", verdict: "skip", headline: "Not scored", sub: skipText(row), cue };
+      if (row.verdict === "skip") return skipCard("Max extension", row, cue);
       return { title: "Max extension", verdict: row.verdict === "pass" ? "ok" : "bad",
         headline: row.verdict === "pass" ? "Full extension" : "Short of full reach",
-        sub: `peak bend ${row.peak_bend?.toFixed?.(2) ?? row.peak_bend}` , cue };
+        sub: row.peak_bend != null ? `peak bend ${(+row.peak_bend).toFixed(2)}` : "", cue };
     },
   },
   {
     id: "hit_height", title: "Hit height",
     evaluate(analysis, punch) {
-      const { state, row, cue } = perPunchRow(analysis, "hit_height", punch);
+      const { state, row, cue } = rowFor(analysis, "hit_height", punch);
       if (state !== "ok") return naCard("Hit height", state, cue);
-      if (row.verdict === "skip")
-        return { title: "Hit height", verdict: "skip", headline: "Not scored", sub: skipText(row), cue };
-      return { title: "Hit height", verdict: row.verdict === "pass" ? "ok" : "bad",
-        headline: `${cap(row.target)} level`, sub: `intended ${row.target} shot`, cue };
+      if (row.skip_reason) return skipCard("Hit height", row, cue);
+      const ok = !row.flag;                                  // hit_height uses flag, not verdict
+      return { title: "Hit height", verdict: ok ? "ok" : "bad",
+        headline: row.zone ? `${cap(row.zone)} level` : "Off target",
+        sub: row.height_frac != null ? `height ${(+row.height_frac).toFixed(2)}` : "", cue };
     },
   },
   {
     id: "hand_return_path", title: "Return path", graph: true,
     evaluate(analysis, punch) {
-      const { state, row, cue } = perPunchRow(analysis, "hand_return_path", punch);
+      const { state, row, cue } = rowFor(analysis, "hand_return_path", punch);
       if (state !== "ok") return naCard("Return path", state, cue);
-      if (row.verdict === "skip")
-        return { title: "Return path", verdict: "skip", headline: "Not scored", sub: skipText(row), cue };
+      if (row.verdict === "skip") return skipCard("Return path", row, cue);
       return { title: "Return path", verdict: row.verdict === "pass" ? "ok" : "bad",
-        headline: row.verdict === "pass" ? "Re-guarded cleanly" : "Slow back to guard",
-        sub: row.guard_ms != null ? `re-guarded in ${row.guard_ms} ms` : "", cue };
+        headline: row.re_guarded ? "Re-guarded cleanly" : "Did not return to guard",
+        sub: row.return_sec != null ? `re-guarded in ${Math.round(row.return_sec * 1000)} ms` : "", cue };
     },
   },
 ];
@@ -62,29 +72,23 @@ export const SESSION_RULES = [
     id: "stance_width", title: "Stance width",
     evaluate(analysis) {
       const r = analysis?.rules?.stance_width; if (!r) return null;
-      const pct = Math.round((1 - r.violationRatio) * 100);
+      const sep = pick(r.extras, "mean_sep_ratio", "meanSepRatio");
       return { title: "Stance width", verdict: sevToVerdict(r.severity),
-        headline: `${pct}% in range`,
-        sub: r.extras?.mean_sep_ratio != null ? `mean sep ${r.extras.mean_sep_ratio.toFixed(2)}` : "",
-        cue: r.coachCue };
+        headline: `${Math.round((1 - r.violationRatio) * 100)}% in range`,
+        sub: sep != null ? `mean sep ${(+sep).toFixed(2)}` : "", cue: r.coachCue };
     },
   },
   {
-    id: "pivot_rate", title: "Rotation",
+    id: "pivot_rate", title: "Footwork / rotation",
     evaluate(analysis) {
       const r = analysis?.rules?.pivot_rate; if (!r) return null;
-      return { title: "Rotation", verdict: sevToVerdict(r.severity),
-        headline: r.extras?.sec_per_pivot != null ? `${r.extras.sec_per_pivot.toFixed(1)}s / pivot` : "—",
-        sub: r.extras?.pivot_count != null ? `${r.extras.pivot_count} pivots` : "", cue: r.coachCue };
+      const pivots = pick(r.extras, "pivotCount", "pivot_count");
+      const spp = pick(r.extras, "secPerPivot", "sec_per_pivot");
+      return { title: "Footwork / rotation", verdict: sevToVerdict(r.severity),
+        headline: pivots === 0 ? "No pivots detected" : spp != null ? `${(+spp).toFixed(1)}s / pivot` : "—",
+        sub: pivots != null ? `${pivots} pivots this round` : "", cue: r.coachCue };
     },
   },
 ];
 
-function naCard(title, state, cue) {
-  const sub = state === "no_perpunch" ? "rule is round-level (no per-punch row)"
-    : state === "absent" ? "not produced on-device" : "no result for this punch";
-  return { title, verdict: "skip", headline: "Not scored", sub, cue };
-}
-const skipText = (row) => row.skip_reason === "axial_gate" ? "off-axis — gated out"
-  : row.skip_reason === "not_straight" ? "not a straight punch" : "gated out";
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);

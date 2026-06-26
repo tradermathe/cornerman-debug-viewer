@@ -7,7 +7,7 @@ export function createState(session) {
     pose, analysis,
     fps: pose.fps, nFrames: pose.n_frames, width: pose.width, height: pose.height,
     stance: analysis?.ankleOrientation?.stance || "orthodox",
-    fixture: !!session.fixture,
+    fixture: !!session.fixture, videoUrl: session.videoUrl || null,
     frame: 0, playing: false, selIdx: null,
     filters: { lead: true, rear: true, type: "all" },
   };

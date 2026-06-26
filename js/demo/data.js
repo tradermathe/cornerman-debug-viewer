@@ -18,6 +18,29 @@ export async function loadRealSession({ skeletonBlob, analysisBlob }) {
   return { pose, analysis };
 }
 
+// Load a session whose round files sit on the static server (downloaded from
+// Firebase Storage into demo-assets/). Reuses the real parsers, so this is the
+// exact shape a Firebase-loaded round would produce.
+export async function loadLocalSession(base, round = 1) {
+  const fetchBlob = async (suffix) => {
+    const r = await fetch(`${base}/round_${round}${suffix}`);
+    if (!r.ok) throw new Error(`fetch ${suffix} -> ${r.status}`);
+    return r.blob();
+  };
+  const pose = await loadOnDeviceSkeleton(await fetchBlob("_skeleton.json"));
+  const analysis = await loadOnDeviceAnalysis(await fetchBlob("_ondevice_analysis.json"));
+  augmentDetections(analysis, pose.fps);
+  return { pose, analysis, videoUrl: `${base}/round_${round}.mp4`, fixture: false };
+}
+
+// Real detections carry start/end time but no impact frame; the timeline +
+// active-limb logic want one. Derive it from the punch timestamp.
+function augmentDetections(analysis, fps) {
+  for (const d of analysis?.punches?.detections || []) {
+    if (d.impact_frame == null) d.impact_frame = Math.round((d.timestamp ?? d.start_time) * fps);
+  }
+}
+
 // ---- Synthetic fixture ------------------------------------------------------
 
 const J = { NOSE:0, L_EYE:1, R_EYE:2, L_EAR:3, R_EAR:4, L_SHOULDER:5, R_SHOULDER:6,

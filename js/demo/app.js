@@ -2,7 +2,9 @@
 // touches nothing in viewer.js or the lenses.
 
 import { drawSkeleton } from "../skeleton.js";
-import { syntheticSession, loadRealSession } from "./data.js";
+import { syntheticSession, loadLocalSession } from "./data.js";
+
+const FEATURED_SESSION = "./demo-assets/session_1781788984153";
 import { createState, detections, selectedPunch, throwingSide, roundSummary, visible, timecode } from "./state.js";
 import { PER_PUNCH_RULES, SESSION_RULES } from "./rules.js";
 
@@ -11,21 +13,30 @@ let S, els, timer = null;
 
 async function boot() {
   try {
-    // Real session via ?session= is wired for later; default to the fixture.
-    const session = syntheticSession();
+    let session;
+    try { session = await loadLocalSession(FEATURED_SESSION); }
+    catch (e) { console.warn("[demo] real session unavailable, using fixture:", e.message); session = syntheticSession(); }
     S = createState(session);
     cacheEls();
     buildStatic();
     attachTransport();
     const c = els.overlay; c.width = S.width; c.height = S.height;
+    if (S.videoUrl) setupVideo();
     seek(0); renderAll();
   } catch (e) { console.error("[demo boot]", e && e.stack || e); }
+}
+
+function setupVideo() {
+  els.film.src = S.videoUrl;
+  els.film.addEventListener("loadeddata", () => seek(S.frame), { once: true });
+  els.film.addEventListener("seeked", () => { if (!S.playing) drawFilm(); });
+  els.film.addEventListener("ended", pause);
 }
 
 function cacheEls() {
   const $ = (id) => document.getElementById(id);
   els = {
-    overlay: $("overlay"), frameBadge: $("frameBadge"), clipName: $("clipName"), timecode: $("timecode"),
+    overlay: $("overlay"), film: $("film"), frameBadge: $("frameBadge"), clipName: $("clipName"), timecode: $("timecode"),
     scrubber: $("scrubber"), scrubFill: $("scrubFill"), scrubHandle: $("scrubHandle"),
     timeline: $("timelineBody"), tlControls: $("tlControls"), tlSub: $("tlSub"),
     summary: $("summaryBody"), detail: $("detailBody"), frameStats: $("frameStats"),
@@ -75,10 +86,36 @@ function drawActiveLimb(ctx, punch) {
 
 // ---- Playback / seeking -----------------------------------------------------
 
-function seek(f) { S.frame = Math.max(0, Math.min(S.nFrames - 1, f)); updateScrub(); drawFilm(); renderFrameStats(); updatePlayhead(); }
+function redrawFrame() { updateScrub(); drawFilm(); renderFrameStats(); updatePlayhead(); }
+function seek(f) {
+  S.frame = Math.max(0, Math.min(S.nFrames - 1, f));
+  if (S.videoUrl && els.film) els.film.currentTime = (S.frame + 0.5) / S.fps;
+  redrawFrame();
+}
 function updateScrub() { const pct = (S.frame / (S.nFrames - 1)) * 100; els.scrubFill.style.width = pct + "%"; els.scrubHandle.style.left = pct + "%"; }
-function play() { if (timer) return; S.playing = true; setPlayGlyph(); timer = setInterval(() => { if (S.frame >= S.nFrames - 1) return pause(); seek(S.frame + 1); }, 1000 / S.fps); }
-function pause() { S.playing = false; setPlayGlyph(); if (timer) { clearInterval(timer); timer = null; } }
+function play() {
+  if (S.playing) return;
+  S.playing = true; setPlayGlyph();
+  if (S.videoUrl && els.film) {
+    els.film.play();
+    const tick = (now, meta) => {
+      if (!S.playing) return;
+      S.frame = Math.max(0, Math.min(S.nFrames - 1, Math.round((meta?.mediaTime ?? els.film.currentTime) * S.fps)));
+      redrawFrame();
+      if (els.film.requestVideoFrameCallback) els.film.requestVideoFrameCallback(tick);
+      else timer = requestAnimationFrame(() => tick());
+    };
+    if (els.film.requestVideoFrameCallback) els.film.requestVideoFrameCallback(tick);
+    else timer = requestAnimationFrame(() => tick());
+  } else {
+    timer = setInterval(() => { if (S.frame >= S.nFrames - 1) return pause(); seek(S.frame + 1); }, 1000 / S.fps);
+  }
+}
+function pause() {
+  S.playing = false; setPlayGlyph();
+  if (S.videoUrl && els.film) els.film.pause();
+  if (timer) { clearInterval(timer); cancelAnimationFrame(timer); timer = null; }
+}
 function setPlayGlyph() { const b = document.querySelector('[data-act="play"]'); if (b) b.textContent = S.playing ? "❚❚" : "▶"; }
 
 function selectPunch(idx) {
