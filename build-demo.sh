@@ -14,6 +14,7 @@ cp "$ROOT/demo.html"               "$DIST/index.html"          # demo is the sit
 cp "$ROOT"/js/demo/*               "$DIST/js/demo/"
 cp "$ROOT/js/skeleton.js"          "$DIST/js/skeleton.js"      # reused renderer
 cp "$ROOT/js/ondevice-loader.js"   "$DIST/js/ondevice-loader.js"
+cp -r "$ROOT/demo-brand"           "$DIST/demo-brand"          # official Cornerman lockup
 
 # Featured session: web-compressed video + skeleton + analysis sidecar.
 cp "$ROOT/$A/round_1_skeleton.json"          "$DIST/$A/"
