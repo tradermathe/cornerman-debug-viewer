@@ -4,7 +4,7 @@
 
 import { J, torsoHeight } from "../skeleton.js";
 
-const GUARD_TARGET_OFFSET = 0.25;  // fraction of torso below the nose (guard_height.js)
+const GUARD_TARGET_OFFSET = 0.30;  // fraction of torso below the nose (guard_height.js)
 const GUARD_MIN_CONF = 0.30;
 const FLARE_MIN_CONF = 0.50;       // elbow_tuck_lens REQUIRED-joint threshold
 

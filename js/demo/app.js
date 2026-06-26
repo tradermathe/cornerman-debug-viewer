@@ -195,7 +195,7 @@ function renderFrameStats() {
     const s = sideOf[hand];
     if (s === active) { out.push(row(`Guard · ${hand}`, "punching", "neutral")); continue; }
     const g = guardHeight(S.pose, f, ARM[s].w);
-    out.push(row(`Guard · ${hand}`, g ? (g.dropped ? "Dropped" : "Up") : "—", g ? (g.dropped ? "warn" : "ok") : "neutral"));
+    out.push(row(`Guard · ${hand}`, g ? `${g.dropped ? "Dropped" : "Up"} · ${g.dist.toFixed(2)}` : "—", g ? (g.dropped ? "warn" : "ok") : "neutral"));
   }
   for (const hand of ["lead", "rear"]) {
     const s = sideOf[hand];
