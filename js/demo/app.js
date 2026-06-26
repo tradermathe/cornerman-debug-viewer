@@ -2,6 +2,7 @@
 // touches nothing in viewer.js or the lenses.
 
 import { drawSkeleton } from "../skeleton.js";
+import { guardHeight, elbowFlare } from "./frameMetrics.js";
 import { syntheticSession, loadLocalSession } from "./data.js";
 
 const FEATURED_SESSION = "./demo-assets/session_1781788984153";
@@ -160,9 +161,10 @@ function attachTransport() {
 
 function renderAll() { renderTimeline(); renderSummary(); renderDetail(); renderFrameStats(); }
 
-// Live per-frame values from the on-device rules that score continuously
-// (stance width + stance orientation). The punch-scored rules don't produce
-// per-frame arrays, so they live in the Punch detail panel instead.
+// Live per-frame form values. Stance width is the on-device continuous rule;
+// guard height (per wrist) and elbow flare (per arm) are the same geometry the
+// debug-viewer lenses use, run here from the pose. The actively-punching arm is
+// excluded so a thrown punch doesn't read as a dropped guard / flared elbow.
 function renderFrameStats() {
   const f = S.frame, rules = S.analysis?.rules || {};
   const row = (label, val, cls) =>
@@ -170,6 +172,7 @@ function renderFrameStats() {
        <span style="flex:1"></span><span class="pill ${cls}">${val}</span></div>`;
   const out = [`<div class="eyebrow">This frame</div>`];
 
+  // Stance width — on-device per-frame rule
   const sw = rules.stance_width;
   if (sw && sw.validMask) {
     const valid = sw.validMask[f] === 1;
@@ -180,10 +183,27 @@ function renderFrameStats() {
       : row("Stance width", "—", "neutral"));
   }
 
-  const pv = rules.pivot_rate;
-  if (pv && pv.orientationAngles) {
-    const a = pv.orientationAngles[f], c = pv.orientationConfs ? pv.orientationConfs[f] : 1;
-    out.push(row("Stance angle", (a === a && c > 0.3) ? `${Math.round(a)}°` : "—", "neutral"));
+  // Guard height + elbow flare per arm (geometric). lead/rear → anatomical side.
+  const leadSide = S.stance === "orthodox" ? "L" : "R";
+  const sideOf = { lead: leadSide, rear: leadSide === "L" ? "R" : "L" };
+  let active = null;  // anatomical side of the arm punching at this frame
+  for (const d of detections(S)) {
+    if (f >= d.start_frame - 3 && f <= d.end_frame + 3) { active = sideOf[d.hand] || null; break; }
+  }
+
+  for (const hand of ["lead", "rear"]) {
+    const s = sideOf[hand];
+    if (s === active) { out.push(row(`Guard · ${hand}`, "punching", "neutral")); continue; }
+    const g = guardHeight(S.pose, f, ARM[s].w);
+    out.push(row(`Guard · ${hand}`, g ? (g.dropped ? "Dropped" : "Up") : "—", g ? (g.dropped ? "warn" : "ok") : "neutral"));
+  }
+  for (const hand of ["lead", "rear"]) {
+    const s = sideOf[hand];
+    if (s === active) { out.push(row(`Elbow · ${hand}`, "punching", "neutral")); continue; }
+    const e = elbowFlare(S.pose, f, ARM[s].s, ARM[s].e);
+    const word = e ? (e.status === "flared" ? "Flared" : e.status === "out" ? "Out" : "Tucked") : "—";
+    const cls = e ? (e.status === "flared" ? "bad" : e.status === "out" ? "warn" : "ok") : "neutral";
+    out.push(row(`Elbow · ${hand}`, e ? `${word} · ${e.flare.toFixed(2)}` : "—", cls));
   }
 
   els.frameStats.innerHTML = out.join("");
