@@ -150,6 +150,10 @@ function attachTransport() {
   }));
   const seekFromEvent = (e) => { const r = els.scrubber.getBoundingClientRect(); pause(); seek(Math.round(((e.clientX - r.left) / r.width) * (S.nFrames - 1))); };
   els.scrubber.addEventListener("click", seekFromEvent);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") { e.preventDefault(); pause(); seek(S.frame - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pause(); seek(S.frame + 1); }
+  });
 }
 
 // ---- Renderers --------------------------------------------------------------
