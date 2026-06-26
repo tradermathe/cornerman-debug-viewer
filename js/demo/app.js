@@ -160,22 +160,33 @@ function attachTransport() {
 
 function renderAll() { renderTimeline(); renderSummary(); renderDetail(); renderFrameStats(); }
 
+// Live per-frame values from the on-device rules that score continuously
+// (stance width + stance orientation). The punch-scored rules don't produce
+// per-frame arrays, so they live in the Punch detail panel instead.
 function renderFrameStats() {
-  const feet = S.analysis?.ankleOrientation?.angles?.[S.frame];
-  const conf = (j) => S.pose.conf[S.frame * 17 + j];
-  const bar = (label, j) => {
-    const c = conf(j), col = c >= 0.85 ? "var(--navy)" : c >= 0.7 ? "#D97706" : "#DC2626";
-    return `<div class="bar-row"><span class="lbl" style="width:64px;font-size:11.5px">${label}</span>
-      <div class="bar-track"><div class="bar-fill" style="width:${c * 100}%;background:${col}"></div></div>
-      <span class="val tnum" style="color:${col}">${c.toFixed(2)}</span></div>`;
-  };
-  els.frameStats.innerHTML = `
-    <div class="eyebrow">This frame</div>
-    <div class="bar-row"><span class="lbl">Feet angle</span>
-      <span class="pill neutral tnum">${feet != null ? Math.round(feet) + "°" : "—"}</span></div>
-    <div class="eyebrow" style="margin-top:10px">Tracking confidence</div>
-    ${bar("Head", 0)}${bar("Lead wrist", S.stance === "orthodox" ? 9 : 10)}
-    ${bar("Rear wrist", S.stance === "orthodox" ? 10 : 9)}${bar("Hips", 11)}`;
+  const f = S.frame, rules = S.analysis?.rules || {};
+  const row = (label, val, cls) =>
+    `<div class="bar-row"><span class="lbl" style="width:auto">${label}</span>
+       <span style="flex:1"></span><span class="pill ${cls}">${val}</span></div>`;
+  const out = [`<div class="eyebrow">This frame</div>`];
+
+  const sw = rules.stance_width;
+  if (sw && sw.validMask) {
+    const valid = sw.validMask[f] === 1;
+    const r = (sw.sepRatiosCorrected || sw.sepRatios || [])[f];
+    const narrow = sw.violationMask && sw.violationMask[f] === 1;
+    out.push(valid && r === r
+      ? row("Stance width", `${narrow ? "Narrow" : "Good"} · ${r.toFixed(2)}`, narrow ? "warn" : "ok")
+      : row("Stance width", "—", "neutral"));
+  }
+
+  const pv = rules.pivot_rate;
+  if (pv && pv.orientationAngles) {
+    const a = pv.orientationAngles[f], c = pv.orientationConfs ? pv.orientationConfs[f] : 1;
+    out.push(row("Stance angle", (a === a && c > 0.3) ? `${Math.round(a)}°` : "—", "neutral"));
+  }
+
+  els.frameStats.innerHTML = out.join("");
 }
 
 function renderTimeline() {
