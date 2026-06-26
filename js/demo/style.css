@@ -65,6 +65,14 @@
   border: 2px solid rgba(255,255,255,0.28); }
 .centerline { position: absolute; top: 8%; bottom: 8%; left: 50%; width: 0;
   border-left: 1px dashed rgba(184,92,61,0.4); }
+.punch-callout { position: absolute; top: 10px; left: 10px; display: flex; flex-direction: column;
+  gap: 6px; z-index: 4; pointer-events: none; }
+.punch-chip { display: flex; align-items: center; gap: 7px; font-family: "Barlow Condensed";
+  font-weight: 700; font-size: 14px; letter-spacing: 0.4px; text-transform: uppercase;
+  color: #ECE6D9; background: rgba(10,16,30,0.6); padding: 5px 11px; border-radius: 7px;
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+.punch-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rust); }
+.punch-chip.rear .dot { background: var(--info); }
 .frame-badge { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
   font-family: "Barlow Condensed"; font-weight: 600; font-size: 12px; color: var(--paper-deep);
   background: rgba(10,16,30,0.55); padding: 3px 9px; border-radius: 5px; letter-spacing: 0.5px; }

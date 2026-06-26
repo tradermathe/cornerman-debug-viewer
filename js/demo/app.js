@@ -47,7 +47,7 @@ function setupVideo() {
 function cacheEls() {
   const $ = (id) => document.getElementById(id);
   els = {
-    overlay: $("overlay"), film: $("film"), frameBadge: $("frameBadge"), clipName: $("clipName"), timecode: $("timecode"),
+    overlay: $("overlay"), film: $("film"), frameBadge: $("frameBadge"), punchCallout: $("punchCallout"), clipName: $("clipName"), timecode: $("timecode"),
     scrubber: $("scrubber"), scrubFill: $("scrubFill"), scrubHandle: $("scrubHandle"),
     timeline: $("timelineBody"), tlControls: $("tlControls"), tlSub: $("tlSub"),
     summary: $("summaryBody"), detail: $("detailBody"), frameStats: $("frameStats"),
@@ -62,9 +62,12 @@ function drawFilm() {
   drawSkeleton(ctx, S.pose, S.frame, {
     boneColor: "rgba(236,230,217,0.42)", boneWidth: 5, jointRadius: 7, minConf: 0.05, showImputed: false,
   });
-  // Active limb (rust) when the current frame is inside a punch window.
-  const p = detections(S).find((d) => S.frame >= d.start_frame && S.frame <= d.end_frame);
-  if (p) drawActiveLimb(ctx, p);
+  // Active limb(s) + top-left callout when the current frame is inside a punch
+  // window. Multiple overlapping punches all show.
+  const active = detections(S).filter((d) => S.frame >= d.start_frame && S.frame <= d.end_frame);
+  active.forEach((d) => drawActiveLimb(ctx, d));
+  els.punchCallout.innerHTML = active.map((d) =>
+    `<span class="punch-chip ${d.hand}"><span class="dot"></span>${cap(d.hand)} ${prettyType(d.punch_type)}</span>`).join("");
   // Low-confidence amber rings.
   for (let j = 0; j < 17; j++) {
     const c = S.pose.conf[S.frame * 17 + j];
