@@ -32,10 +32,16 @@ function setupVideo() {
   els.film.addEventListener("loadedmetadata", () => {
     // Pose data covers the tail of the video; the head is pre-round footage.
     S.videoOffsetSec = Math.max(0, els.film.duration - S.nFrames / S.fps);
+    seek(S.frame);   // position to round start as soon as the offset is known
   }, { once: true });
   els.film.addEventListener("loadeddata", () => seek(S.frame), { once: true });
   els.film.addEventListener("seeked", () => { if (!S.playing) drawFilm(); });
   els.film.addEventListener("ended", pause);
+  // Some browsers don't paint a frame until the video plays. Draw the overlay
+  // in lock-step with the first presented frame so it's aligned before any play.
+  if (els.film.requestVideoFrameCallback) {
+    els.film.requestVideoFrameCallback(() => { if (!S.playing) drawFilm(); });
+  }
 }
 
 function cacheEls() {

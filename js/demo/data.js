@@ -30,7 +30,9 @@ export async function loadLocalSession(base, round = 1) {
   const pose = await loadOnDeviceSkeleton(await fetchBlob("_skeleton.json"));
   const analysis = await loadOnDeviceAnalysis(await fetchBlob("_ondevice_analysis.json"));
   augmentDetections(analysis, pose.fps);
-  return { pose, analysis, videoUrl: `${base}/round_${round}_web.mp4`, fixture: false };
+  // ?v= busts the browser/CDN cache when the web video is re-encoded (same
+  // filename). Bump it whenever round_*_web.mp4 changes.
+  return { pose, analysis, videoUrl: `${base}/round_${round}_web.mp4?v=2`, fixture: false };
 }
 
 // Real detections carry start/end time but no impact frame; the timeline +
