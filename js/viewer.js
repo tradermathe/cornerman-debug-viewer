@@ -6,7 +6,7 @@
 // Bump this on every push so the user can tell whether the new code is
 // actually live or whether GitHub Pages / their browser is still serving
 // a cached copy. Format: YYYY-MM-DD.N where N restarts at 1 each day.
-const BUILD = "2026-06-16.24";
+const BUILD = "2026-06-27.1";
 {
   const el = document.getElementById("build-tag");
   if (el) el.textContent = `build ${BUILD}`;
@@ -45,6 +45,7 @@ const els = {
   nextFrame:   document.getElementById("next-frame"),
   playPause:   document.getElementById("play-pause"),
   muteToggle:  document.getElementById("mute-toggle"),
+  exportBtn:   document.getElementById("export-clip"),
   speedSel:    document.getElementById("speed"),
   frameLabel:  document.getElementById("frame-label"),
   scrubber:    document.getElementById("scrubber"),
@@ -1480,6 +1481,7 @@ function syncFromVideoTime(t_video) {
 
 function rvfcTick(_now, metadata) {
   syncFromVideoTime(metadata.mediaTime);
+  if (recording) compositeRecFrame();
   if (!els.video.paused) {
     playbackHandle = els.video.requestVideoFrameCallback(rvfcTick);
   }
@@ -1488,6 +1490,7 @@ function rvfcTick(_now, metadata) {
 function rafTick() {
   if (els.video.paused) { playbackHandle = null; return; }
   syncFromVideoTime(els.video.currentTime);
+  if (recording) compositeRecFrame();
   playbackHandle = requestAnimationFrame(rafTick);
 }
 
@@ -1523,6 +1526,77 @@ function toggleMute() {
 els.video.addEventListener("volumechange", () => {
   els.muteToggle.textContent = els.video.muted ? "🔇" : "🔊";
 });
+
+// ── Export: record video + current-lens overlay to a .webm ──────────────────
+// redraw() already paints the overlay canvas (skeleton + active lens) frame-
+// accurately. To export, we composite the <video> frame and that overlay onto
+// an offscreen canvas on every displayed frame during a real-time playback
+// pass (see the rvfc/raf tick hooks) and pipe it through MediaRecorder. The
+// overlay's internal resolution equals the video's, so the two layers align
+// 1:1 at native resolution.
+let recording = false;
+let recCanvas = null, recCtx = null, recorder = null, recChunks = null;
+
+function compositeRecFrame() {
+  if (!recCtx) return;
+  recCtx.drawImage(els.video,  0, 0, recCanvas.width, recCanvas.height);
+  recCtx.drawImage(els.canvas, 0, 0, recCanvas.width, recCanvas.height);
+}
+
+function pickRecMime() {
+  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+}
+
+async function exportClip() {
+  if (recording) return;
+  if (!state.pose || !els.video.src) { alert("Load a video + pose cache first."); return; }
+
+  recCanvas = document.createElement("canvas");
+  recCanvas.width  = els.video.videoWidth;
+  recCanvas.height = els.video.videoHeight;
+  recCtx = recCanvas.getContext("2d");
+
+  recChunks = [];
+  recorder = new MediaRecorder(recCanvas.captureStream(state.fps), { mimeType: pickRecMime() });
+  recorder.ondataavailable = e => { if (e.data.size) recChunks.push(e.data); };
+
+  const lensId = state.rule?.id || "raw";
+  recorder.onstop = () => {
+    const blob = new Blob(recChunks, { type: recorder.mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${lensId}_overlay.webm`;
+    a.click();
+    URL.revokeObjectURL(url);
+    recording = false;
+    els.exportBtn.disabled = false;
+    els.exportBtn.textContent = "⬇︎ Export";
+  };
+
+  // Record the whole clip at 1x from the first frame.
+  const prevRate = els.video.playbackRate;
+  els.video.playbackRate = 1;
+  els.exportBtn.disabled = true;
+  els.exportBtn.textContent = "● Recording…";
+
+  const onEnded = () => {
+    els.video.removeEventListener("ended", onEnded);
+    els.video.playbackRate = prevRate;
+    if (recorder.state !== "inactive") recorder.stop();
+  };
+  els.video.addEventListener("ended", onEnded);
+
+  seekToFrame(0);
+  await new Promise(r => els.video.addEventListener("seeked", r, { once: true }));
+  recording = true;
+  compositeRecFrame();   // seed the stream with frame 0
+  recorder.start();
+  els.video.play();
+}
+
+els.exportBtn.addEventListener("click", exportClip);
 
 // ── Scrubber hover thumbnail ────────────────────────────────────────────────
 // Hovering the scrubber should preview the frame at that timeline position
