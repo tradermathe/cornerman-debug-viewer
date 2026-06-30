@@ -24,3 +24,14 @@ export function activeDetections(state) {
 export function isStraightType(punchType) {
   return /(^|_)(jab|cross)(_|$)/i.test(punchType || "");
 }
+
+// Rotation-applicable test (cross / hook / uppercut — the punches that swing
+// the hips; jab is excluded). Like isStraightType, matches BOTH the labeler's
+// suffixed types ("cross_head", "lead_hook_head") and the on-device
+// classifier's bare types ("cross", "hook", "uppercut"). Use instead of an
+// exact `appliesTo.has(punch_type)` set, which only knows the suffixed form.
+// Note: bare types carry no head/body suffix, so this includes body hooks /
+// uppercuts that the old suffixed set excluded.
+export function isRotationApplicable(punchType) {
+  return /(^|_)(cross|hook|uppercut)(_|$)/i.test(punchType || "");
+}

@@ -37,6 +37,7 @@
 //   else                          → high
 
 import { J, torsoHeight, drawSkeleton } from "../skeleton.js";
+import { activeDetections, isRotationApplicable } from "./_detections.js";
 
 // W_est is per-VIDEO, not per-round. As the user visits more rounds of the
 // same video we take the running max so the estimate gets more accurate (the
@@ -107,14 +108,6 @@ const DEFAULTS = {
   // 0.70 sits at the knee where each new skip is still mostly catching
   // bad data, not erasing real ones.
   minValidFrac:           0.7,
-
-  // Rule only applies to punches with rotation expectation (jab + body
-  // shots excluded — matches hip_rotation.js).
-  appliesTo: new Set([
-    "cross_head", "cross_body",
-    "lead_hook_head", "lead_uppercut_head",
-    "rear_uppercut_head", "rear_hook_head",
-  ]),
 };
 
 const COLOR_HIP        = "#a78bfa";  // purple — current-frame hip line
@@ -276,8 +269,8 @@ function computeAll(state, cfg) {
   }
   const wEstFrameGap = gap[wEstFrame];
 
-  const detections = (state.labels?.detections || [])
-    .filter(d => cfg.appliesTo.has(d.punch_type));
+  const detections = (activeDetections(state) || [])
+    .filter(d => isRotationApplicable(d.punch_type));
 
   const preFrames = Math.max(0, Math.round(cfg.searchPreSec * fps));
   const postFrames = Math.max(0, Math.round(cfg.searchPostSec * fps));
@@ -416,7 +409,7 @@ function quantile(arr, q) {
 
 function rebuildPunches(state) {
   const stem = state.cacheBasename || "";
-  const dets = state.labels?.detections;
+  const dets = activeDetections(state);
   const stemChanged = stem !== lastStemForReset;
   const detsChanged = dets !== lastDetectionsRef;
   const poseChanged = state.pose !== lastPose;
@@ -857,9 +850,9 @@ function rebuildSidebar(state) {
   if (!el) return;
 
   if (!punches.length) {
-    el.innerHTML = state.labels?.detections
+    el.innerHTML = activeDetections(state)
       ? `<span class="muted">No rotation-applicable punches in this round (cross/hook/uppercut).</span>`
-      : `<span class="muted">Waiting for label data…</span>`;
+      : `<span class="muted">Waiting for punch data…</span>`;
     return;
   }
 
