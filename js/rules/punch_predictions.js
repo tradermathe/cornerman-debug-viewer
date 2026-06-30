@@ -10,10 +10,14 @@
 // limit the user signed off on ("just show what we have, I can figure out the
 // right or left").
 //
-// Pure data join: this round's straights (state.labels.detections) ⨝ the
-// temporal model's held-out per-punch predictions (predictions_axiality_*.json,
-// loaded by axiality_model.js), keyed by punch_uuid. No pose geometry — this
-// lens is only the learned model's guess against truth.
+// Data join: this round's straights ⨝ the model's per-punch axiality. Two
+// sources, in priority order:
+//   1. Sheet labels (state.labels.detections) ⨝ predictions_axiality_*.json by
+//      punch_uuid — carries direction truth, so model-vs-truth grading shows.
+//   2. Model detections (state.punches.detections) with inline `axiality` — for
+//      unlabeled videos with no sheet/sidecar; model axiality only, no truth.
+// No pose geometry — this lens is only the learned model's guess (vs truth when
+// a label exists).
 
 import { handForLabel } from "../sheet-labels.js";
 import {
@@ -24,15 +28,53 @@ import {
   axialityBucketName,
 } from "./axiality_model.js";
 
-// Straight punch labels (head + body). Matches arm_extension.js.
+// Straight punch labels (head + body). Matches arm_extension.js. The sheet uses
+// "jab_head"/"cross_head"/…; the on-device punch classifier emits bare
+// "jab"/"cross" — accept both so model-detected straights count too.
 const STRAIGHTS = new Set(["jab_head", "jab_body", "cross_head", "cross_body"]);
+function isStraight(pt) {
+  return STRAIGHTS.has(pt)
+    || (typeof pt === "string" && (pt.startsWith("jab") || pt.startsWith("cross")));
+}
+
+// Snap levels = |cos| of [90,67.5,45,22.5,0]° — to bucket an inline axiality that
+// arrives without a precomputed bucket. Mirrors AxialityFeatures.levels.
+const LEVELS = [0.0, 0.3826834323650898, 0.7071067811865476, 0.9238795325112867, 1.0];
+function bucketOf(ax) {
+  if (!Number.isFinite(ax)) return null;
+  const x = Math.max(0, Math.min(1, ax));
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < LEVELS.length; i++) {
+    const d = Math.abs(x - LEVELS[i]);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
 
 // ── module state ────────────────────────────────────────────────────────────
 let host = null;
 let videoEl = null;
 let punches = [];        // this round's straights, in time order (uuid join key carried)
 let lastLabels = null;
+let lastPunchesRef = null;
+let modelSource = false; // true when built from model detections (no sheet labels)
 let latestState = null;
+
+// Per-punch prediction: the sheet+sidecar join by uuid (carries ground truth),
+// else the inline model axiality (no truth — model-detected/unlabeled rounds).
+// Mirror of the arm_extension fallback: axialityForPunch(uuid) ?? d.axiality.
+function predFor(p) {
+  const mp = axialityForPunch(p.punch_uuid);
+  if (mp) return mp;
+  if (Number.isFinite(p.axiality)) {
+    return {
+      predAxiality: p.axiality,
+      predBucket: Number.isInteger(p.axiality_bucket) ? p.axiality_bucket : bucketOf(p.axiality),
+      gtAxiality: null, gtBucket: null, source: "inline",
+    };
+  }
+  return null;
+}
 
 // ── small helpers ─────────────────────────────────────────────────────────--
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -68,9 +110,14 @@ function agree(predB, gtB) {
 
 // ── compute ───────────────────────────────────────────────────────────────--
 function buildPunches(state) {
-  const dets = state.labels?.detections || [];
+  // Prefer sheet labels (carry direction truth); fall back to the model's own
+  // detections (state.punches) for unlabeled videos — those carry inline axiality.
+  const sheet = state.labels?.detections || [];
+  const model = state.punches?.detections || [];
+  modelSource = sheet.length === 0 && model.length > 0;
+  const dets = sheet.length ? sheet : model;
   punches = dets
-    .filter(d => STRAIGHTS.has(d.punch_type))
+    .filter(d => isStraight(d.punch_type))
     .map(d => ({
       hand: d.hand || handForLabel(d.punch_type),
       punch_type: d.punch_type,
@@ -78,13 +125,16 @@ function buildPunches(state) {
       start_frame: d.start_frame,
       end_frame: d.end_frame,
       punch_uuid: d.punch_uuid || null,  // join key to the temporal model's preds
+      axiality: d.axiality != null ? Number(d.axiality) : undefined,         // inline (model)
+      axiality_bucket: Number.isInteger(d.axiality_bucket) ? d.axiality_bucket : undefined,
     }))
     .sort((a, b) => a.start_frame - b.start_frame);
 }
 
 function recompute(state) {
-  if (state.labels === lastLabels && punches.length) return;
+  if (state.labels === lastLabels && state.punches === lastPunchesRef && punches.length) return;
   lastLabels = state.labels;
+  lastPunchesRef = state.punches;
   buildPunches(state);
 }
 
@@ -103,6 +153,11 @@ function onModelReady() {
 
 // ── status + summary ────────────────────────────────────────────────────────
 function statusHtml() {
+  if (modelSource) {
+    return `<span class="muted">No sheet labels for this round — showing the model's `
+      + `axiality on <b>${punches.length}</b> model-detected straight(s) `
+      + `(<code>*_punches.json</code>). No direction truth to grade against.</span>`;
+  }
   const err = axialityModelError();
   if (err) return `<span class="muted">temporal model: load error — ${err}</span>`;
   const m = axialityModelMeta();
@@ -130,7 +185,7 @@ function summaryHtml() {
   if (!punches.length) return "";
   let scored = 0, withGt = 0, exact = 0, pm1 = 0, sumAbsDeg = 0;
   for (const p of punches) {
-    const mp = axialityForPunch(p.punch_uuid);
+    const mp = predFor(p);
     if (!mp) continue;
     scored++;
     if (!Number.isInteger(mp.gtBucket)) continue;   // forward-inferred: no truth to grade
@@ -143,7 +198,7 @@ function summaryHtml() {
   }
   if (!scored) {
     return `<span class="muted">${punches.length} straight(s) in this round — none scored by the model `
-      + `(no pose cache for these punches).</span>`;
+      + `(no axiality for these punches).</span>`;
   }
   const unscored = punches.length - scored;
   const unscoredTxt = unscored ? ` · ${unscored} unscored` : "";
@@ -160,7 +215,7 @@ function summaryHtml() {
 function drawHud(ctx, state) {
   const p = activePunch(state.frame);
   if (!p) return;
-  const mp = axialityForPunch(p.punch_uuid);
+  const mp = predFor(p);
   const s = state.renderScale || 1;
   const lines = [
     `${p.hand || "?"} ${p.punch_type}`,
@@ -234,15 +289,16 @@ function renderSidebar(state) {
   const tbl = host.querySelector("#pp-table");
   if (!tbl) return;
   if (!punches.length) {
-    tbl.innerHTML = state.labels?.detections
-      ? `<span class="muted">No straights labeled in this round.</span>`
-      : `<span class="muted">Waiting for label data…</span>`;
+    const hasModel = (state.punches?.detections || []).length > 0;
+    tbl.innerHTML = (state.labels?.detections || hasModel)
+      ? `<span class="muted">No straights detected in this round.</span>`
+      : `<span class="muted">Waiting for label or model data…</span>`;
     return;
   }
 
   const f = state.frame;
   const rows = punches.map((p, i) => {
-    const mp = axialityForPunch(p.punch_uuid);
+    const mp = predFor(p);
     const active = f >= p.start_frame && f <= p.end_frame;
     let modelCell, truthCell, agreeCell;
     if (mp) {

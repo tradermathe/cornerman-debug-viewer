@@ -58,6 +58,12 @@ export async function loadPunches(file) {
       punch_type: d.punch_type || "?",
       category: d.category || null,           // "jab" | "cross" | "power" | null
       n_frames: Number(d.n_frames) || 0,
+      // Inline axiality from the model (AxialityV2), when the dump carries it.
+      // Lets the axiality lens score model-detected straights on unlabeled
+      // videos with no sheet/sidecar to join — same convention as the on-device
+      // path (ondevice-loader attaches d.axiality too).
+      axiality: d.axiality != null ? Number(d.axiality) : undefined,
+      axiality_bucket: Number.isInteger(d.axiality_bucket) ? d.axiality_bucket : undefined,
     };
   });
   return {
