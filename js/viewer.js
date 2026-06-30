@@ -19,6 +19,7 @@ import { fetchLiveLabels } from "./sheet-labels.js";
 import { drawSkeleton } from "./skeleton.js";
 import { RULES } from "./rules/registry.js";
 import * as drive from "./drive-folder.js";
+import { Muxer, ArrayBufferTarget } from "./vendor/mp4-muxer.mjs";
 import * as firebaseSource from "./firebase-source.js";
 import { loadOnDeviceSkeleton, loadOnDeviceAnalysis } from "./ondevice-loader.js";
 
@@ -1535,6 +1536,7 @@ els.video.addEventListener("volumechange", () => {
 // overlay's internal resolution equals the video's, so the two layers align
 // 1:1 at native resolution.
 let recording = false;
+let exporting = false;
 let recCanvas = null, recCtx = null, recorder = null, recChunks = null;
 let recStopFrame = 0, recPrevRate = 1;
 
@@ -1573,10 +1575,140 @@ function finishRecording() {
   if (recorder && recorder.state !== "inactive") recorder.stop();
 }
 
-// Record cache frames [startFrame, endFrame] at 1x, compositing video+overlay.
-function startRecording(startFrame, endFrame) {
-  if (recording) return;
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportFileName(ext) {
+  return `${state.rule?.id || "raw"}_overlay.${ext}`;
+}
+
+// ── Export entry point ──────────────────────────────────────────────────────
+// Prefer offline WebCodecs encoding (renders frame-by-frame as fast as the
+// machine allows — no real-time playback). Fall back to the real-time
+// MediaRecorder path on browsers without VideoEncoder / H.264 encode support.
+async function exportRange(startFrame, endFrame) {
+  if (recording || exporting) return;
   if (!state.pose || !els.video.src) { alert("Load a video + pose cache first."); return; }
+  const last = state.n_frames - 1;
+  startFrame = Math.max(0, Math.min(last, Math.round(startFrame)));
+  endFrame   = Math.max(startFrame, Math.min(last, Math.round(endFrame)));
+
+  const w = els.video.videoWidth, h = els.video.videoHeight;
+  const codec = await pickAvcCodec(w, h);
+  if (!("VideoEncoder" in window) || !codec) {
+    recordRangeRealtime(startFrame, endFrame);   // fallback: real-time capture
+    return;
+  }
+  try {
+    await encodeRangeOffline(startFrame, endFrame, w, h, codec);
+  } catch (err) {
+    console.error("Offline export failed, falling back to real-time:", err);
+    exporting = false;
+    recordRangeRealtime(startFrame, endFrame);
+  }
+}
+
+async function pickAvcCodec(w, h) {
+  if (!("VideoEncoder" in window) || !VideoEncoder.isConfigSupported) return null;
+  // High→Baseline, descending level, so big portrait frames still find a fit.
+  const cands = ["avc1.640034", "avc1.640033", "avc1.640032", "avc1.640028",
+                 "avc1.4D0034", "avc1.42E028", "avc1.42E01F", "avc1.42001F"];
+  for (const codec of cands) {
+    try {
+      const s = await VideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: 8e6, framerate: 30 });
+      if (s && s.supported) return codec;
+    } catch (_) { /* try next */ }
+  }
+  return null;
+}
+
+// Seek to cache frame f and resolve once the video frame + overlay are ready.
+function seekToFramePromise(f) {
+  f = Math.max(0, Math.min(state.n_frames - 1, Math.round(f)));
+  const t = (state.start_frame + f + 0.5) / state.fps;
+  state.frame = f;
+  els.scrubber.value = f;
+  return new Promise(res => {
+    if (Math.abs(els.video.currentTime - t) < 1e-6) { redraw(); res(); return; }
+    els.video.addEventListener("seeked", function once() {
+      els.video.removeEventListener("seeked", once);
+      res();   // the global seeked→redraw listener has already painted the overlay
+    }, { once: true });
+    els.video.currentTime = t;
+  });
+}
+
+async function encodeRangeOffline(startFrame, endFrame, w, h, codec) {
+  exporting = true;
+  els.exportBtn.disabled = true;
+  els.exportBtn.textContent = "Encoding…";
+
+  const fps = state.fps;
+  const out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  const octx = out.getContext("2d", { alpha: false });
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: "avc", width: w, height: h },
+    fastStart: "in-memory",
+  });
+  let encErr = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encErr = e; },
+  });
+  encoder.configure({
+    codec, width: w, height: h, framerate: fps,
+    bitrate: Math.min(20e6, Math.round(w * h * fps * 0.12)),
+  });
+
+  const prevFrame = state.frame;
+  els.video.pause();
+
+  const total = endFrame - startFrame + 1;
+  const usPerFrame = 1e6 / fps;
+  const keyEvery = Math.max(1, Math.round(fps * 2));   // keyframe ~every 2s
+  for (let i = 0; i < total; i++) {
+    if (encErr) throw encErr;
+    await seekToFramePromise(startFrame + i);
+    octx.drawImage(els.video,  0, 0, w, h);
+    octx.drawImage(els.canvas, 0, 0, w, h);
+    const frame = new VideoFrame(out, {
+      timestamp: Math.round(i * usPerFrame),
+      duration: Math.round(usPerFrame),
+    });
+    encoder.encode(frame, { keyFrame: i % keyEvery === 0 });
+    frame.close();
+    if (i % 4 === 0 || i === total - 1) {
+      els.exportBtn.textContent = `Encoding ${Math.round((i + 1) / total * 100)}%`;
+      // Yield so the UI repaints and the encoder queue drains.
+      if (encoder.encodeQueueSize > 20) await new Promise(r => setTimeout(r));
+      else await new Promise(r => requestAnimationFrame(r));
+    }
+  }
+  await encoder.flush();
+  if (encErr) throw encErr;
+  muxer.finalize();
+  encoder.close();
+
+  downloadBlob(new Blob([muxer.target.buffer], { type: "video/mp4" }), exportFileName("mp4"));
+
+  exporting = false;
+  els.exportBtn.disabled = false;
+  els.exportBtn.textContent = "⬇︎ Export";
+  seekToFrame(prevFrame);
+}
+
+// Fallback: record cache frames [startFrame, endFrame] at 1x via MediaRecorder.
+function recordRangeRealtime(startFrame, endFrame) {
+  if (recording) return;
   const last = state.n_frames - 1;
   startFrame = Math.max(0, Math.min(last, Math.round(startFrame)));
   endFrame   = Math.max(startFrame, Math.min(last, Math.round(endFrame)));
@@ -1591,16 +1723,9 @@ function startRecording(startFrame, endFrame) {
   recorder = new MediaRecorder(recCanvas.captureStream(state.fps), { mimeType: pickRecMime() });
   recorder.ondataavailable = e => { if (e.data.size) recChunks.push(e.data); };
 
-  const lensId = state.rule?.id || "raw";
   recorder.onstop = () => {
-    const blob = new Blob(recChunks, { type: recorder.mimeType });
     const ext = recorder.mimeType.includes("mp4") ? "mp4" : "webm";
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${lensId}_overlay.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(new Blob(recChunks, { type: recorder.mimeType }), exportFileName(ext));
     els.exportBtn.disabled = false;
     els.exportBtn.textContent = "⬇︎ Export";
   };
@@ -1720,14 +1845,14 @@ function buildExportDialog() {
       }
     }
     dlg.close();
-    startRecording(startFrame, endFrame);
+    exportRange(startFrame, endFrame);
   });
 
   return dlg;
 }
 
 function openExportDialog() {
-  if (recording) return;
+  if (recording || exporting) return;
   if (!state.pose || !els.video.src) { alert("Load a video + pose cache first."); return; }
   if (!exportDialog) exportDialog = buildExportDialog();
   const last = state.n_frames - 1;
