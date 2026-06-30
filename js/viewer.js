@@ -1481,7 +1481,7 @@ function syncFromVideoTime(t_video) {
 
 function rvfcTick(_now, metadata) {
   syncFromVideoTime(metadata.mediaTime);
-  if (recording) compositeRecFrame();
+  if (recording) recTick();
   if (!els.video.paused) {
     playbackHandle = els.video.requestVideoFrameCallback(rvfcTick);
   }
@@ -1490,7 +1490,7 @@ function rvfcTick(_now, metadata) {
 function rafTick() {
   if (els.video.paused) { playbackHandle = null; return; }
   syncFromVideoTime(els.video.currentTime);
-  if (recording) compositeRecFrame();
+  if (recording) recTick();
   playbackHandle = requestAnimationFrame(rafTick);
 }
 
@@ -1536,11 +1536,19 @@ els.video.addEventListener("volumechange", () => {
 // 1:1 at native resolution.
 let recording = false;
 let recCanvas = null, recCtx = null, recorder = null, recChunks = null;
+let recStopFrame = 0, recPrevRate = 1;
 
 function compositeRecFrame() {
   if (!recCtx) return;
   recCtx.drawImage(els.video,  0, 0, recCanvas.width, recCanvas.height);
   recCtx.drawImage(els.canvas, 0, 0, recCanvas.width, recCanvas.height);
+}
+
+// Called from the playback ticks while recording: grab the frame, then stop
+// once playback has reached the requested end frame.
+function recTick() {
+  compositeRecFrame();
+  if (state.frame >= recStopFrame) finishRecording();
 }
 
 function pickRecMime() {
@@ -1557,9 +1565,22 @@ function pickRecMime() {
   return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
-async function exportClip() {
+function finishRecording() {
+  if (!recording) return;
+  recording = false;
+  els.video.pause();
+  els.video.playbackRate = recPrevRate;
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+}
+
+// Record cache frames [startFrame, endFrame] at 1x, compositing video+overlay.
+function startRecording(startFrame, endFrame) {
   if (recording) return;
   if (!state.pose || !els.video.src) { alert("Load a video + pose cache first."); return; }
+  const last = state.n_frames - 1;
+  startFrame = Math.max(0, Math.min(last, Math.round(startFrame)));
+  endFrame   = Math.max(startFrame, Math.min(last, Math.round(endFrame)));
+  recStopFrame = endFrame;
 
   recCanvas = document.createElement("canvas");
   recCanvas.width  = els.video.videoWidth;
@@ -1580,33 +1601,145 @@ async function exportClip() {
     a.download = `${lensId}_overlay.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
-    recording = false;
     els.exportBtn.disabled = false;
     els.exportBtn.textContent = "⬇︎ Export";
   };
 
-  // Record the whole clip at 1x from the first frame.
-  const prevRate = els.video.playbackRate;
+  recPrevRate = els.video.playbackRate;
   els.video.playbackRate = 1;
   els.exportBtn.disabled = true;
   els.exportBtn.textContent = "● Recording…";
 
-  const onEnded = () => {
-    els.video.removeEventListener("ended", onEnded);
-    els.video.playbackRate = prevRate;
-    if (recorder.state !== "inactive") recorder.stop();
-  };
-  els.video.addEventListener("ended", onEnded);
+  // Natural end is a safety net when endFrame is the last frame.
+  els.video.addEventListener("ended", finishRecording, { once: true });
 
-  seekToFrame(0);
-  await new Promise(r => els.video.addEventListener("seeked", r, { once: true }));
-  recording = true;
-  compositeRecFrame();   // seed the stream with frame 0
-  recorder.start();
-  els.video.play();
+  seekToFrame(startFrame);
+  els.video.addEventListener("seeked", () => {
+    recording = true;
+    compositeRecFrame();   // seed the stream with the first frame
+    recorder.start();
+    els.video.play();
+  }, { once: true });
 }
 
-els.exportBtn.addEventListener("click", exportClip);
+// ── Export dialog ───────────────────────────────────────────────────────────
+// Time fields accept "m:ss(.sss)" OR plain seconds, in the same clock the frame
+// label shows (start_sec + frame/fps). "Use current" copies the scrubbed point.
+function parseTimeInput(str) {
+  const s = String(str).trim();
+  if (!s) return NaN;
+  if (s.includes(":")) {
+    const parts = s.split(":");
+    if (parts.length > 3) return NaN;
+    let v = 0;
+    for (const p of parts) {
+      const n = Number(p);
+      if (!Number.isFinite(n) || n < 0) return NaN;
+      v = v * 60 + n;
+    }
+    return v;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? n : NaN;
+}
+
+function currentVideoTime() {
+  return state.start_sec + state.frame / state.fps;
+}
+
+let exportDialog = null;
+function buildExportDialog() {
+  const dlg = document.createElement("dialog");
+  dlg.id = "export-dialog";
+  dlg.innerHTML = `
+    <form class="export-form" method="dialog">
+      <h3>Export overlay clip</h3>
+      <label class="opt">
+        <input type="radio" name="exp-range" value="whole" checked>
+        <span>Whole video <span class="muted" id="exp-whole-range"></span></span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="exp-range" value="custom">
+        <span>Custom range</span>
+      </label>
+      <div class="export-range" hidden>
+        <div class="rng-row">
+          <label for="exp-start">Start</label>
+          <input id="exp-start" type="text" placeholder="0:00" autocomplete="off">
+          <button type="button" id="exp-start-now">Use current</button>
+        </div>
+        <div class="rng-row">
+          <label for="exp-end">End</label>
+          <input id="exp-end" type="text" placeholder="1:30" autocomplete="off">
+          <button type="button" id="exp-end-now">Use current</button>
+        </div>
+        <p class="hint">Enter <code>m:ss</code> (e.g. <code>1:30</code>) or seconds (e.g. <code>90</code>).
+          Tip: scrub the video, then click <b>Use current</b>.</p>
+      </div>
+      <div class="export-err" id="exp-error"></div>
+      <div class="export-actions">
+        <button type="button" id="exp-cancel">Cancel</button>
+        <button type="button" id="exp-go" class="primary">Export</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+
+  const rangeBox = dlg.querySelector(".export-range");
+  const startIn  = dlg.querySelector("#exp-start");
+  const endIn    = dlg.querySelector("#exp-end");
+  const errEl    = dlg.querySelector("#exp-error");
+  const radios   = dlg.querySelectorAll('input[name="exp-range"]');
+  const isCustom = () => dlg.querySelector('input[name="exp-range"]:checked').value === "custom";
+
+  radios.forEach(r => r.addEventListener("change", () => {
+    rangeBox.hidden = !isCustom();
+    errEl.textContent = "";
+  }));
+  dlg.querySelector("#exp-start-now").addEventListener("click", () => {
+    startIn.value = fmtClock(currentVideoTime());
+  });
+  dlg.querySelector("#exp-end-now").addEventListener("click", () => {
+    endIn.value = fmtClock(currentVideoTime());
+  });
+  dlg.querySelector("#exp-cancel").addEventListener("click", () => dlg.close());
+
+  dlg.querySelector("#exp-go").addEventListener("click", () => {
+    const last = state.n_frames - 1;
+    let startFrame = 0, endFrame = last;
+    if (isCustom()) {
+      const ts = parseTimeInput(startIn.value);
+      const te = parseTimeInput(endIn.value);
+      if (Number.isNaN(ts) || Number.isNaN(te)) {
+        errEl.textContent = "Enter both times as m:ss or seconds."; return;
+      }
+      if (te <= ts) { errEl.textContent = "End must be after start."; return; }
+      startFrame = Math.round((ts - state.start_sec) * state.fps);
+      endFrame   = Math.round((te - state.start_sec) * state.fps);
+      if (endFrame < 0 || startFrame > last) {
+        errEl.textContent = "That range is outside this clip."; return;
+      }
+    }
+    dlg.close();
+    startRecording(startFrame, endFrame);
+  });
+
+  return dlg;
+}
+
+function openExportDialog() {
+  if (recording) return;
+  if (!state.pose || !els.video.src) { alert("Load a video + pose cache first."); return; }
+  if (!exportDialog) exportDialog = buildExportDialog();
+  const last = state.n_frames - 1;
+  exportDialog.querySelector("#exp-whole-range").textContent =
+    `(${fmtClock(state.start_sec)} – ${fmtClock(state.start_sec + last / state.fps)})`;
+  exportDialog.querySelector("#exp-error").textContent = "";
+  exportDialog.querySelector('input[name="exp-range"][value="whole"]').checked = true;
+  exportDialog.querySelector(".export-range").hidden = true;
+  exportDialog.showModal();
+}
+
+els.exportBtn.addEventListener("click", openExportDialog);
 
 // ── Scrubber hover thumbnail ────────────────────────────────────────────────
 // Hovering the scrubber should preview the frame at that timeline position

@@ -497,3 +497,51 @@ header .sub { margin: 4px 0 0; color: var(--fg-muted); font-size: 13px; }
   .layout { grid-template-columns: 1fr; }
   #side { position: static; max-height: none; }
 }
+
+/* ── Export dialog ──────────────────────────────────────────────────────── */
+#export-dialog {
+  background: var(--bg-card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0;
+  width: min(420px, 92vw);
+  box-shadow: 0 12px 40px rgba(0,0,0,.5);
+}
+#export-dialog::backdrop { background: rgba(0,0,0,.55); }
+#export-dialog .export-form { padding: 18px 20px; margin: 0; }
+#export-dialog h3 { margin: 0 0 14px; font-size: 16px; }
+#export-dialog .opt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 7px;
+  margin-bottom: 8px; cursor: pointer;
+}
+#export-dialog .opt:has(input:checked) { border-color: var(--accent); background: var(--bg-elev); }
+#export-dialog .opt .muted { color: var(--fg-muted); font-size: 13px; }
+#export-dialog .export-range { padding: 4px 2px 0 30px; }
+#export-dialog .export-range[hidden] { display: none; }
+#export-dialog .rng-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+#export-dialog .rng-row label { width: 42px; color: var(--fg-muted); }
+#export-dialog .rng-row input {
+  flex: 1; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font: inherit;
+}
+#export-dialog .rng-row input:focus { outline: none; border-color: var(--accent); }
+#export-dialog .rng-row button {
+  background: var(--bg-elev); color: var(--fg-muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; white-space: nowrap;
+}
+#export-dialog .rng-row button:hover { color: var(--fg); border-color: #3a4250; }
+#export-dialog .hint { color: var(--fg-muted); font-size: 12px; margin: 6px 0 0; line-height: 1.5; }
+#export-dialog .hint code {
+  background: var(--bg); border: 1px solid var(--border-soft);
+  border-radius: 4px; padding: 0 4px; color: var(--fg);
+}
+#export-dialog .export-err { color: #ff8a8a; font-size: 13px; min-height: 18px; margin: 10px 0 0; }
+#export-dialog .export-actions { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0 0; padding: 0; }
+#export-dialog .export-actions button {
+  background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 16px; font: inherit; cursor: pointer;
+}
+#export-dialog .export-actions button:hover { border-color: #3a4250; }
+#export-dialog .export-actions button.primary { background: var(--accent); color: #06121d; border-color: var(--accent); font-weight: 600; }
