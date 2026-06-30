@@ -1544,7 +1544,16 @@ function compositeRecFrame() {
 }
 
 function pickRecMime() {
-  const types = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  // Prefer mp4 — Safari (and recent Chrome) record H.264 mp4 directly. Fall
+  // back to webm on browsers that can't. The download extension follows the
+  // mime actually chosen (see recorder.onstop).
+  const types = [
+    "video/mp4;codecs=avc1",
+    "video/mp4",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
   return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
@@ -1564,10 +1573,11 @@ async function exportClip() {
   const lensId = state.rule?.id || "raw";
   recorder.onstop = () => {
     const blob = new Blob(recChunks, { type: recorder.mimeType });
+    const ext = recorder.mimeType.includes("mp4") ? "mp4" : "webm";
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${lensId}_overlay.webm`;
+    a.download = `${lensId}_overlay.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
     recording = false;
