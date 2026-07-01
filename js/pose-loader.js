@@ -93,18 +93,29 @@ async function loadNpy(npyFile, metaFile, videoSize) {
   const w = videoSize?.width || meta.width || 1;
   const h = videoSize?.height || meta.height || 1;
 
-  // Detect normalised (0..1) vs pixel coords by probing the first ~20 frames.
-  // The cached files are normalised; the check is cheap insurance.
-  let maxXY = 0;
-  const probeFrames = Math.min(20, n_frames);
+  // Detect normalised (0..1) vs pixel coords. BlazePose emits out-of-frame
+  // extrapolations (|coord| up to ~3) that a max-based probe misreads as pixel
+  // coords — one such value in the probe window flips the verdict and collapses
+  // the whole skeleton to the origin (was the "IMG_6743 shows no skeleton" bug).
+  // Use the MEDIAN of the finite |x|,|y|: normalised poses cluster in [0,1]
+  // (median well under 1.5) while pixel caches sit in the hundreds, so sparse
+  // extrapolations can't flip it. Probe a wider window since leading frames are
+  // often undetected (all-NaN).
+  const probeFrames = Math.min(60, n_frames);
+  const mags = [];
   for (let f = 0; f < probeFrames; f++) {
     for (let j = 0; j < N_JOINTS; j++) {
       const b = srcBase(f, j);
-      if (data[b]   > maxXY) maxXY = data[b];
-      if (data[b+1] > maxXY) maxXY = data[b+1];
+      const x = data[b], y = data[b + 1];
+      if (x === x) mags.push(Math.abs(x));   // `x === x` is false only for NaN
+      if (y === y) mags.push(Math.abs(y));
     }
   }
-  const normalised = maxXY <= 1.5;
+  let normalised = true;
+  if (mags.length) {
+    mags.sort((a, b) => a - b);
+    normalised = mags[mags.length >> 1] <= 1.5;   // median magnitude, outlier-proof
+  }
   const sx = normalised ? w : 1;
   const sy = normalised ? h : 1;
 
